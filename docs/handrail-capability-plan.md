@@ -3,7 +3,8 @@
 The recommended long-term platform feature is an `erp_financials` Handrail
 capability. The capability should install, configure, validate, and operate this
 package in a host app. It should not be the only place financial calculations
-exist.
+exist. The current package APIs and operator path are documented in
+[host-app-install.md](host-app-install.md).
 
 ## Capability Role
 
@@ -86,11 +87,15 @@ The capability should be able to produce a deterministic install plan:
 
 1. Confirm host app has a supported database.
 2. Confirm this package is installed at a compatible version.
-3. Confirm required migrations are present or can be generated.
+3. Confirm required migrations are present or can be generated from
+   `POSTGRES_CANONICAL_SCHEMA_MANIFEST` / `renderPostgresSchemaSql`.
 4. Register scheduled rollup, late-arrival, freshness, and prune jobs.
-5. Validate canonical tables and indexes.
-6. Run deterministic fixtures.
-7. Report missing provider adapters or source capabilities.
+5. Validate canonical tables, indexes, and constraints with
+   `createPostgresStorageAdapter(...).validateSchema()`.
+6. Run deterministic fixtures with `ERP_FINANCIALS_STATEMENT_FIXTURE` and the
+   exported report builders.
+7. Report missing provider adapters or source capabilities without requiring
+   QuickBooks for native-only apps.
 
 ## Migration Strategy
 
@@ -110,11 +115,16 @@ The migration source of truth should remain versioned and testable.
 
 Recommended jobs:
 
-- `erp-financials-rollup`
-- `erp-financials-late-arrival-reprocess`
-- `erp-financials-snapshot-refresh`
-- `erp-financials-freshness-reconcile`
-- `erp-financials-retention-prune`
+- `erp-financials-rollup`: call `buildRollupBuckets` and persist with
+  `writeRollupBuckets`.
+- `erp-financials-late-arrival-reprocess`: call `planLateArrivalReprocess`,
+  replace affected windows, and mark affected snapshots stale.
+- `erp-financials-snapshot-refresh`: rebuild package-owned reports and persist
+  them with `writeReportSnapshot`.
+- `erp-financials-freshness-reconcile`: call `reconcileReportFreshness` or
+  `createSnapshotRefreshContract` and persist freshness rows.
+- `erp-financials-retention-prune`: prune only explicitly transient host-owned
+  import or job data.
 
 Jobs should write compact summaries only. Durable report facts belong in
 rollup, snapshot, and freshness tables, not job result JSON.
@@ -124,14 +134,20 @@ rollup, snapshot, and freshness tables, not job result JSON.
 Validation should check:
 
 - package version compatibility
+- manifest version compatibility
 - tables and indexes exist
 - constraints are present
-- rollup jobs are registered
+- no credential-like columns exist in financial tables
+- rollup jobs are registered for configured grains
 - freshness rows are writable
-- fixtures produce expected totals
+- fixtures produce expected totals through package report builders
 - drilldown refs resolve
 - provider source adapters are configured
 - no provider credentials are stored in app financial tables
+
+These checks should validate the package implementation. They should not
+reimplement P&L, balance sheet, trial balance, or cash-flow formulas inside
+Handrail platform code.
 
 ## Relationship to QuickBooks Capability
 
@@ -154,3 +170,10 @@ Validation should check:
 
 An ERP app may use both, but native-only apps should be able to use
 `erp_financials` without `quickbooks`.
+
+When QuickBooks is present, host app code should consume the Handrail
+QuickBooks SDK/runtime contract (`HANDRAIL_QBO_SERVICE_ENV`,
+`HANDRAIL_QBO_PROVIDER_MODE`, `HANDRAIL_QBO_API_KEY`, and
+`HANDRAIL_QBO_TENANT_ID`) through `@handrail/sdk-node` helpers. ERP Financials
+must not define new QuickBooks credential env vars or store Intuit access or
+refresh tokens.
