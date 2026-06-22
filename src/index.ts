@@ -88,6 +88,15 @@ export {
   buildTrialBalanceReport
 } from "./report-builders.js";
 export {
+  STANDARD_REPORT_ACCOUNTING_METHODS,
+  STANDARD_REPORT_COMPARISON_CALCULATION_OPTIONS,
+  STANDARD_REPORT_COMPARE_TO_PERIOD_OPTIONS,
+  STANDARD_REPORT_DISPLAY_COLUMNS_BY_OPTIONS,
+  assertStandardReportAccountingMethod,
+  assertStandardReportControlsSupported,
+  buildStandardReportPresentation
+} from "./report-controls.js";
+export {
   buildLateArrivalReprocessExecutionContract,
   buildScheduledRollupJobResult,
   buildRollupBuckets,
@@ -180,6 +189,21 @@ export type {
   TransactionStatus,
   CompactDrilldownRefInput
 } from "./canonical-model.js";
+export type {
+  StandardReportAccountingMethod,
+  StandardReportColumnKind,
+  StandardReportComparisonCalculation,
+  StandardReportCompareToPeriod,
+  StandardReportCompareToRequest,
+  StandardReportControlOption,
+  StandardReportDisplayColumnsBy,
+  StandardReportPresentation,
+  StandardReportPresentationCell,
+  StandardReportPresentationColumn,
+  StandardReportPresentationRequest,
+  StandardReportPresentationRow,
+  StandardReportPresentationRowKind
+} from "./report-controls.js";
 export type {
   ExcludedCapability,
   KernelCapability,
