@@ -6,8 +6,10 @@ export {
 export {
   DEFAULT_JSON_REF_MAX_BYTES,
   DEFAULT_DRILLDOWN_INLINE_POSTING_LIMIT,
+  DEFAULT_DRILLDOWN_INLINE_SOURCE_REF_LIMIT,
   assertLedgerPostingAmounts,
   assertNoCredentialKeys,
+  assertSafeDrilldownRef,
   assertSafeSourcePayloadRef,
   canonicalSourceIdentityKey,
   createCompactDrilldownRef,
@@ -24,13 +26,61 @@ export {
   installPostgresSchema,
   validatePostgresSchema
 } from "./postgres-storage.js";
+export { checkErpFinancialsInstallHealth } from "./install-health.js";
+export { runErpFinancialsFixtureSmokeHealth } from "./fixture-smoke-health.js";
+export { checkErpFinancialsFreshnessAndDrilldownHealth } from "./health-checks.js";
 export {
+  FUTURE_ERP_CANONICAL_SCHEMA_PREFLIGHT_ERROR_CODE,
+  FutureErpCanonicalSchemaPreflightError,
+  toFutureErpCanonicalSchemaPreflightFailure,
+  validateFutureErpCanonicalSchemaPreflight
+} from "./future-erp-preflight.js";
+export {
+  createFutureErpCanonicalFactPersistenceWorker,
+  persistFutureErpCanonicalFacts
+} from "./future-erp-persistence.js";
+export { createFutureErpRollupAndLateArrivalWorker } from "./future-erp-rollup-workers.js";
+export { createFutureErpSnapshotRefreshAndFreshnessWorker } from "./future-erp-snapshot-workers.js";
+export {
+  buildFutureErpReportFromCanonicalReadModel,
+  fetchFutureErpQuickBooksProviderReportParitySnapshot
+} from "./future-erp-reporting.js";
+export {
+  createFutureErpQuickBooksFullSyncWorker,
+  mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts
+} from "./future-erp-quickbooks-full-sync.js";
+export {
+  createFutureErpQuickBooksIncrementalSyncWorker,
+  mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts
+} from "./future-erp-quickbooks-incremental-sync.js";
+export {
+  generateFutureErpCanonicalReportSnapshotsFromImport,
+  runFutureErpQuickBooksSandboxReplay
+} from "./future-erp-sandbox-replay.js";
+export {
+  buildFutureErpQuickBooksSandboxSyncOwnerEvidence,
+  FutureErpQuickBooksSandboxSyncWorkerPreflightError,
+  createFutureErpQuickBooksSandboxSyncWorker,
+  preflightFutureErpQuickBooksSandboxSync
+} from "./future-erp-sandbox-sync-worker.js";
+export {
+  createFutureErpInstallHealthPreflightWorker,
+  preflightFutureErpInstallHealth
+} from "./future-erp-install-health-preflight.js";
+export {
+  handrailQuickBooksSdkResourcesSourceAdapter,
+  mapHandrailQuickBooksSdkResourcesToCanonicalFacts,
+  mapHandrailQuickBooksSdkResourcesToJournalEntryInput,
   mapNativeLedgerToCanonicalFacts,
   mapQuickBooksJournalEntriesToCanonicalFacts,
   nativeLedgerSourceAdapter,
   quickBooksJournalEntrySourceAdapter
 } from "./source-adapters.js";
-export { ERP_FINANCIALS_STATEMENT_FIXTURE } from "./fixtures.js";
+export {
+  ERP_FINANCIALS_NORMALIZED_QUICKBOOKS_SYNC_FIXTURES,
+  ERP_FINANCIALS_QUICKBOOKS_ADAPTER_FIXTURE,
+  ERP_FINANCIALS_STATEMENT_FIXTURE
+} from "./fixtures.js";
 export {
   buildBalanceSheetReport,
   buildCashFlowReport,
@@ -38,11 +88,34 @@ export {
   buildTrialBalanceReport
 } from "./report-builders.js";
 export {
+  buildLateArrivalReprocessExecutionContract,
+  buildScheduledRollupJobResult,
   buildRollupBuckets,
   createSnapshotRefreshContract,
+  executeSnapshotRefresh,
+  executeLateArrivalReprocess,
   planLateArrivalReprocess,
   reconcileReportFreshness
 } from "./rollup-jobs.js";
+export {
+  HandrailQuickBooksSyncClient,
+  buildQuickBooksBalanceSheetReconciliationEvidence,
+  buildQuickBooksServiceHealthProbeResponse,
+  buildQuickBooksProfitAndLossReconciliationEvidence,
+  buildQuickBooksProviderReportReconciliationEvidence,
+  buildQuickBooksTrialBalanceReconciliationEvidence,
+  buildNormalizedQuickBooksFullSyncResponse,
+  buildNormalizedQuickBooksIncrementalSyncResponse,
+  buildNormalizedQuickBooksProviderReportResponse,
+  buildUnavailableQuickBooksProviderReportResponse,
+  buildUnsupportedQuickBooksCashFlowParityReportResponse,
+  createHandrailQuickBooksFullSyncServiceHandler,
+  createHandrailQuickBooksSyncClient
+} from "./quickbooks-sync-service.js";
+export {
+  adaptNormalizedQuickBooksResourceSetToAdapterInput,
+  createQuickBooksContractSmokeHarness
+} from "./quickbooks-contract-smoke.js";
 
 export type {
   Account,
@@ -55,6 +128,7 @@ export type {
   AccountingSourceStatus,
   AccountingSourceSystem,
   AccountingTransaction,
+  AccountId,
   CompanyId,
   CursorKind,
   DecimalString,
@@ -124,6 +198,9 @@ export type {
   FixtureLoadResult,
   InstallPostgresSchemaOptions,
   InstallPostgresSchemaResult,
+  LoadReportBuilderInput,
+  LoadReportSnapshotInput,
+  LoadRollupBucketsInput,
   MarkReportSnapshotsStaleInput,
   MarkReportSnapshotsStaleForPostingChangesInput,
   PostgresQueryClient,
@@ -137,9 +214,289 @@ export type {
   ReportFreshnessRow,
   RollupBucket,
   RollupBucketGrain,
-  RollupReprocessWindow
+  RollupReprocessWindow,
+  StoredReportSnapshot
 } from "./postgres-storage.js";
-export type { StatementFixtureSet } from "./fixtures.js";
+export type {
+  ErpFinancialsInstallHealthCheck,
+  ErpFinancialsInstallHealthCheckStatus,
+  ErpFinancialsInstallHealthIssue,
+  ErpFinancialsInstallHealthIssueKind,
+  ErpFinancialsInstallHealthIssueSummary,
+  ErpFinancialsInstallHealthOptions,
+  ErpFinancialsInstallHealthResult,
+  ErpFinancialsInstallHealthSchema,
+  ErpFinancialsInstallHealthStatus
+} from "./install-health.js";
+export type {
+  ErpFinancialsFixtureSmokeHealthOptions,
+  ErpFinancialsFixtureSmokeHealthResult,
+  ErpFinancialsFixtureSmokeHealthStatus,
+  ErpFinancialsFixtureSmokeIssue,
+  ErpFinancialsFixtureSmokeIssueKind,
+  ErpFinancialsFixtureSmokeReportStatus,
+  ErpFinancialsFixtureSmokeReportSummary,
+  ErpFinancialsFixtureSmokeRowCounts,
+  ErpFinancialsFixtureSmokeStorageHooks,
+  ErpFinancialsFixtureSmokeStorageMode
+} from "./fixture-smoke-health.js";
+export type {
+  ErpFinancialsDrilldownHealthSample,
+  ErpFinancialsDrilldownHealthSummary,
+  ErpFinancialsFreshnessDrilldownHealthCheck,
+  ErpFinancialsFreshnessDrilldownHealthCheckStatus,
+  ErpFinancialsFreshnessDrilldownHealthOptions,
+  ErpFinancialsFreshnessDrilldownHealthResult,
+  ErpFinancialsFreshnessDrilldownHealthStatus,
+  ErpFinancialsFreshnessHealthSummary,
+  ErpFinancialsHealthFreshnessCombination,
+  ErpFinancialsHealthIssue,
+  ErpFinancialsHealthIssueKind
+} from "./health-checks.js";
+export type {
+  FutureErpCanonicalSchemaPreflightFailure,
+  FutureErpCanonicalSchemaPreflightOptions,
+  FutureErpCanonicalSchemaPreflightResult
+} from "./future-erp-preflight.js";
+export type {
+  FutureErpCanonicalFactPersistenceResult,
+  FutureErpCanonicalFactPersistenceStorage,
+  FutureErpCanonicalFactPersistenceWorker
+} from "./future-erp-persistence.js";
+export type {
+  FutureErpLateArrivalWorkerRequest,
+  FutureErpRollupAndLateArrivalWorker,
+  FutureErpRollupAndLateArrivalWorkerOptions,
+  FutureErpRollupWorkerPostingReader,
+  FutureErpRollupWorkerStorage,
+  FutureErpScheduledRollupWorkerRequest,
+  FutureErpScheduledRollupWorkerResult,
+  FutureErpWorkerScope
+} from "./future-erp-rollup-workers.js";
+export type {
+  FutureErpFreshnessReconciliationWorkerRequest,
+  FutureErpFreshnessReconciliationWorkerResult,
+  FutureErpSnapshotRefreshAndFreshnessWorker,
+  FutureErpSnapshotRefreshAndFreshnessWorkerOptions,
+  FutureErpSnapshotRefreshWorkerStorage,
+  FutureErpSnapshotWorkerScope,
+  FutureErpStaleSnapshotRefreshWorkerRequest
+} from "./future-erp-snapshot-workers.js";
+export type {
+  FutureErpCanonicalReportGenerationRequest,
+  FutureErpCanonicalReportGenerationResult,
+  FutureErpCanonicalReportReadModelStorage,
+  FutureErpCanonicalReportSnapshotStorage,
+  FutureErpReportDrilldownSurface,
+  FutureErpReportDrilldownSurfaceEntry,
+  FutureErpReportReconciliationDrilldownSurface,
+  FutureErpTenantReadAccess,
+  FutureErpQuickBooksProviderReportParityClient,
+  FutureErpQuickBooksProviderReportParityDelta,
+  FutureErpQuickBooksProviderReportParityRequest,
+  FutureErpQuickBooksProviderReportParityResult,
+  FutureErpQuickBooksProviderReportParitySnapshot,
+  FutureErpQuickBooksProviderReportParityStatus
+} from "./future-erp-reporting.js";
+export type {
+  FutureErpQuickBooksFullSyncClient,
+  FutureErpQuickBooksFullSyncContextOptions,
+  FutureErpQuickBooksFullSyncMapOptions,
+  FutureErpQuickBooksFullSyncMapResult,
+  FutureErpQuickBooksFullSyncPersistence,
+  FutureErpQuickBooksFullSyncRunResult,
+  FutureErpQuickBooksFullSyncWorker,
+  FutureErpQuickBooksFullSyncWorkerOptions
+} from "./future-erp-quickbooks-full-sync.js";
+export type {
+  FutureErpQuickBooksChangedResourceAction,
+  FutureErpQuickBooksIncrementalSyncClient,
+  FutureErpQuickBooksIncrementalSyncContextOptions,
+  FutureErpQuickBooksIncrementalSyncMapOptions,
+  FutureErpQuickBooksIncrementalSyncMapResult,
+  FutureErpQuickBooksIncrementalSyncPersistence,
+  FutureErpQuickBooksIncrementalSyncRunResult,
+  FutureErpQuickBooksIncrementalSyncWorker,
+  FutureErpQuickBooksIncrementalSyncWorkerOptions
+} from "./future-erp-quickbooks-incremental-sync.js";
+export type {
+  FutureErpCanonicalReportSnapshotGenerationOptions,
+  FutureErpCanonicalReportSnapshotGenerationResult,
+  FutureErpQuickBooksSandboxReplayCanonicalRowCounts,
+  FutureErpQuickBooksSandboxReplayCheckpointSummary,
+  FutureErpQuickBooksSandboxReplayClient,
+  FutureErpQuickBooksSandboxReplayDrilldownRef,
+  FutureErpQuickBooksSandboxReplayImportBatchSummary,
+  FutureErpQuickBooksSandboxReplayOptions,
+  FutureErpQuickBooksSandboxReplayParityReportResult,
+  FutureErpQuickBooksSandboxReplayReportResult,
+  FutureErpQuickBooksSandboxReplayReportStatus,
+  FutureErpQuickBooksSandboxReplayResult,
+  FutureErpQuickBooksSandboxReplaySafeDrilldownRefs,
+  FutureErpQuickBooksSandboxReplaySafeSourceIdentityMetadata
+} from "./future-erp-sandbox-replay.js";
+export type {
+  FutureErpQuickBooksSandboxSyncWorker,
+  FutureErpQuickBooksSandboxSyncWorkerCanonicalCounts,
+  FutureErpQuickBooksSandboxSyncWorkerCheckpointSummary,
+  FutureErpQuickBooksSandboxSyncWorkerClient,
+  FutureErpQuickBooksSandboxSyncWorkerEnvironment,
+  FutureErpQuickBooksSandboxSyncWorkerImportBatchSummary,
+  FutureErpQuickBooksSandboxSyncWorkerMode,
+  FutureErpQuickBooksSandboxSyncOwnerEvidence,
+  FutureErpQuickBooksSandboxSyncOwnerEvidenceStatus,
+  FutureErpQuickBooksSandboxSyncWorkerOptions,
+  FutureErpQuickBooksSandboxSyncWorkerPreflightCheck,
+  FutureErpQuickBooksSandboxSyncWorkerPreflightCheckStatus,
+  FutureErpQuickBooksSandboxSyncWorkerPreflightProbeRequest,
+  FutureErpQuickBooksSandboxSyncWorkerPreflightProbeResult,
+  FutureErpQuickBooksSandboxSyncWorkerPreflightResult,
+  FutureErpQuickBooksSandboxSyncWorkerPreflightStatus,
+  FutureErpQuickBooksSandboxSyncWorkerRequest,
+  FutureErpQuickBooksSandboxSyncWorkerRunResult
+} from "./future-erp-sandbox-sync-worker.js";
+export type {
+  FutureErpInstallHealthPreflightCheck,
+  FutureErpInstallHealthPreflightCheckName,
+  FutureErpInstallHealthPreflightCheckStatus,
+  FutureErpInstallHealthPreflightEnvironment,
+  FutureErpInstallHealthPreflightFixtureSmokeSummary,
+  FutureErpInstallHealthPreflightInstallSummary,
+  FutureErpInstallHealthPreflightIssue,
+  FutureErpInstallHealthPreflightIssueKind,
+  FutureErpInstallHealthPreflightIssueSeverity,
+  FutureErpInstallHealthPreflightOptions,
+  FutureErpInstallHealthPreflightResult,
+  FutureErpInstallHealthPreflightStatus,
+  FutureErpInstallHealthPreflightWorker
+} from "./future-erp-install-health-preflight.js";
+export type {
+  NormalizedQuickBooksProviderReportFixtureSet,
+  NormalizedQuickBooksReconciliationDifferenceFixtureSet,
+  NormalizedQuickBooksServiceHealthFixture,
+  NormalizedQuickBooksServiceHealthFixtureSet,
+  NormalizedQuickBooksSyncFixtureSet,
+  ProviderReportReconciliationEvidence,
+  ProviderReportTotalComparison,
+  QuickBooksAdapterFixtureSet,
+  StatementFixtureSet
+} from "./fixtures.js";
+export type {
+  QuickBooksContractSmokeHarnessOptions,
+  QuickBooksContractSmokeHarnessResult,
+  QuickBooksContractSmokeReportTotals,
+  QuickBooksContractSmokeSnapshot
+} from "./quickbooks-contract-smoke.js";
+export type {
+  NormalizedAccountingBackfillSyncRequestEnvelope,
+  NormalizedAccountingBackfillSyncResponseEnvelope,
+  NormalizedAccountingBackfillWindow,
+  NormalizedAccountingCheckpointResumeRequestEnvelope,
+  NormalizedAccountingFullSyncRequestEnvelope,
+  NormalizedAccountingFullSyncResponseEnvelope,
+  NormalizedAccountingImportBatchMetadata,
+  NormalizedAccountingIncrementalSyncRequestEnvelope,
+  NormalizedAccountingIncrementalSyncResponseEnvelope,
+  NormalizedAccountingPageRequest,
+  NormalizedAccountingPageResponse,
+  NormalizedAccountingPaginationRequestEnvelope,
+  NormalizedAccountingPaginationResponseEnvelope,
+  NormalizedAccountingReconciliationEvidence,
+  NormalizedAccountingReconciliationTotal,
+  NormalizedAccountingReprocessSyncRequestEnvelope,
+  NormalizedAccountingReprocessSyncResponseEnvelope,
+  NormalizedAccountingResourceCounts,
+  NormalizedAccountingSafeSourceRef,
+  NormalizedAccountingSourceIdentity,
+  NormalizedAccountingSyncCursor,
+  NormalizedAccountingSyncCheckpointMetadata,
+  NormalizedAccountingSyncEnvelopeFields,
+  NormalizedAccountingSyncIdempotencyKeys,
+  NormalizedAccountingSyncIssue,
+  NormalizedAccountingSyncIssueSeverity,
+  NormalizedAccountingSyncIssueSummary,
+  NormalizedAccountingSyncMode,
+  NormalizedAccountingSyncRequestEnvelope,
+  NormalizedAccountingSyncResourceAction,
+  NormalizedAccountingSyncResponseEnvelope,
+  NormalizedAccountingSyncResponseStatus,
+  NormalizedQuickBooksAccount,
+  NormalizedQuickBooksAccountResource,
+  NormalizedQuickBooksBackfillSyncRequestEnvelope,
+  NormalizedQuickBooksBackfillSyncResponseEnvelope,
+  NormalizedQuickBooksBalanceSheetReportRequestEnvelope,
+  NormalizedQuickBooksBalanceSheetReportResponseEnvelope,
+  NormalizedQuickBooksCashFlowParityReportRequestEnvelope,
+  NormalizedQuickBooksCashFlowParityReportResponseEnvelope,
+  NormalizedQuickBooksCheckpointResumeRequestEnvelope,
+  NormalizedQuickBooksClassRef,
+  NormalizedQuickBooksClassResource,
+  NormalizedQuickBooksCompanyInfo,
+  NormalizedQuickBooksCompanyInfoResource,
+  NormalizedQuickBooksCustomerRef,
+  NormalizedQuickBooksCustomerResource,
+  NormalizedQuickBooksDepartmentRef,
+  NormalizedQuickBooksDepartmentResource,
+  NormalizedQuickBooksDimension,
+  NormalizedQuickBooksDimensionRef,
+  NormalizedQuickBooksDimensionResource,
+  NormalizedQuickBooksFullSyncRequestEnvelope,
+  NormalizedQuickBooksFullSyncResponseEnvelope,
+  NormalizedQuickBooksIncrementalSyncRequestEnvelope,
+  NormalizedQuickBooksIncrementalSyncResponseEnvelope,
+  NormalizedQuickBooksCanonicalReportTotal,
+  NormalizedQuickBooksItem,
+  NormalizedQuickBooksItemRef,
+  NormalizedQuickBooksItemResource,
+  NormalizedQuickBooksLedgerEntry,
+  NormalizedQuickBooksLedgerEntryResource,
+  NormalizedQuickBooksLedgerLine,
+  NormalizedQuickBooksLedgerPosting,
+  NormalizedQuickBooksLedgerPostingResource,
+  NormalizedQuickBooksLedgerTransaction,
+  NormalizedQuickBooksLedgerTransactionResource,
+  NormalizedQuickBooksPaginationRequestEnvelope,
+  NormalizedQuickBooksPaginationResponseEnvelope,
+  NormalizedQuickBooksParty,
+  NormalizedQuickBooksPartyRef,
+  NormalizedQuickBooksPartyResource,
+  NormalizedQuickBooksProviderEnvironment,
+  NormalizedQuickBooksProfitAndLossReportRequestEnvelope,
+  NormalizedQuickBooksProfitAndLossReportResponseEnvelope,
+  NormalizedQuickBooksProviderReportName,
+  NormalizedQuickBooksProviderReportRef,
+  NormalizedQuickBooksProviderReportRequestEnvelope,
+  NormalizedQuickBooksProviderReportResponseEnvelope,
+  NormalizedQuickBooksProviderReportResult,
+  NormalizedQuickBooksProviderReportSupportStatus,
+  NormalizedQuickBooksProviderReportTotal,
+  NormalizedQuickBooksProviderReportUnsupportedReason,
+  NormalizedQuickBooksRef,
+  NormalizedQuickBooksResourceEnvelope,
+  NormalizedQuickBooksResourceSet,
+  NormalizedQuickBooksReprocessSyncRequestEnvelope,
+  NormalizedQuickBooksReprocessSyncResponseEnvelope,
+  NormalizedQuickBooksServiceAvailability,
+  NormalizedQuickBooksServiceEnvironment,
+  NormalizedQuickBooksServiceHealthCapabilities,
+  NormalizedQuickBooksServiceHealthCapability,
+  NormalizedQuickBooksServiceHealthCapabilityStatus,
+  NormalizedQuickBooksServiceHealthCheckpoint,
+  NormalizedQuickBooksServiceHealthCheckpointStatus,
+  NormalizedQuickBooksServiceHealthIssue,
+  NormalizedQuickBooksServiceHealthIssueSeverity,
+  NormalizedQuickBooksServiceHealthProbeRequest,
+  NormalizedQuickBooksServiceHealthProbeResponseEnvelope,
+  NormalizedQuickBooksServiceHealthStatus,
+  NormalizedQuickBooksSourceIdentity,
+  NormalizedQuickBooksSyncRequestEnvelope,
+  NormalizedQuickBooksSyncResourceSet,
+  NormalizedQuickBooksSyncResponseEnvelope,
+  NormalizedQuickBooksTrialBalanceReportRequestEnvelope,
+  NormalizedQuickBooksTrialBalanceReportResponseEnvelope,
+  NormalizedQuickBooksVendorRef,
+  NormalizedQuickBooksVendorResource
+} from "./normalized-accounting-contracts.js";
 export type {
   BuiltReport,
   CashFlowActivity,
@@ -153,7 +510,14 @@ export type {
 } from "./report-builders.js";
 export type {
   CanonicalAccountingFactSet,
+  HandrailQuickBooksAccountResource,
+  HandrailQuickBooksCompanyInfoResource,
+  HandrailQuickBooksJournalEntryResource,
+  HandrailQuickBooksLedgerTransactionResource,
+  HandrailQuickBooksNormalizedResource,
   HandrailQuickBooksRuntimeConfigRef,
+  HandrailQuickBooksSdkResourceSet,
+  HandrailQuickBooksSdkResourcesAdapterInput,
   NativeLedgerAccount,
   NativeLedgerAdapterInput,
   NativeLedgerLine,
@@ -161,6 +525,7 @@ export type {
   QuickBooksAdapterContext,
   QuickBooksJournalEntryAdapterInput,
   QuickBooksSdkAccount,
+  QuickBooksSdkCompanyInfo,
   QuickBooksSdkJournalEntry,
   QuickBooksSdkJournalEntryLine,
   QuickBooksSdkJournalEntryLineDetail,
@@ -171,9 +536,52 @@ export type {
 export type {
   BuiltRollupBucket,
   FreshnessReconcileInput,
+  LateArrivalReprocessCanonicalPostingReader,
+  LateArrivalReprocessExecuteInput,
+  LateArrivalReprocessExecutionContract,
+  LateArrivalReprocessExecutionInput,
+  LateArrivalReprocessExecutionResult,
   LateArrivalReprocessInput,
+  LateArrivalReprocessJobName,
   LateArrivalReprocessPlan,
+  LateArrivalReprocessMarkSnapshotsStaleStep,
+  LateArrivalReprocessPostingReadRequest,
+  LateArrivalReprocessReplaceRollupBucketsStep,
+  LateArrivalReprocessStorage,
+  LateArrivalReprocessStorageWriteResult,
+  LateArrivalReprocessStorageWriteStep,
+  LateArrivalReprocessWriteFreshnessRowsStep,
   RollupBuildInput,
+  ScheduledRollupBucketGrainSummary,
+  ScheduledRollupCanonicalPostingReader,
+  ScheduledRollupCheckpointEvidence,
+  ScheduledRollupImportEvidence,
+  ScheduledRollupJobName,
+  ScheduledRollupJobRequest,
+  ScheduledRollupJobResult,
+  ScheduledRollupJobSummary,
+  ScheduledRollupPostingReadRequest,
+  ScheduledRollupScope,
+  ScheduledRollupSourceEvidence,
+  SnapshotRefreshAction,
+  SnapshotRefreshCashFlowOptions,
   SnapshotRefreshContract,
-  SnapshotRefreshContractInput
+  SnapshotRefreshContractInput,
+  SnapshotRefreshJobName,
+  SnapshotRefreshRequest,
+  SnapshotRefreshResult,
+  SnapshotRefreshStorage,
+  SnapshotRefreshWriteResult
 } from "./rollup-jobs.js";
+export type {
+  HandrailQuickBooksFullSyncProvider,
+  HandrailQuickBooksFullSyncServiceHandler,
+  HandrailQuickBooksFullSyncServiceOptions,
+  HandrailQuickBooksIncrementalSyncProvider,
+  HandrailQuickBooksIncrementalSyncRequest,
+  HandrailQuickBooksProviderReportProvider,
+  HandrailQuickBooksServiceHealthProvider,
+  NormalizedQuickBooksServiceHealthProbeEvidence,
+  NormalizedQuickBooksProviderReportReconciliationEvidenceInput,
+  HandrailQuickBooksSyncClientTransport
+} from "./quickbooks-sync-service.js";

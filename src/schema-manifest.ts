@@ -479,6 +479,11 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
       [],
       [
         {
+          name: "import_batches_source_batch_uidx",
+          columns: ["tenant_id", "source_id", "import_batch_id"],
+          unique: true
+        },
+        {
           name: "import_batches_source_started_idx",
           columns: ["tenant_id", "source_id", "started_at"]
         }
@@ -652,7 +657,12 @@ export const DISALLOWED_CREDENTIAL_COLUMN_PATTERNS: readonly RegExp[] = [
   /secret/i,
   /password/i,
   /credential/i,
-  /private_key/i
+  /private[-_]?key/i,
+  /raw[-_]?provider[-_]?payload/i,
+  /raw[-_]?payload/i,
+  /provider[-_]?payload[-_]?archive/i,
+  /payload[-_]?archive/i,
+  /raw[-_]?archive/i
 ];
 
 export function renderPostgresSchemaSql(

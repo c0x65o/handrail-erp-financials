@@ -1,6 +1,6 @@
 export const ERP_FINANCIALS_PACKAGE = {
   name: "@handrail/erp-financials",
-  version: "0.1.0"
+  version: "0.1.1"
 } as const;
 
 export const PACKAGE_BOUNDARY = {

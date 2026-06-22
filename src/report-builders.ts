@@ -15,6 +15,8 @@ import type {
   ReportSnapshot,
   ReportSnapshotLine,
   ReportSnapshotTotal,
+  SafeSourcePayloadRef,
+  SourceId,
   TenantId
 } from "./canonical-model.js";
 import { createCompactDrilldownRef } from "./canonical-model.js";
@@ -29,6 +31,7 @@ export type ReportBuilderInput = {
   readonly accounts: readonly Account[];
   readonly postings: readonly LedgerPosting[];
   readonly accountingBasis: AccountingBasis;
+  readonly sourceId?: SourceId;
   readonly currencyCode: IsoCurrencyCode;
   readonly periodStart: IsoDate;
   readonly periodEnd: IsoDate;
@@ -144,10 +147,12 @@ export function buildBalanceSheetReport(input: ReportBuilderInput): BuiltReport 
       amount: formatMoney(currentEarnings.amountMinor),
       sortOrder: (lines.length + 1) * 10,
       drilldownRef: drilldownRef(
+        input,
         "balance_sheet",
         currentEarnings.key,
         currentEarnings.postingIds,
-        currentEarnings.accountIds
+        currentEarnings.accountIds,
+        currentEarnings.sourceRefs
       )
     });
   }
@@ -166,7 +171,8 @@ export function buildBalanceSheetReport(input: ReportBuilderInput): BuiltReport 
       label: "Total Liabilities and Equity",
       amountMinor: liabilitiesAndEquity,
       postingIds: mergePostingIds(linesForSection(lines, "liability"), linesForSection(lines, "equity")),
-      accountIds: mergeAccountIds(linesForSection(lines, "liability"), linesForSection(lines, "equity"))
+      accountIds: mergeAccountIds(linesForSection(lines, "liability"), linesForSection(lines, "equity")),
+      sourceRefs: mergeSourceRefs(linesForSection(lines, "liability"), linesForSection(lines, "equity"))
     })
   ];
 
@@ -193,7 +199,7 @@ export function buildTrialBalanceReport(input: ReportBuilderInput): BuiltReport 
       accountId: balance.account.accountId,
       amount: formatMoney(balance.amountMinor),
       sortOrder: (index + 1) * 10,
-      drilldownRef: drilldownRef("trial_balance", balance.account.accountId, balance.postingIds, [balance.account.accountId])
+      drilldownRef: drilldownRef(input, "trial_balance", balance.account.accountId, balance.postingIds, [balance.account.accountId], balance.sourceRefs)
     }));
   const debitTotal = lines.reduce((sum, line) => (parseMoney(line.amount) > 0n ? sum + parseMoney(line.amount) : sum), 0n);
   const creditTotal = lines.reduce((sum, line) => (parseMoney(line.amount) < 0n ? sum - parseMoney(line.amount) : sum), 0n);
@@ -204,14 +210,16 @@ export function buildTrialBalanceReport(input: ReportBuilderInput): BuiltReport 
       label: "Total Debits",
       amountMinor: debitTotal,
       postingIds: postingIdsFromReportLines(lines),
-      accountIds: accountIdsFromReportLines(lines)
+      accountIds: accountIdsFromReportLines(lines),
+      sourceRefs: sourceRefsFromReportLines(lines)
     }),
     totalFromAccumulator(input, "trial_balance", {
       key: "total_credits",
       label: "Total Credits",
       amountMinor: creditTotal,
       postingIds: postingIdsFromReportLines(lines),
-      accountIds: accountIdsFromReportLines(lines)
+      accountIds: accountIdsFromReportLines(lines),
+      sourceRefs: sourceRefsFromReportLines(lines)
     })
   ];
 
@@ -244,6 +252,7 @@ export function buildCashFlowReport(input: CashFlowBuilderInput): BuiltReport {
     activityTotals[activity].amountMinor += cashMovement;
     activityTotals[activity].postingIds.push(cashPosting.postingId);
     activityTotals[activity].accountIds.add(cashPosting.accountId);
+    activityTotals[activity].sourceRefs.push(...sourceRefsFromPostings([cashPosting]));
   }
 
   const netCashFlow =
@@ -264,10 +273,12 @@ export function buildCashFlowReport(input: CashFlowBuilderInput): BuiltReport {
       amount: formatMoney(activityTotals[activity].amountMinor),
       sortOrder: (index + 1) * 10,
       drilldownRef: drilldownRef(
+        input,
         "cash_flow",
         activity,
         activityTotals[activity].postingIds,
-        [...activityTotals[activity].accountIds]
+        [...activityTotals[activity].accountIds],
+        activityTotals[activity].sourceRefs
       )
     }));
   const totals = [
@@ -352,6 +363,7 @@ type AccountBalance = {
   readonly account: Account;
   amountMinor: bigint;
   readonly postingIds: LedgerPostingId[];
+  readonly sourceRefs: SafeSourcePayloadRef[];
 };
 
 type BuildAccountLinesInput = {
@@ -383,7 +395,14 @@ function buildAccountLines(buildInput: BuildAccountLinesInput): ReportSnapshotLi
       accountId: balance.account.accountId,
       amount: formatMoney(balance.amountMinor),
       sortOrder: (index + 1) * 10,
-      drilldownRef: drilldownRef(buildInput.reportName, balance.account.accountId, balance.postingIds, [balance.account.accountId])
+      drilldownRef: drilldownRef(
+        buildInput.input,
+        buildInput.reportName,
+        balance.account.accountId,
+        balance.postingIds,
+        [balance.account.accountId],
+        balance.sourceRefs
+      )
     }));
 }
 
@@ -404,11 +423,13 @@ function aggregateByAccount(
       balances.set(account.accountId, {
         account,
         amountMinor: amountForPosting(posting, account),
-        postingIds: [posting.postingId]
+        postingIds: [posting.postingId],
+        sourceRefs: sourceRefsFromPostings([posting])
       });
     } else {
       existing.amountMinor += amountForPosting(posting, account);
       existing.postingIds.push(posting.postingId);
+      existing.sourceRefs.push(...sourceRefsFromPostings([posting]));
     }
   }
 
@@ -437,7 +458,8 @@ function currentEarningsAccumulator(input: ReportBuilderInput, accountMap: Reado
     label: "Current Period Earnings",
     amountMinor,
     postingIds: relevant.map((posting) => posting.postingId),
-    accountIds: unique(relevant.map((posting) => posting.accountId))
+    accountIds: unique(relevant.map((posting) => posting.accountId)),
+    sourceRefs: sourceRefsFromPostings(relevant)
   };
 }
 
@@ -522,6 +544,7 @@ type LineAccumulator = {
   readonly amountMinor: bigint;
   readonly postingIds: readonly LedgerPostingId[];
   readonly accountIds: readonly AccountId[];
+  readonly sourceRefs: readonly SafeSourcePayloadRef[];
 };
 
 function addTotal(target: Map<string, LineAccumulator>, key: string, label: string, inputs: readonly LineAccumulator[]): void {
@@ -530,7 +553,8 @@ function addTotal(target: Map<string, LineAccumulator>, key: string, label: stri
     label,
     amountMinor: inputs.reduce((sum, input) => sum + input.amountMinor, 0n),
     postingIds: unique(inputs.flatMap((input) => input.postingIds)),
-    accountIds: unique(inputs.flatMap((input) => input.accountIds))
+    accountIds: unique(inputs.flatMap((input) => input.accountIds)),
+    sourceRefs: uniqueSourceRefs(inputs.flatMap((input) => input.sourceRefs))
   });
 }
 
@@ -542,7 +566,8 @@ function linesForSection(lines: readonly ReportSnapshotLine[], section: string):
       label: line.label,
       amountMinor: parseMoney(line.amount),
       postingIds: line.drilldownRef.postingIds ?? [],
-      accountIds: line.drilldownRef.accountIds ?? []
+      accountIds: line.drilldownRef.accountIds ?? [],
+      sourceRefs: line.drilldownRef.sourceRefs ?? []
     }));
 }
 
@@ -577,7 +602,8 @@ function totalFromLines(
     label,
     amountMinor: lines.reduce((sum, line) => sum + line.amountMinor, 0n),
     postingIds: unique(lines.flatMap((line) => line.postingIds)),
-    accountIds: unique(lines.flatMap((line) => line.accountIds))
+    accountIds: unique(lines.flatMap((line) => line.accountIds)),
+    sourceRefs: uniqueSourceRefs(lines.flatMap((line) => line.sourceRefs))
   });
 }
 
@@ -589,7 +615,7 @@ function totalFromAccumulator(input: ReportBuilderInput, reportName: ReportName,
     totalKey: total.key,
     label: total.label,
     amount: formatMoney(total.amountMinor),
-    drilldownRef: drilldownRef(reportName, total.key, total.postingIds, total.accountIds)
+    drilldownRef: drilldownRef(input, reportName, total.key, total.postingIds, total.accountIds, total.sourceRefs)
   };
 }
 
@@ -606,7 +632,8 @@ function cashTotal(
     label,
     amountMinor,
     accountIds,
-    postingIds
+    postingIds,
+    sourceRefs: sourceRefsForPostingIds(input, postingIds)
   });
 }
 
@@ -622,6 +649,10 @@ function mergeAccountIds(left: readonly LineAccumulator[], right: readonly LineA
   return unique([...left, ...right].flatMap((line) => line.accountIds));
 }
 
+function mergeSourceRefs(left: readonly LineAccumulator[], right: readonly LineAccumulator[] = []): SafeSourcePayloadRef[] {
+  return uniqueSourceRefs([...left, ...right].flatMap((line) => line.sourceRefs));
+}
+
 function postingIdsFromReportLines(lines: readonly ReportSnapshotLine[]): LedgerPostingId[] {
   return unique(lines.flatMap((line) => line.drilldownRef.postingIds ?? []));
 }
@@ -630,20 +661,34 @@ function accountIdsFromReportLines(lines: readonly ReportSnapshotLine[]): Accoun
   return unique(lines.flatMap((line) => line.drilldownRef.accountIds ?? []));
 }
 
+function sourceRefsFromReportLines(lines: readonly ReportSnapshotLine[]): SafeSourcePayloadRef[] {
+  return uniqueSourceRefs(lines.flatMap((line) => line.drilldownRef.sourceRefs ?? []));
+}
+
 function drilldownRef(
+  input: ReportBuilderInput,
   reportName: ReportName,
   key: string,
   postingIds: readonly LedgerPostingId[],
-  accountIds: readonly AccountId[]
+  accountIds: readonly AccountId[],
+  sourceRefs: readonly SafeSourcePayloadRef[]
 ): DrilldownRef {
+  const sourceId = sourceIdForDrilldown(input, postingIds);
+
   return createCompactDrilldownRef({
     token: `${reportName}:${key}`,
     postingIds: unique(postingIds),
     accountIds: unique(accountIds),
     query: {
       kind: "ledger_postings",
+      tenantId: input.tenantId,
+      ...(sourceId === undefined ? {} : { sourceId }),
+      accountingBasis: input.accountingBasis,
+      periodStart: input.periodStart,
+      periodEnd: input.periodEnd,
       accountIds: unique(accountIds)
-    }
+    },
+    sourceRefs: uniqueSourceRefs(sourceRefs)
   });
 }
 
@@ -711,6 +756,7 @@ type CashFlowAccumulator = {
   amountMinor: bigint;
   readonly postingIds: LedgerPostingId[];
   readonly accountIds: Set<AccountId>;
+  readonly sourceRefs: SafeSourcePayloadRef[];
 };
 
 function emptyCashFlowAccumulator(activity: CashFlowActivity): CashFlowAccumulator {
@@ -718,8 +764,54 @@ function emptyCashFlowAccumulator(activity: CashFlowActivity): CashFlowAccumulat
     activity,
     amountMinor: 0n,
     postingIds: [],
-    accountIds: new Set<AccountId>()
+    accountIds: new Set<AccountId>(),
+    sourceRefs: []
   };
+}
+
+function sourceIdForDrilldown(input: ReportBuilderInput, postingIds: readonly LedgerPostingId[]): SourceId | undefined {
+  if (input.sourceId !== undefined) {
+    return input.sourceId;
+  }
+
+  const postingIdSet = new Set(postingIds);
+  const sourceIds = unique(input.postings.filter((posting) => postingIdSet.has(posting.postingId)).map((posting) => posting.sourceId));
+  return sourceIds.length === 1 ? sourceIds[0] : undefined;
+}
+
+function sourceRefsForPostingIds(input: ReportBuilderInput, postingIds: readonly LedgerPostingId[]): SafeSourcePayloadRef[] {
+  const postingIdSet = new Set(postingIds);
+  return sourceRefsFromPostings(input.postings.filter((posting) => postingIdSet.has(posting.postingId)));
+}
+
+function sourceRefsFromPostings(postings: readonly LedgerPosting[]): SafeSourcePayloadRef[] {
+  return uniqueSourceRefs(
+    postings
+      .map((posting) => posting.sourcePayloadRef)
+      .filter((sourceRef): sourceRef is SafeSourcePayloadRef => sourceRef !== undefined)
+  );
+}
+
+function uniqueSourceRefs(values: readonly SafeSourcePayloadRef[]): SafeSourcePayloadRef[] {
+  const refs = new Map<string, SafeSourcePayloadRef>();
+  for (const value of values) {
+    refs.set(
+      [
+        value.sourceObjectType,
+        value.sourceObjectId,
+        value.storageRef ?? "",
+        value.checksum ?? "",
+        value.sourceUpdatedAt ?? ""
+      ].join(":"),
+      value
+    );
+  }
+
+  return [...refs.values()].sort((left, right) =>
+    [left.sourceObjectType, left.sourceObjectId, left.storageRef ?? "", left.checksum ?? ""]
+      .join(":")
+      .localeCompare([right.sourceObjectType, right.sourceObjectId, right.storageRef ?? "", right.checksum ?? ""].join(":"))
+  );
 }
 
 function classifyCashPosting(

@@ -12,6 +12,40 @@ freshness contracts. A future Handrail `erp_financials` capability should
 install, validate, schedule, and report health for these APIs; it should not
 move report formulas into platform-only code.
 
+Provider credentials are outside the `erp_financials` config contract. Keep
+QuickBooks and other provider OAuth material in their provider capability or
+integration service.
+
+For worker-to-worker implementation details between the QuickBooks SDK/service,
+Future ERP orchestration, and canonical storage, use
+[storage-host-app-handoff.md](storage-host-app-handoff.md).
+For the Future ERP-specific local package/link setup and validation handoff,
+use [future-erp-dependency-handoff.md](future-erp-dependency-handoff.md).
+For safe retry cadence, deterministic evidence fields, fixture smoke
+interpretation, drilldown health failure handling, and escalation boundaries,
+use [operations-runbook.md](operations-runbook.md).
+
+## Executable contract summary
+
+Host apps and the future Handrail capability should call these exported
+`@handrail/erp-financials` APIs directly:
+
+| Contract area | Exported API |
+| --- | --- |
+| Install validation | `checkErpFinancialsInstallHealth`, `preflightFutureErpInstallHealth`, `createFutureErpInstallHealthPreflightWorker` |
+| Schema health | `createPostgresStorageAdapter(...).validateSchema()`, `validatePostgresSchema`, `POSTGRES_CANONICAL_SCHEMA_MANIFEST`, `renderPostgresSchemaSql` |
+| Schedule descriptor | `buildScheduledRollupJobResult`, `buildLateArrivalReprocessExecutionContract`, `executeLateArrivalReprocess`, `executeSnapshotRefresh`, `createSnapshotRefreshContract`, `reconcileReportFreshness`, `ScheduledRollupJobName`, `LateArrivalReprocessJobName`, `SnapshotRefreshJobName`, `ScheduledRollupJobRequest`, `SnapshotRefreshRequest`, `FreshnessReconcileInput` |
+| Future ERP scheduler binding | `createFutureErpRollupAndLateArrivalWorker`, `createFutureErpSnapshotRefreshAndFreshnessWorker` |
+| Fixture smoke | `runErpFinancialsFixtureSmokeHealth` |
+| Freshness reconciliation | `reconcileReportFreshness`, `createSnapshotRefreshContract`, `createFutureErpSnapshotRefreshAndFreshnessWorker(...).runFreshnessReconciliation(...)` |
+| Drilldown health | `checkErpFinancialsFreshnessAndDrilldownHealth`, `assertSafeDrilldownRef`, `assertSafeSourcePayloadRef` |
+
+The schedule descriptor is executable package code plus exported request/result
+types. It lets a host app or separately approved platform capability register
+jobs with deterministic names and evidence fields, but this repository change
+does not create Handrail platform capabilities, project tasks, deployment
+targets, env vars, secrets, or CI/CD runs.
+
 ## 1. Add the package dependency
 
 Install the package in the host app:
@@ -19,6 +53,59 @@ Install the package in the host app:
 ```sh
 npm install @handrail/erp-financials
 ```
+
+Future ERP should also depend on the Handrail QuickBooks SDK/service client
+using its existing package-manager convention. In the current Handrail runtime
+contract that is the Handrail SDK/runtime helper package plus capability-managed
+QuickBooks env references, not Intuit credentials or new provider OAuth vars:
+
+```sh
+npm install @handrail/sdk-node
+```
+
+When `@handrail/erp-financials` is not published in the dev environment, use a
+local file link to this checkout and build the package declarations before
+running the host app typecheck:
+
+```sh
+# from /opt/handrail/repos/handrail/erp-financials/handrail-erp-financials
+npm install
+npm run build
+npm run typecheck:future-erp-imports
+
+# from /opt/handrail/repos/hitcents/hitcents-future-erp/hitcents-erp-future
+npm install @handrail/erp-financials@file:/opt/handrail/repos/handrail/erp-financials/handrail-erp-financials
+npm install @handrail/sdk-node
+npm run typecheck
+```
+
+If Future ERP is using a workspace protocol instead of direct npm install,
+preserve that convention and wire the same two dependencies in package metadata:
+
+```json
+{
+  "dependencies": {
+    "@handrail/erp-financials": "file:/opt/handrail/repos/handrail/erp-financials/handrail-erp-financials",
+    "@handrail/sdk-node": "<existing Handrail SDK range or workspace link>"
+  }
+}
+```
+
+The targeted package-side acceptance check is:
+
+```sh
+npm run typecheck:future-erp-imports
+```
+
+It compiles a Future ERP-shaped consumer import harness through the public
+`@handrail/erp-financials` entry point and verifies TypeScript can resolve
+`createPostgresStorageAdapter`,
+`mapHandrailQuickBooksSdkResourcesToCanonicalFacts`,
+`buildProfitAndLossReport`, `buildBalanceSheetReport`,
+`buildTrialBalanceReport`, `buildCashFlowReport`,
+`createSnapshotRefreshContract`, `reconcileReportFreshness`, the local
+QuickBooks sync client facade, and normalized QuickBooks sync/report envelope
+types.
 
 For local package development from this repository, validate a clean checkout
 with:
@@ -36,6 +123,24 @@ npm run test
 npm run build
 ```
 
+For the QuickBooks SDK/service handoff specifically, use the deterministic
+contract smoke command. It does not need live QuickBooks credentials:
+
+```sh
+npm run contract:smoke
+```
+
+For the reusable ERP Financials install/schema/fixture/freshness/drilldown
+health contract, use:
+
+```sh
+npm run health:smoke
+```
+
+`npm run health:smoke` is fixture-based by default. It validates the package
+health APIs without live QuickBooks credentials, production data, deployment
+state, or external provider calls.
+
 ## 2. Install the canonical schema
 
 Host apps own their database credentials and migration framework. This package
@@ -49,6 +154,11 @@ import {
 
 const statements = renderPostgresSchemaSql(POSTGRES_CANONICAL_SCHEMA_MANIFEST);
 ```
+
+For Future ERP, this package also ships the equivalent checked-in migration at
+`migrations/future-erp/20260620000000_create_erp_financials_canonical_schema.sql`.
+Copy its statements into the host app's migration framework without adding
+provider credential or raw provider payload columns.
 
 Commit those statements through the host app migration system, or use the
 storage adapter during development to produce the same install plan:
@@ -81,6 +191,24 @@ if (!validation.compatible) {
 Validation checks schema, tables, columns, indexes, constraints,
 fixture-loader support, and the no-provider-credential boundary. Financial
 tables must store safe source references and bounded JSON refs only.
+
+The exported schema health APIs are
+`createPostgresStorageAdapter(...).validateSchema()`, `validatePostgresSchema`,
+and `checkErpFinancialsInstallHealth`. Use `checkErpFinancialsInstallHealth`
+when the caller needs package name, package version, manifest version, fixture
+support, and no-credential-column evidence in one health result.
+
+Import jobs should use the packaged Future ERP preflight before persisting
+canonical facts so incompatible installs fail deterministically with structured
+issue details:
+
+```ts
+import { validateFutureErpCanonicalSchemaPreflight } from "@handrail/erp-financials";
+
+await validateFutureErpCanonicalSchemaPreflight(postgresClient, {
+  jobName: "quickbooks-full-import"
+});
+```
 
 ## 4. Load fixtures and run smoke reports
 
@@ -124,7 +252,10 @@ for (const report of reports) {
 Fixture smoke tests should assert expected totals, balanced trial balance and
 balance sheet reconciliation status, cash-flow support status, and drilldown
 refs on every material line and total. The repository's fixture contract is
-covered by `test/report-builders-fixtures.test.ts`.
+covered by `runErpFinancialsFixtureSmokeHealth` and
+`test/fixture-smoke-health.test.ts`. The fixture smoke API uses the package
+report builders, so host apps and future platform capability code do not need
+to duplicate P&L, balance sheet, trial balance, or cash-flow formulas.
 
 ## 5. Configure source adapters
 
@@ -164,20 +295,41 @@ await storage.upsertLedgerPostings(facts.postings);
 Idempotency is tenant and source scoped. Reprocessing the same source facts
 must update canonical rows instead of duplicating postings.
 
+QuickBooks workers should hand off normalized resource envelopes and safe
+runtime/source references only. The ERP Financials adapter contract is
+`HandrailQuickBooksSdkResourcesAdapterInput` plus
+`mapHandrailQuickBooksSdkResourcesToCanonicalFacts`, which returns the
+`CanonicalAccountingFactSet` used by the storage methods above. Future ERP
+should call the Handrail QuickBooks SDK/service for full sync, incremental
+sync, and provider report parity, then pass only normalized resources and safe
+source refs into this package. See
+[storage-host-app-handoff.md](storage-host-app-handoff.md) for full and
+incremental sync usage, checkpoint semantics, provider report reconciliation,
+safe drilldown refs, validation commands, and the acceptance checklist.
+
 ## 6. Register scheduled jobs
 
 Host apps or the future Handrail capability should register these jobs:
 
-- `erp-financials-rollup`: build day, month, and fiscal-period buckets with
-  `buildRollupBuckets`, then persist them with `storage.writeRollupBuckets`.
+- `erp-financials-rollup`: call `buildScheduledRollupJobResult` with tenant,
+  company, source, accounting basis, grains, period bounds, `generatedAt`, and
+  compact source/import/checkpoint evidence. Pass either canonical postings or
+  a host read interface. Persist the returned write-ready buckets with
+  `storage.writeRollupBuckets`.
 - `erp-financials-late-arrival-reprocess`: call `planLateArrivalReprocess` for
-  changed or backdated postings, replace affected windows with
-  `storage.replaceRollupBucketsForWindows`, and mark affected snapshots stale
-  with `storage.markReportSnapshotsStaleForPostingChanges`.
-- `erp-financials-snapshot-refresh`: rebuild reports through
-  `buildProfitAndLossReport`, `buildBalanceSheetReport`,
-  `buildTrialBalanceReport`, or `buildCashFlowReport`, then write snapshots
-  with `storage.writeReportSnapshot`.
+  changed or backdated postings, or call
+  `buildLateArrivalReprocessExecutionContract` to get affected windows, stale
+  snapshot update inputs, freshness rows, rebuilt replacement buckets, and the
+  ordered storage write plan. Persist through `executeLateArrivalReprocess` or
+  apply the plan in order: `storage.replaceRollupBucketsForWindows`,
+  `storage.markReportSnapshotsStaleForPostingChanges`, then
+  `storage.writeFreshnessRows`.
+- `erp-financials-snapshot-refresh`: call `executeSnapshotRefresh` with tenant,
+  company, source, report request bounds, freshness evidence, optional cash
+  flow classification options, and a storage adapter. Fresh stored snapshots
+  are reused without writes; stale or missing snapshots are rebuilt through the
+  package report builders, then persisted with `storage.writeReportSnapshot`
+  and `storage.writeFreshnessRows`.
 - `erp-financials-freshness-reconcile`: call `reconcileReportFreshness` or
   `createSnapshotRefreshContract`, then persist rows with
   `storage.writeFreshnessRows`.
@@ -189,32 +341,81 @@ Normal dashboard reads should use report snapshots, rollup buckets, and
 freshness rows. They should not scan raw provider objects for routine report
 windows.
 
+For Future ERP, the exported schedule binding is
+`createFutureErpRollupAndLateArrivalWorker` for rollup and late-arrival
+reprocess work, and `createFutureErpSnapshotRefreshAndFreshnessWorker` for
+snapshot refresh and freshness reconciliation work. See
+[future-erp-scheduler-handoff.md](future-erp-scheduler-handoff.md) for the
+host-owned schedule names, retry semantics, expected cadence notes, and evidence
+fields, and [operations-runbook.md](operations-runbook.md) for the source-level
+operator runbook. Those docs are descriptors for host scheduler registration;
+they do not authorize platform queue creation or deployment/config changes.
+
+Example rollup job handler:
+
+```ts
+import { buildScheduledRollupJobResult } from "@handrail/erp-financials";
+
+const result = await buildScheduledRollupJobResult({
+  tenantId,
+  companyId,
+  sourceId,
+  accountingBasis: "accrual",
+  bucketGrains: ["day", "month", "fiscal_period"],
+  periodStart: "2026-01-01",
+  periodEnd: "2026-01-31",
+  fiscalYearStartMonth,
+  generatedAt: new Date().toISOString(),
+  importEvidence: { importBatchId },
+  checkpointEvidence: { checkpointId, freshThrough },
+  postingReader: {
+    readCanonicalPostingsForRollup: (request) =>
+      hostCanonicalStore.readLedgerPostings(request)
+  }
+});
+
+await storage.writeRollupBuckets(result.buckets);
+hostLogger.info({ rollupSummary: result.summary });
+```
+
+`result.summary` is compact and credential-free. It is suitable for host job
+logs or health dashboards, while durable financial facts remain in rollup,
+snapshot, and freshness tables.
+
 ## 7. Health and freshness checks
 
 Recommended host-app and capability health checks:
 
 - Package version is compatible with the expected manifest version.
-- `storage.validateSchema()` returns `compatible: true`.
-- Fixture load and smoke reports produce expected deterministic totals.
+- `checkErpFinancialsInstallHealth` returns `status: "healthy"`.
+- `storage.validateSchema()` or `validatePostgresSchema` returns
+  `compatible: true`.
+- `runErpFinancialsFixtureSmokeHealth` returns `status: "healthy"` with stable
+  report totals, snapshot ids, freshness ids, and summary hash.
 - Source adapter imports create canonical facts without credential fields.
 - Rollup jobs have produced current buckets for configured grains.
 - Late-arrival reprocess marks affected snapshots stale and replaces rollup
   windows without duplicate aggregates.
-- Freshness rows exist for supported reports, accounting bases, currencies, and
-  source boundaries.
-- Drilldown refs resolve to canonical posting evidence or compact query tokens.
+- `reconcileReportFreshness` produces rows for supported reports, accounting
+  bases, currencies, and source boundaries.
+- `checkErpFinancialsFreshnessAndDrilldownHealth` confirms freshness rows exist
+  and drilldown refs resolve to canonical posting evidence or compact query
+  tokens.
 
 Operators should start with [rollups-and-snapshots.md](rollups-and-snapshots.md)
 for stale report behavior, [canonical-data-model.md](canonical-data-model.md)
 for identity and provenance constraints, and [quickbooks-boundary.md](quickbooks-boundary.md)
-for provider boundary questions.
+for provider boundary questions. Use
+[operations-runbook.md](operations-runbook.md) when deciding whether to retry,
+record degraded evidence, or escalate config, deploy, or credential work.
 
 ## QuickBooks capability separation
 
 `erp_financials` and `quickbooks` are separate capability concerns.
 
 `quickbooks` owns provider access through the Handrail QuickBooks SDK/runtime
-contract. Host apps should use `@handrail/sdk-node` helpers and the
+contract. QuickBooks OAuth and token custody stay inside the integration
+service. Host apps should use `@handrail/sdk-node` helpers and the
 Handrail-managed runtime keys:
 
 - `HANDRAIL_QBO_SERVICE_ENV`
@@ -228,5 +429,5 @@ Handrail-managed runtime keys:
 builders, rollup/snapshot/freshness contracts, fixtures, and validation. It
 must not store Intuit access tokens, Intuit refresh tokens, provider OAuth
 secrets, or new QuickBooks credential environment variables. QuickBooks helper
-inputs should contain SDK-shaped accounting objects plus safe runtime/source
-references only.
+inputs should contain normalized resources plus safe runtime/source references
+only. They must not contain raw unbounded provider payloads.

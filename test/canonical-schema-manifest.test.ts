@@ -1,14 +1,22 @@
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import {
   POSTGRES_CANONICAL_SCHEMA_MANIFEST,
   assertLedgerPostingAmounts,
   assertManifestHasNoCredentialColumns,
+  assertNoCredentialKeys,
   assertSafeSourcePayloadRef,
   canonicalSourceIdentityKey,
   createDimensionHash,
   renderPostgresSchemaSql
 } from "../src/index.js";
+
+const FUTURE_ERP_CANONICAL_SCHEMA_MIGRATION_SQL = readFileSync(
+  new URL("../migrations/future-erp/20260620000000_create_erp_financials_canonical_schema.sql", import.meta.url),
+  "utf8"
+);
 
 describe("canonical schema manifest", () => {
   it("is versioned and covers the documented canonical entities", () => {
@@ -67,6 +75,60 @@ describe("canonical schema manifest", () => {
     for (const table of POSTGRES_CANONICAL_SCHEMA_MANIFEST.tables) {
       expect(table.policies.noRawCredentials).toBe(true);
     }
+  });
+
+  it("rejects audited credential and raw payload schema column variants", () => {
+    const firstTable = POSTGRES_CANONICAL_SCHEMA_MANIFEST.tables[0];
+    if (!firstTable) {
+      throw new Error("Expected canonical schema manifest to contain at least one table.");
+    }
+
+    const forbiddenColumnNames = [
+      "access_token",
+      "access-token",
+      "accessToken",
+      "refresh_token",
+      "refresh-token",
+      "refreshToken",
+      "client_secret",
+      "client-secret",
+      "clientSecret",
+      "credential",
+      "private-key",
+      "raw_payload",
+      "raw-payload",
+      "rawPayload",
+      "raw_provider_payload",
+      "raw-provider-payload",
+      "rawProviderPayload",
+      "provider-payload-archive",
+      "providerPayloadArchive",
+      "payload-archive",
+      "payloadArchive",
+      "raw-archive",
+      "rawArchive"
+    ];
+
+    for (const columnName of forbiddenColumnNames) {
+      expect(() => {
+        assertManifestHasNoCredentialColumns({
+          ...POSTGRES_CANONICAL_SCHEMA_MANIFEST,
+          tables: [
+            {
+              ...firstTable,
+              columns: [...firstTable.columns, { name: columnName, type: "text" }]
+            }
+          ]
+        });
+      }).toThrow("credential-like column is not allowed");
+    }
+  });
+
+  it("keeps the Future ERP migration aligned to the canonical Postgres renderer", () => {
+    expect(FUTURE_ERP_CANONICAL_SCHEMA_MIGRATION_SQL).toBe(renderPostgresSchemaSql(POSTGRES_CANONICAL_SCHEMA_MANIFEST));
+    expect(FUTURE_ERP_CANONICAL_SCHEMA_MIGRATION_SQL).not.toMatch(
+      /\b(token|secret|credential|password|client_secret|access_token|refresh_token|raw_provider_payload|raw_payload)\b/i
+    );
   });
 });
 
@@ -130,6 +192,44 @@ describe("canonical model constraints", () => {
         }
       });
     }).toThrow("credential-like field is not allowed");
+  });
+
+  it("rejects audited credential and raw provider payload field names", () => {
+    const forbiddenKeys = [
+      "access_token",
+      "access-token",
+      "accessToken",
+      "refresh_token",
+      "refresh-token",
+      "refreshToken",
+      "client_secret",
+      "client-secret",
+      "clientSecret",
+      "token",
+      "secret",
+      "password",
+      "credential",
+      "private_key",
+      "private-key",
+      "raw_payload",
+      "raw-payload",
+      "rawPayload",
+      "raw_provider_payload",
+      "raw-provider-payload",
+      "rawProviderPayload",
+      "provider-payload-archive",
+      "providerPayloadArchive",
+      "payload-archive",
+      "payloadArchive",
+      "raw-archive",
+      "rawArchive"
+    ];
+
+    for (const key of forbiddenKeys) {
+      expect(() => {
+        assertNoCredentialKeys({ nested: { [key]: "not allowed" } });
+      }).toThrow("credential-like field is not allowed");
+    }
   });
 
   it("creates deterministic dimension hashes independent of input order", () => {

@@ -235,6 +235,8 @@ export type DrilldownRef = {
   readonly accountIds?: readonly AccountId[];
   readonly dimensionHash?: DimensionHash;
   readonly query?: DrilldownQueryRef;
+  readonly sourceRefCount?: number;
+  readonly sourceRefs?: readonly SafeSourcePayloadRef[];
 };
 
 export type DrilldownQueryRef = {
@@ -286,9 +288,10 @@ export type ReportSnapshotTotal = TenantScopedRecord & {
 
 export const DEFAULT_JSON_REF_MAX_BYTES = 4096;
 export const DEFAULT_DRILLDOWN_INLINE_POSTING_LIMIT = 100;
+export const DEFAULT_DRILLDOWN_INLINE_SOURCE_REF_LIMIT = 25;
 
 const CREDENTIAL_FIELD_PATTERN =
-  /(?:^|_)(?:access|refresh)?_?token$|secret|password|credential|client_secret|private_key/i;
+  /(?:^|[_-])(?:access|refresh)?[-_]?token$|oauth|secret|password|credential|client_secret|private[-_]?key|sealed[-_]?secret|token[-_]?refresh|provider[-_]?client|raw[-_]?(?:provider[-_]?)?imports?|raw[-_]?provider[-_]?payload|raw[-_]?payload|provider[-_]?payload[-_]?archive|payload[-_]?archive|raw[-_]?archive/i;
 
 export function canonicalSourceIdentityKey(identity: SourceIdentity): string {
   return [
@@ -335,6 +338,13 @@ export function assertSafeSourcePayloadRef(
   assertNoCredentialKeys(sourcePayloadRef);
 }
 
+export function assertSafeDrilldownRef(drilldownRef: DrilldownRef): void {
+  for (const sourceRef of drilldownRef.sourceRefs ?? []) {
+    assertSafeSourcePayloadRef(sourceRef);
+  }
+  assertNoCredentialKeys(drilldownRef.query);
+}
+
 export function assertNoCredentialKeys(value: unknown, path = "$"): void {
   if (Array.isArray(value)) {
     value.forEach((entry, index) => {
@@ -359,19 +369,25 @@ export type CompactDrilldownRefInput = {
   readonly accountIds?: readonly AccountId[];
   readonly dimensionHash?: DimensionHash;
   readonly query?: DrilldownQueryRef;
+  readonly sourceRefs?: readonly SafeSourcePayloadRef[];
   readonly inlinePostingLimit?: number;
+  readonly inlineSourceRefLimit?: number;
 };
 
 export function createCompactDrilldownRef(input: CompactDrilldownRefInput): DrilldownRef {
   const postingIds = uniqueStrings(input.postingIds);
   const accountIds = input.accountIds === undefined ? undefined : uniqueStrings(input.accountIds);
+  const sourceRefs = input.sourceRefs === undefined ? undefined : uniqueSourceRefs(input.sourceRefs);
   const inlinePostingLimit = input.inlinePostingLimit ?? DEFAULT_DRILLDOWN_INLINE_POSTING_LIMIT;
+  const inlineSourceRefLimit = input.inlineSourceRefLimit ?? DEFAULT_DRILLDOWN_INLINE_SOURCE_REF_LIMIT;
   const base = {
     token: input.token,
     postingCount: postingIds.length,
     ...(accountIds === undefined ? {} : { accountIds }),
     ...(input.dimensionHash === undefined ? {} : { dimensionHash: input.dimensionHash }),
-    ...(input.query === undefined ? {} : { query: compactDrilldownQuery(input.query, accountIds, input.dimensionHash) })
+    ...(input.query === undefined ? {} : { query: compactDrilldownQuery(input.query, accountIds, input.dimensionHash) }),
+    ...(sourceRefs === undefined ? {} : { sourceRefCount: sourceRefs.length }),
+    ...(sourceRefs === undefined || sourceRefs.length > inlineSourceRefLimit ? {} : { sourceRefs })
   };
 
   if (postingIds.length > inlinePostingLimit) {
@@ -405,6 +421,29 @@ function compactDrilldownQuery(
 
 function uniqueStrings<T extends string>(values: readonly T[]): T[] {
   return [...new Set(values)].sort();
+}
+
+function uniqueSourceRefs(values: readonly SafeSourcePayloadRef[]): SafeSourcePayloadRef[] {
+  const refs = new Map<string, SafeSourcePayloadRef>();
+  for (const value of values) {
+    assertSafeSourcePayloadRef(value);
+    refs.set(
+      [
+        value.sourceObjectType,
+        value.sourceObjectId,
+        value.storageRef ?? "",
+        value.checksum ?? "",
+        value.sourceUpdatedAt ?? ""
+      ].join(":"),
+      value
+    );
+  }
+
+  return [...refs.values()].sort((left, right) =>
+    [left.sourceObjectType, left.sourceObjectId, left.storageRef ?? "", left.checksum ?? ""]
+      .join(":")
+      .localeCompare([right.sourceObjectType, right.sourceObjectId, right.storageRef ?? "", right.checksum ?? ""].join(":"))
+  );
 }
 
 function stableJson(value: unknown): string {

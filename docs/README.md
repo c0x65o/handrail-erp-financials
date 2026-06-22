@@ -24,6 +24,40 @@ same canonical model.
   P&L, balance sheet, cash flow, expenses, and drilldown.
 - [quickbooks-boundary.md](quickbooks-boundary.md): How this package should
   consume the existing QuickBooks integration without owning OAuth or tokens.
+- [storage-host-app-handoff.md](storage-host-app-handoff.md): Worker-facing
+  contract between QuickBooks SDK/service output, host-app orchestration, and
+  ERP Financials canonical storage. This is the normalized QuickBooks handoff
+  runbook for full/incremental sync usage, checkpoint semantics, provider
+  report reconciliation, Future ERP adoption, safe drilldown refs, prohibited
+  credential/raw-payload boundaries, and validation commands.
+- [future-erp-dependency-handoff.md](future-erp-dependency-handoff.md):
+  Reproducible local dependency/link setup for Future ERP, exact targeted
+  validation commands, SDK/service package expectations, adoption flow, and the
+  no-token/no-raw-provider-payload checklist.
+- [future-erp-scheduler-handoff.md](future-erp-scheduler-handoff.md):
+  Future ERP scheduler job names, expected cadence, package APIs, retry
+  behavior, evidence fields, and separately gated config/deploy work.
+- [operations-runbook.md](operations-runbook.md): Source-level operations
+  runbook for QuickBooks full/incremental sync retry evidence, normal rollup
+  cadence, wider late-arrival overlap, stale snapshot refresh retry, freshness
+  reconciliation, fixture smoke interpretation, drilldown health failures,
+  credential-boundary checks, deterministic commands, evidence fields,
+  forbidden credential/raw-payload evidence, and escalation points.
+- [cross-repo-local-link-validation.md](cross-repo-local-link-validation.md):
+  Exact local package link/install commands and deterministic validation order
+  for ERP Financials, Handrail QuickBooks Integrations, and Hitcents Future
+  ERP, with live sandbox execution gated by Handrail-managed configuration.
+- [production-blocker-matrix.md](production-blocker-matrix.md): Sidecar
+  blocker matrix for live QuickBooks credentials, production data,
+  staging/production deploy changes, scheduler/runtime registration, and formal
+  `erp_financials` capability creation.
+- [future-erp-surface-inventory.md](future-erp-surface-inventory.md): Inventory
+  of the named Future ERP QuickBooks/reporting modules, expected ownership, and
+  replacement points for duplicated formulas before dependency wireup.
+- [package-export-surface-audit.md](package-export-surface-audit.md): Public
+  export-surface compatibility audit for ERP Financials, Future ERP import
+  fixtures, QuickBooks mapping, sandbox replay, workers, health checks, and
+  safe drilldown refs.
 - [host-app-install.md](host-app-install.md): How a blank host app installs the
   package schema, loads fixtures, runs validation, registers jobs, checks
   freshness, and consumes report APIs.
@@ -50,4 +84,26 @@ the installed database with `createPostgresStorageAdapter(...).validateSchema()`
 load `ERP_FINANCIALS_STATEMENT_FIXTURE`, and smoke-test the exported report
 builders before enabling scheduled rollup, snapshot, late-arrival, and
 freshness jobs. See [host-app-install.md](host-app-install.md) for the complete
-operator path and the future `erp_financials` capability validation checklist.
+operator path, [storage-host-app-handoff.md](storage-host-app-handoff.md) for
+the worker handoff contract, [operations-runbook.md](operations-runbook.md) for
+safe retry and evidence handling, and the future `erp_financials` capability
+validation checklist.
+
+For the Handrail QuickBooks SDK/service path, Future ERP should call the
+service for provider access and pass normalized resources into the ERP
+Financials adapter contract:
+`HandrailQuickBooksSdkResourcesAdapterInput` with
+`mapHandrailQuickBooksSdkResourcesToCanonicalFacts`. QuickBooks OAuth/token
+custody remains inside the integration service. The deterministic handoff smoke
+command is:
+
+```sh
+npm run contract:smoke
+```
+
+The reusable install/schema/fixture/freshness/drilldown health contract command
+is:
+
+```sh
+npm run health:smoke
+```

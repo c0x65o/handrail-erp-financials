@@ -99,6 +99,8 @@ backdated source facts without duplicating canonical postings.
 For the complete blank-host install sequence, fixture smoke test path,
 scheduled job expectations, freshness checks, and future Handrail capability
 validation checklist, see [docs/host-app-install.md](docs/host-app-install.md).
+For the worker-facing QuickBooks SDK/service to host-app storage contract, see
+[docs/storage-host-app-handoff.md](docs/storage-host-app-handoff.md).
 
 ## Source Adapters
 
@@ -108,20 +110,59 @@ ERP ledgers and QuickBooks SDK-shaped journal entry data:
 
 ```ts
 import {
+  ERP_FINANCIALS_QUICKBOOKS_ADAPTER_FIXTURE,
+  mapHandrailQuickBooksSdkResourcesToCanonicalFacts,
   mapNativeLedgerToCanonicalFacts,
   mapQuickBooksJournalEntriesToCanonicalFacts
 } from "@handrail/erp-financials";
 
 const nativeFacts = mapNativeLedgerToCanonicalFacts(nativeLedgerInput);
 const quickBooksFacts = mapQuickBooksJournalEntriesToCanonicalFacts(quickBooksSdkInput);
+const quickBooksResourceFacts = mapHandrailQuickBooksSdkResourcesToCanonicalFacts(handrailQuickBooksResourcesInput);
+const quickBooksEvidence = ERP_FINANCIALS_QUICKBOOKS_ADAPTER_FIXTURE.providerReportEvidence;
 ```
+
+For service and SDK boundaries, the package also exports normalized QuickBooks
+resource contracts such as `NormalizedQuickBooksResourceSet`,
+`NormalizedQuickBooksCompanyInfoResource`, `NormalizedQuickBooksAccountResource`,
+`NormalizedQuickBooksLedgerTransactionResource`, and
+`NormalizedQuickBooksLedgerPostingResource`. These contracts carry tenant/source
+identity, realm/provider environment, sync mode, import batch id, checkpoint id,
+source update timestamps, safe drilldown refs, provider report refs, and bounded
+reconciliation evidence without exposing provider clients or credential fields.
 
 The QuickBooks helper preserves tenant id, source id, provider environment,
 realm id, source object type/id, source update timestamps, import batch ids,
 checkpoint ids, and safe source payload refs for idempotency and drilldown. It
 expects host apps to fetch provider data through the Handrail QuickBooks
-SDK/runtime config; ERP Financials does not store Intuit access or refresh
-tokens and does not introduce QuickBooks credential environment variables.
+SDK/runtime config. Host apps that receive normalized Handrail QuickBooks
+resource wrappers can pass them through
+`mapHandrailQuickBooksSdkResourcesToCanonicalFacts`, which validates
+realm/environment identity and carries bounded SDK/service source refs into the
+canonical facts. ERP Financials does not store Intuit access or refresh tokens
+and does not introduce QuickBooks credential environment variables.
+
+`ERP_FINANCIALS_QUICKBOOKS_ADAPTER_FIXTURE` proves the same path with
+deterministic QuickBooks-shaped SDK resources: adapter input maps to canonical
+facts, those facts build P&L, balance sheet, and trial balance reports, and the
+fixture carries bounded provider-total reconciliation evidence with safe
+QuickBooks report refs.
+
+`createQuickBooksContractSmokeHarness()` is the local contract smoke harness for
+Future ERP adoption. It starts from
+`ERP_FINANCIALS_NORMALIZED_QUICKBOOKS_SYNC_FIXTURES.fullSync.response.resources`,
+adapts the normalized resource envelopes into the
+`mapHandrailQuickBooksSdkResourcesToCanonicalFacts` input shape, builds
+canonical facts and P&L/balance sheet/trial balance reports, and returns a
+compact deterministic snapshot plus SHA-256 hash. The snapshot also records the
+ERP freshness row, snapshot refresh contract, monthly rollup summary, and
+QuickBooks service-health evidence derived from the normalized fixture boundary.
+The harness uses only fixture data and provider report fixture summaries; it
+does not require QuickBooks credentials, call Intuit, store Intuit
+access/refresh tokens, or retain raw unbounded provider payloads. Cash-flow
+reports remain buildable from canonical facts, while QuickBooks provider
+cash-flow parity is intentionally documented as unsupported in the deterministic
+provider-report fixture.
 
 ## Validation
 
@@ -160,6 +201,20 @@ For targeted source adapter work, run:
 
 ```sh
 npx vitest run test/source-adapters.test.ts
+```
+
+For the normalized QuickBooks handoff smoke harness, run:
+
+```sh
+npm run contract:smoke
+```
+
+For the reusable install/schema/fixture/freshness/drilldown health contract that
+host apps and the future `erp_financials` capability can run without provider
+credentials, run:
+
+```sh
+npm run health:smoke
 ```
 
 ## Current Scaffold

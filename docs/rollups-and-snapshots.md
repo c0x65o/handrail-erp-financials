@@ -19,13 +19,17 @@ Normal dashboard and AI reads should query:
 Rollup buckets aggregate ledger postings by fixed periods and bounded
 dimensions.
 
-Recommended bucket levels:
+Supported bucket grains:
 
 - day
 - month
 - fiscal period
 - fiscal quarter
 - fiscal year
+
+`fiscal_period` is a fiscal accounting period represented as a month-sized
+bucket. `fiscal_quarter` and `fiscal_year` use the company's
+`fiscal_year_start_month` to derive deterministic bucket windows.
 
 Recommended key fields:
 
@@ -53,6 +57,93 @@ Recommended aggregate fields:
 
 Dimension fields should be bounded and hash-addressed. Do not store arbitrary
 large dimension JSON in hot rollup rows.
+
+## Scheduled Rollup Contract
+
+`erp-financials-rollup` is a host-callable package contract, not a scheduler
+implementation. Host apps or a future Handrail capability choose when the job
+runs, then call `buildScheduledRollupJobResult` with:
+
+- tenant, company, and source scope
+- accounting basis
+- bucket grains
+- period start and end
+- `generatedAt`
+- compact source, import batch, and checkpoint evidence
+- either canonical postings or a host read interface
+
+The contract filters canonical postings to the requested scope and period,
+calls `buildRollupBuckets`, and returns plain write-ready `RollupBucket[]`
+values for `storage.writeRollupBuckets`. Scheduled job results intentionally
+exclude drilldown refs and token-shaped fields; durable drilldown evidence stays
+on report and rollup read models, while job summaries stay compact.
+
+The summary is deterministic for the same inputs and includes posting count,
+bucket row count, account count, dimension-hash count, currencies, per-grain
+window counts, and the supplied source/import/checkpoint evidence. It does not
+own provider credentials, raw provider payloads, scheduler state, or storage
+writes.
+
+## Late-Arrival Reprocess Contract
+
+`erp-financials-late-arrival-reprocess` is a host-callable package contract for
+changed or backdated canonical postings. Host apps should call
+`buildLateArrivalReprocessExecutionContract` with changed postings, configured
+bucket grains, overlap days, report names, `updatedAt`, `generatedAt`, and
+either canonical postings for the affected replacement windows or a host
+posting reader.
+
+The contract rejects empty changed-posting sets, calls
+`planLateArrivalReprocess`, expands the affected range to deterministic bucket
+windows, rebuilds only the replacement buckets for those windows, and returns:
+
+- `windows` for `storage.replaceRollupBucketsForWindows`
+- `staleSnapshots` for
+  `storage.markReportSnapshotsStaleForPostingChanges`
+- stale `freshnessRows` for `storage.writeFreshnessRows`
+- `storageWritePlan` ordered as replace rollup buckets, mark overlapping
+  snapshots stale, then write freshness rows
+
+Hosts that want the package to apply the plan can call
+`executeLateArrivalReprocess` with the same request plus a storage adapter. The
+executor uses `replaceRollupBucketsForWindows`, so repeated runs delete the
+affected rollup windows before upserting rebuilt buckets instead of appending
+duplicate aggregate rows. Snapshot staleness is date-overlap based; snapshots
+whose period overlaps the affected posting range, or whose as-of date is on or
+after the affected start, are marked stale.
+
+## Snapshot Refresh Contract
+
+`erp-financials-snapshot-refresh` is a host-callable package contract for
+reusing or rebuilding durable report snapshots. Host apps should call
+`executeSnapshotRefresh` with tenant, company, source, report name, accounting
+basis, period bounds, as-of date, currency, `generatedAt`, source/import
+freshness evidence, and a storage adapter that implements:
+
+- `loadLatestReportSnapshot`
+- `loadReportBuilderInput`
+- `writeReportSnapshot`
+- `writeFreshnessRows`
+
+The executor first checks the latest stored snapshot for the exact report
+request. If its embedded freshness status is `fresh`, the snapshot is returned
+with `action: "reused"` and no writes are performed unless `forceRefresh` is
+set. Missing snapshots, stale snapshots, partial snapshots, and unknown
+freshness snapshots are rebuilt from canonical facts loaded through
+`loadReportBuilderInput`.
+
+Rebuilds call the package report builders:
+
+- `buildProfitAndLossReport`
+- `buildBalanceSheetReport`
+- `buildTrialBalanceReport`
+- `buildCashFlowReport`
+
+The rebuilt snapshot is persisted with `storage.writeReportSnapshot`, and the
+matching dashboard freshness row is persisted with `storage.writeFreshnessRows`.
+Cash flow uses the package builder's `cashAccountIds` and
+`activityByAccountId` options, so `supported`, `partial`, and `unsupported`
+support states remain report metadata instead of host-app formulas.
 
 ## Report Snapshots
 

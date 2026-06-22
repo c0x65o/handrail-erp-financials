@@ -70,6 +70,12 @@ QuickBooks API
   -> Future ERP dashboards and AI tools
 ```
 
+The implementation handoff for QuickBooks workers, Future ERP workers, and
+canonical storage workers is defined in
+[storage-host-app-handoff.md](storage-host-app-handoff.md). That document is
+the shared contract for source identity, safe source refs, storage write order,
+and post-import rollup/snapshot/freshness work.
+
 ## Provider Reports
 
 QuickBooks provider reports are useful, but they should not be the only report
@@ -104,16 +110,53 @@ Recommended identity fields:
 - checkpoint id
 - source payload ref
 
+## Public Normalized Contracts
+
+`@handrail/erp-financials` exports normalized QuickBooks resource contracts for
+the SDK/service boundary. `NormalizedQuickBooksResourceSet` covers CompanyInfo,
+accounts, ledger transactions, ledger postings, parties/customers/vendors,
+items, classes, departments, provider report refs, import batch metadata, sync
+checkpoint metadata, and bounded reconciliation evidence.
+
+Those contracts are safe handoff shapes. They carry realm id, provider
+environment, source update timestamps, safe source refs, sync mode, import batch
+ids, and checkpoint ids, but they must not carry Intuit credentials, provider
+clients, or raw unbounded provider response bodies.
+
+The same module exports normalized sync envelopes for worker and SDK responses:
+`NormalizedQuickBooksFullSyncRequestEnvelope`,
+`NormalizedQuickBooksIncrementalSyncResponseEnvelope`,
+`NormalizedQuickBooksBackfillSyncRequestEnvelope`,
+`NormalizedQuickBooksReprocessSyncRequestEnvelope`,
+`NormalizedQuickBooksPaginationRequestEnvelope`,
+`NormalizedQuickBooksPaginationResponseEnvelope`, and
+`NormalizedQuickBooksCheckpointResumeRequestEnvelope`. These envelopes make sync
+mode, import batch id, checkpoint id, cursor kind/value, freshness timestamps,
+resource counts, warning/error summaries, and idempotency keys explicit without
+exposing provider credentials or raw QuickBooks payloads.
+
 ## Runtime Contract
 
 Host apps should consume the existing Handrail QuickBooks capability and SDK
 env contract for provider access. This package should not invent new QuickBooks
-credentials.
+credentials. QuickBooks OAuth, refresh tokens, access tokens, client secrets,
+token refresh, and raw provider import custody stay inside the Handrail
+QuickBooks integration service.
 
 Expected app behavior:
 
 - read QuickBooks service config through the SDK/runtime contract
-- call SDK methods for provider data
-- map SDK output into canonical facts
+- call SDK/service methods for full sync, incremental sync, and provider report
+  parity
+- map `NormalizedQuickBooksResourceSet` or
+  `NormalizedQuickBooksSyncResourceSet` into canonical facts through the ERP
+  Financials adapter contract:
+  `HandrailQuickBooksSdkResourcesAdapterInput` and
+  `mapHandrailQuickBooksSdkResourcesToCanonicalFacts`
 - store only safe source refs and accounting facts locally
 - use provider reports for reconciliation, not as a long-term app schema
+
+For implementation details, including checkpoint semantics, safe drilldown
+refs, provider report reconciliation helpers, the Future ERP adoption path, and
+validation commands such as `npm run contract:smoke`, see
+[storage-host-app-handoff.md](storage-host-app-handoff.md).

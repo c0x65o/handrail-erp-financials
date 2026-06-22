@@ -26,6 +26,24 @@ import type {
   TenantId,
   TransactionLine
 } from "./canonical-model.js";
+import type {
+  NormalizedAccountingImportBatchMetadata,
+  NormalizedAccountingReconciliationEvidence,
+  NormalizedAccountingSyncCheckpointMetadata,
+  NormalizedQuickBooksClassResource,
+  NormalizedQuickBooksCustomerResource,
+  NormalizedQuickBooksDepartmentResource,
+  NormalizedQuickBooksDimensionRef,
+  NormalizedQuickBooksDimensionResource,
+  NormalizedQuickBooksItemResource,
+  NormalizedQuickBooksLedgerPostingResource,
+  NormalizedQuickBooksLedgerTransaction,
+  NormalizedQuickBooksPartyResource,
+  NormalizedQuickBooksProviderReportRef,
+  NormalizedQuickBooksResourceEnvelope,
+  NormalizedQuickBooksSourceIdentity,
+  NormalizedQuickBooksVendorResource
+} from "./normalized-accounting-contracts.js";
 import { assertLedgerPostingAmounts, assertSafeSourcePayloadRef, createDimensionHash } from "./canonical-model.js";
 
 export type CanonicalAccountingFactSet = {
@@ -77,8 +95,10 @@ export type NativeLedgerAccount = {
 
 export type NativeLedgerLine = {
   readonly sourceLineId?: string;
+  readonly sourcePostingId?: string;
   readonly lineNumber: number;
   readonly accountSourceId: string;
+  readonly postingDate?: IsoDate;
   readonly debitAmount?: DecimalString;
   readonly creditAmount?: DecimalString;
   readonly amount?: DecimalString;
@@ -165,11 +185,11 @@ export type QuickBooksSdkJournalEntryLine = {
   readonly Amount: number | DecimalString;
   readonly DetailType?: string;
   readonly JournalEntryLineDetail: QuickBooksSdkJournalEntryLineDetail;
+  readonly sourcePayloadRef?: SafeSourcePayloadRef;
 };
 
 export type QuickBooksSdkJournalEntry = {
   readonly Id: string;
-  readonly SyncToken?: string;
   readonly TxnDate: IsoDate;
   readonly DocNumber?: string;
   readonly PrivateNote?: string;
@@ -178,17 +198,63 @@ export type QuickBooksSdkJournalEntry = {
     readonly LastUpdatedTime?: IsoDateTime;
   };
   readonly Line: readonly QuickBooksSdkJournalEntryLine[];
+  readonly sourcePayloadRef?: SafeSourcePayloadRef;
+};
+
+export type QuickBooksSdkCompanyInfo = {
+  readonly CompanyName?: string;
+  readonly LegalName?: string;
+  readonly FiscalYearStartMonth?: number;
 };
 
 export type QuickBooksJournalEntryAdapterInput = {
   readonly context: QuickBooksAdapterContext;
-  readonly companyInfo: {
-    readonly CompanyName?: string;
-    readonly LegalName?: string;
-    readonly FiscalYearStartMonth?: number;
-  };
+  readonly companyInfo: QuickBooksSdkCompanyInfo;
   readonly accounts: readonly QuickBooksSdkAccount[];
   readonly journalEntries: readonly QuickBooksSdkJournalEntry[];
+};
+
+export type HandrailQuickBooksNormalizedResource<ResourceType extends string, Resource> = NormalizedQuickBooksResourceEnvelope<
+  ResourceType,
+  Resource
+>;
+
+export type HandrailQuickBooksCompanyInfoResource = HandrailQuickBooksNormalizedResource<"CompanyInfo", QuickBooksSdkCompanyInfo>;
+
+export type HandrailQuickBooksAccountResource = HandrailQuickBooksNormalizedResource<"Account", QuickBooksSdkAccount>;
+
+export type HandrailQuickBooksJournalEntryResource = HandrailQuickBooksNormalizedResource<"JournalEntry", QuickBooksSdkJournalEntry> & {
+  readonly lineSourcePayloadRefs?: Readonly<Record<string, SafeSourcePayloadRef>>;
+};
+
+export type HandrailQuickBooksLedgerTransactionResource = HandrailQuickBooksNormalizedResource<
+  "LedgerTransaction",
+  NormalizedQuickBooksLedgerTransaction
+>;
+
+export type HandrailQuickBooksSdkResourceSet = {
+  readonly identity?: NormalizedQuickBooksSourceIdentity;
+  readonly importBatch?: NormalizedAccountingImportBatchMetadata;
+  readonly checkpoint?: NormalizedAccountingSyncCheckpointMetadata;
+  readonly companyInfo: HandrailQuickBooksCompanyInfoResource;
+  readonly accounts: readonly HandrailQuickBooksAccountResource[];
+  readonly journalEntries: readonly HandrailQuickBooksJournalEntryResource[];
+  readonly ledgerTransactions?: readonly HandrailQuickBooksLedgerTransactionResource[];
+  readonly ledgerPostings?: readonly NormalizedQuickBooksLedgerPostingResource[];
+  readonly parties?: readonly NormalizedQuickBooksPartyResource[];
+  readonly customers?: readonly NormalizedQuickBooksCustomerResource[];
+  readonly vendors?: readonly NormalizedQuickBooksVendorResource[];
+  readonly items?: readonly NormalizedQuickBooksItemResource[];
+  readonly classes?: readonly NormalizedQuickBooksClassResource[];
+  readonly departments?: readonly NormalizedQuickBooksDepartmentResource[];
+  readonly dimensions?: readonly NormalizedQuickBooksDimensionResource[];
+  readonly providerReports?: readonly NormalizedQuickBooksProviderReportRef[];
+  readonly reconciliationEvidence?: readonly NormalizedAccountingReconciliationEvidence[];
+};
+
+export type HandrailQuickBooksSdkResourcesAdapterInput = {
+  readonly context: QuickBooksAdapterContext;
+  readonly resources: HandrailQuickBooksSdkResourceSet;
 };
 
 type NormalizedLedgerInput = {
@@ -215,8 +281,70 @@ export const quickBooksJournalEntrySourceAdapter: SourceAdapter<QuickBooksJourna
   map: mapQuickBooksJournalEntriesToCanonicalFacts
 };
 
+export const handrailQuickBooksSdkResourcesSourceAdapter: SourceAdapter<HandrailQuickBooksSdkResourcesAdapterInput> = {
+  sourceSystem: "quickbooks",
+  map: mapHandrailQuickBooksSdkResourcesToCanonicalFacts
+};
+
 export function mapNativeLedgerToCanonicalFacts(input: NativeLedgerAdapterInput): CanonicalAccountingFactSet {
   return mapNormalizedLedgerToCanonicalFacts(input);
+}
+
+export function mapHandrailQuickBooksSdkResourcesToCanonicalFacts(
+  input: HandrailQuickBooksSdkResourcesAdapterInput
+): CanonicalAccountingFactSet {
+  if ((input.resources.ledgerTransactions?.length ?? 0) === 0) {
+    return mapQuickBooksJournalEntriesToCanonicalFacts(mapHandrailQuickBooksSdkResourcesToJournalEntryInput(input));
+  }
+
+  return mapHandrailQuickBooksSdkLedgerResourcesToCanonicalFacts(input);
+}
+
+export function mapHandrailQuickBooksSdkResourcesToJournalEntryInput(
+  input: HandrailQuickBooksSdkResourcesAdapterInput
+): QuickBooksJournalEntryAdapterInput {
+  assertQuickBooksResourceContext(input.context, input.resources.companyInfo);
+  assertQuickBooksResourceId(input.resources.companyInfo, input.context.realmId);
+
+  return {
+    context: input.context,
+    companyInfo: input.resources.companyInfo.resource,
+    accounts: input.resources.accounts.map((accountResource) => {
+      assertQuickBooksResourceContext(input.context, accountResource);
+      assertQuickBooksResourceId(accountResource, accountResource.resource.Id);
+      return accountResource.resource;
+    }),
+    journalEntries: input.resources.journalEntries.map((journalEntryResource): QuickBooksSdkJournalEntry => {
+      assertQuickBooksResourceContext(input.context, journalEntryResource);
+      assertQuickBooksResourceId(journalEntryResource, journalEntryResource.resource.Id);
+      const sourceUpdatedAt = journalEntryResource.resource.MetaData?.LastUpdatedTime ?? journalEntryResource.sourceUpdatedAt;
+      const lineSourcePayloadRefs: Readonly<Record<string, SafeSourcePayloadRef>> = journalEntryResource.lineSourcePayloadRefs ?? {};
+      const lines = journalEntryResource.resource.Line.map((line, index): QuickBooksSdkJournalEntryLine => {
+        const lineSourceId = quickBooksJournalEntryLineSourceId(line, index);
+        const sourcePayloadRef = line.sourcePayloadRef ?? lineSourcePayloadRefs[lineSourceId];
+        return {
+          ...line,
+          ...(sourcePayloadRef === undefined ? {} : { sourcePayloadRef: checkedSourcePayloadRef(sourcePayloadRef) })
+        };
+      });
+
+      return {
+        ...journalEntryResource.resource,
+        ...(sourceUpdatedAt === undefined
+          ? {}
+          : {
+              MetaData: {
+                ...(journalEntryResource.resource.MetaData ?? {}),
+                LastUpdatedTime: sourceUpdatedAt
+              }
+            }),
+        ...(journalEntryResource.sourcePayloadRef === undefined
+          ? {}
+          : { sourcePayloadRef: checkedSourcePayloadRef(journalEntryResource.sourcePayloadRef) }),
+        Line: lines
+      };
+    })
+  };
 }
 
 export function mapQuickBooksJournalEntriesToCanonicalFacts(input: QuickBooksJournalEntryAdapterInput): CanonicalAccountingFactSet {
@@ -226,57 +354,7 @@ export function mapQuickBooksJournalEntriesToCanonicalFacts(input: QuickBooksJou
     sourceCompanyRef: input.context.realmId,
     connectionRef: quickBooksConnectionRef(input.context)
   };
-  const transactions = input.journalEntries.map((journalEntry): NativeLedgerTransaction => {
-    const sourceUpdatedAt = journalEntry.MetaData?.LastUpdatedTime ?? context.latestSourceUpdatedAt;
-    return {
-      sourceTransactionId: journalEntry.Id,
-      sourceTransactionType: "JournalEntry",
-      transactionDate: journalEntry.TxnDate,
-      ...(journalEntry.DocNumber === undefined ? {} : { transactionNumber: journalEntry.DocNumber }),
-      ...(sourceUpdatedAt === undefined ? {} : { updatedAt: sourceUpdatedAt }),
-      currencyCode: journalEntry.CurrencyRef?.value ?? context.defaultCurrencyCode,
-      ...(journalEntry.PrivateNote === undefined ? {} : { memo: journalEntry.PrivateNote }),
-      sourcePayloadRef: quickBooksPayloadRef({
-        context,
-        sourceObjectType: "JournalEntry",
-        sourceObjectId: journalEntry.Id,
-        ...(sourceUpdatedAt === undefined ? {} : { sourceUpdatedAt }),
-        preview: {
-          realmId: input.context.realmId,
-          docNumber: journalEntry.DocNumber ?? null,
-          syncToken: journalEntry.SyncToken ?? null,
-          txnDate: journalEntry.TxnDate
-        }
-      }),
-      lines: journalEntry.Line.map((line, index): NativeLedgerLine => {
-        const accountSourceId = requiredRefValue(line.JournalEntryLineDetail.AccountRef, "JournalEntryLine.AccountRef");
-        const lineNumber = line.LineNum ?? index + 1;
-        const lineSourceId = line.Id ?? String(lineNumber);
-        const amount = decimalFromNumber(line.Amount);
-        const dimensionRefs = quickBooksDimensionRefs(line.JournalEntryLineDetail);
-        return {
-          sourceLineId: lineSourceId,
-          lineNumber,
-          accountSourceId,
-          ...(line.JournalEntryLineDetail.PostingType === "Debit" ? { debitAmount: amount } : { creditAmount: amount }),
-          ...(line.Description === undefined ? {} : { description: line.Description }),
-          ...(dimensionRefs.length === 0 ? {} : { dimensionRefs }),
-          sourcePayloadRef: quickBooksPayloadRef({
-            context,
-            sourceObjectType: "JournalEntryLine",
-            sourceObjectId: `${journalEntry.Id}:${lineSourceId}`,
-            ...(sourceUpdatedAt === undefined ? {} : { sourceUpdatedAt }),
-            preview: {
-              realmId: input.context.realmId,
-              journalEntryId: journalEntry.Id,
-              lineId: lineSourceId,
-              postingType: line.JournalEntryLineDetail.PostingType
-            }
-          })
-        };
-      })
-    };
-  });
+  const transactions = input.journalEntries.map((journalEntry) => quickBooksJournalEntryToNativeTransaction(context, journalEntry));
 
   return mapNormalizedLedgerToCanonicalFacts({
     context,
@@ -288,6 +366,120 @@ export function mapQuickBooksJournalEntriesToCanonicalFacts(input: QuickBooksJou
     accounts: input.accounts.map(quickBooksAccountToNativeAccount),
     transactions
   });
+}
+
+function mapHandrailQuickBooksSdkLedgerResourcesToCanonicalFacts(
+  input: HandrailQuickBooksSdkResourcesAdapterInput
+): CanonicalAccountingFactSet {
+  assertQuickBooksResourceContext(input.context, input.resources.companyInfo);
+  assertQuickBooksResourceId(input.resources.companyInfo, input.context.realmId);
+
+  const context: SourceAdapterContext = {
+    ...input.context,
+    sourceSystem: "quickbooks",
+    sourceCompanyRef: input.context.realmId,
+    connectionRef: quickBooksConnectionRef(input.context)
+  };
+  const ledgerTransactions = input.resources.ledgerTransactions ?? [];
+  const ledgerTransactionKeys = new Set(
+    ledgerTransactions.map((resource) => `${resource.resource.sourceTransactionType}:${resource.resource.sourceTransactionId}`)
+  );
+  const journalTransactions = input.resources.journalEntries
+    .filter((resource) => !ledgerTransactionKeys.has(`JournalEntry:${resource.resource.Id}`))
+    .map((resource) => {
+      assertQuickBooksResourceContext(input.context, resource);
+      assertQuickBooksResourceId(resource, resource.resource.Id);
+      return quickBooksJournalEntryToNativeTransaction(context, resource.resource);
+    });
+
+  return mapNormalizedLedgerToCanonicalFacts({
+    context,
+    company: {
+      legalName: input.resources.companyInfo.resource.LegalName ?? input.resources.companyInfo.resource.CompanyName ?? input.context.realmId,
+      displayName: input.resources.companyInfo.resource.CompanyName ?? input.resources.companyInfo.resource.LegalName ?? input.context.realmId,
+      ...(input.resources.companyInfo.resource.FiscalYearStartMonth === undefined
+        ? {}
+        : { fiscalYearStartMonth: input.resources.companyInfo.resource.FiscalYearStartMonth })
+    },
+    accounts: input.resources.accounts.map((accountResource) => {
+      assertQuickBooksResourceContext(input.context, accountResource);
+      assertQuickBooksResourceId(accountResource, accountResource.resource.Id);
+      return quickBooksAccountToNativeAccount(accountResource.resource);
+    }),
+    transactions: [
+      ...ledgerTransactions.map((resource) => normalizedQuickBooksLedgerTransactionToNativeTransaction(input.context, resource)),
+      ...journalTransactions
+    ],
+    parties: normalizedQuickBooksPartiesToCanonicalParties(context, [
+      ...(input.resources.parties ?? []),
+      ...(input.resources.customers ?? []),
+      ...(input.resources.vendors ?? [])
+    ]),
+    items: normalizedQuickBooksItemsToCanonicalItems(context, input.resources.items ?? []),
+    dimensions: normalizedQuickBooksDimensionsToCanonicalDimensions(context, [
+      ...(input.resources.dimensions ?? []),
+      ...(input.resources.classes ?? []),
+      ...(input.resources.departments ?? [])
+    ])
+  });
+}
+
+function quickBooksJournalEntryToNativeTransaction(
+  context: SourceAdapterContext,
+  journalEntry: QuickBooksSdkJournalEntry
+): NativeLedgerTransaction {
+  const sourceUpdatedAt = journalEntry.MetaData?.LastUpdatedTime ?? context.latestSourceUpdatedAt;
+  return {
+    sourceTransactionId: journalEntry.Id,
+    sourceTransactionType: "JournalEntry",
+    transactionDate: journalEntry.TxnDate,
+    ...(journalEntry.DocNumber === undefined ? {} : { transactionNumber: journalEntry.DocNumber }),
+    ...(sourceUpdatedAt === undefined ? {} : { updatedAt: sourceUpdatedAt }),
+    currencyCode: journalEntry.CurrencyRef?.value ?? context.defaultCurrencyCode,
+    ...(journalEntry.PrivateNote === undefined ? {} : { memo: journalEntry.PrivateNote }),
+    sourcePayloadRef:
+      journalEntry.sourcePayloadRef ??
+      quickBooksPayloadRef({
+        context,
+        sourceObjectType: "JournalEntry",
+        sourceObjectId: journalEntry.Id,
+        ...(sourceUpdatedAt === undefined ? {} : { sourceUpdatedAt }),
+        preview: {
+          realmId: context.sourceCompanyRef,
+          docNumber: journalEntry.DocNumber ?? null,
+          txnDate: journalEntry.TxnDate
+        }
+      }),
+    lines: journalEntry.Line.map((line, index): NativeLedgerLine => {
+      const accountSourceId = requiredRefValue(line.JournalEntryLineDetail.AccountRef, "JournalEntryLine.AccountRef");
+      const lineNumber = line.LineNum ?? index + 1;
+      const lineSourceId = quickBooksJournalEntryLineSourceId(line, index);
+      const amount = decimalFromNumber(line.Amount);
+      const dimensionRefs = quickBooksDimensionRefs(line.JournalEntryLineDetail);
+      return {
+        sourceLineId: lineSourceId,
+        lineNumber,
+        accountSourceId,
+        ...(line.JournalEntryLineDetail.PostingType === "Debit" ? { debitAmount: amount } : { creditAmount: amount }),
+        ...(line.Description === undefined ? {} : { description: line.Description }),
+        ...(dimensionRefs.length === 0 ? {} : { dimensionRefs }),
+        sourcePayloadRef:
+          line.sourcePayloadRef ??
+          quickBooksPayloadRef({
+            context,
+            sourceObjectType: "JournalEntryLine",
+            sourceObjectId: `${journalEntry.Id}:${lineSourceId}`,
+            ...(sourceUpdatedAt === undefined ? {} : { sourceUpdatedAt }),
+            preview: {
+              realmId: context.sourceCompanyRef,
+              journalEntryId: journalEntry.Id,
+              lineId: lineSourceId,
+              postingType: line.JournalEntryLineDetail.PostingType
+            }
+          })
+      };
+    })
+  };
 }
 
 function mapNormalizedLedgerToCanonicalFacts(input: NormalizedLedgerInput): CanonicalAccountingFactSet {
@@ -324,7 +516,7 @@ function mapNormalizedLedgerToCanonicalFacts(input: NormalizedLedgerInput): Cano
       const transactionLineId = canonicalRecordId(
         input.context,
         "transaction_line",
-        `${transaction.sourceTransactionId}:${line.sourceLineId ?? String(line.lineNumber)}`
+        nativeLineSourceKey(transaction, line)
       );
       return {
         tenantId: input.context.tenantId,
@@ -345,15 +537,15 @@ function mapNormalizedLedgerToCanonicalFacts(input: NormalizedLedgerInput): Cano
   const lineIdBySourceKey = new Map(
     input.transactions.flatMap((transaction) =>
       transaction.lines.map((line) => [
-        `${transaction.sourceTransactionId}:${line.sourceLineId ?? String(line.lineNumber)}`,
-        canonicalRecordId(input.context, "transaction_line", `${transaction.sourceTransactionId}:${line.sourceLineId ?? String(line.lineNumber)}`)
+        nativeLineSourceKey(transaction, line),
+        canonicalRecordId(input.context, "transaction_line", nativeLineSourceKey(transaction, line))
       ])
     )
   );
   const postings = input.transactions.flatMap((transaction): LedgerPosting[] =>
     transaction.lines.map((line): LedgerPosting => {
       const sourceLineId = line.sourceLineId ?? String(line.lineNumber);
-      const sourcePostingId = `${transaction.sourceTransactionId}:${sourceLineId}`;
+      const sourcePostingId = line.sourcePostingId ?? `${transaction.sourceTransactionId}:${sourceLineId}`;
       const amounts = lineAmounts(line);
       const sourcePayloadRef = line.sourcePayloadRef ?? defaultPayloadRef(`${transaction.sourceTransactionType}Line`, sourcePostingId, transaction.updatedAt);
       assertSafeSourcePayloadRef(sourcePayloadRef);
@@ -367,7 +559,7 @@ function mapNormalizedLedgerToCanonicalFacts(input: NormalizedLedgerInput): Cano
         accountId: requiredMapValue(accountIdBySourceId, line.accountSourceId, "account"),
         ...(line.partySourceId === undefined ? {} : { partyId: canonicalRecordId(input.context, "party", line.partySourceId) }),
         ...(line.itemSourceId === undefined ? {} : { itemId: canonicalRecordId(input.context, "item", line.itemSourceId) }),
-        postingDate: transaction.transactionDate,
+        postingDate: line.postingDate ?? transaction.transactionDate,
         accountingBasis: input.context.accountingBasis,
         debitAmount: formatMinor(amounts.debitMinor),
         creditAmount: formatMinor(amounts.creditMinor),
@@ -438,6 +630,79 @@ function mapNormalizedLedgerToCanonicalFacts(input: NormalizedLedgerInput): Cano
   };
 }
 
+function normalizedQuickBooksLedgerTransactionToNativeTransaction(
+  context: QuickBooksAdapterContext,
+  resource: HandrailQuickBooksLedgerTransactionResource
+): NativeLedgerTransaction {
+  assertQuickBooksResourceContext(context, resource);
+  assertQuickBooksResourceId(resource, resource.resource.sourceTransactionId);
+  const transaction = resource.resource;
+  const sourceUpdatedAt = transaction.sourceUpdatedAt ?? resource.sourceUpdatedAt ?? context.latestSourceUpdatedAt;
+
+  return {
+    sourceTransactionId: transaction.sourceTransactionId,
+    sourceTransactionType: transaction.sourceTransactionType,
+    transactionDate: transaction.transactionDate,
+    ...(transaction.transactionNumber === undefined ? {} : { transactionNumber: transaction.transactionNumber }),
+    ...(transaction.postedAt === undefined ? {} : { postedAt: transaction.postedAt }),
+    ...(sourceUpdatedAt === undefined ? {} : { updatedAt: sourceUpdatedAt }),
+    ...(transaction.partyRef === undefined ? {} : { partySourceId: transaction.partyRef.sourceObjectId }),
+    currencyCode: transaction.currencyCode ?? context.defaultCurrencyCode,
+    ...(transaction.exchangeRate === undefined ? {} : { exchangeRate: transaction.exchangeRate }),
+    ...(transaction.memo === undefined ? {} : { memo: transaction.memo }),
+    sourcePayloadRef:
+      transaction.sourcePayloadRef ??
+      resource.sourcePayloadRef ??
+      quickBooksPayloadRef({
+        context: {
+          ...context,
+          sourceSystem: "quickbooks",
+          sourceCompanyRef: context.realmId,
+          connectionRef: quickBooksConnectionRef(context)
+        },
+        sourceObjectType: transaction.sourceTransactionType,
+        sourceObjectId: transaction.sourceTransactionId,
+        ...(sourceUpdatedAt === undefined ? {} : { sourceUpdatedAt }),
+        preview: {
+          realmId: context.realmId,
+          resourceType: transaction.sourceTransactionType,
+          resourceId: transaction.sourceTransactionId,
+          transactionDate: transaction.transactionDate
+        }
+      }),
+    lines: transaction.lines.flatMap((line, lineIndex): NativeLedgerLine[] => {
+      if (line.postings.length === 0) {
+        throw new Error(
+          `Normalized QuickBooks ${transaction.sourceTransactionType} line ${line.sourceLineId ?? String(line.lineNumber)} must include at least one posting`
+        );
+      }
+
+      return line.postings.map((posting, postingIndex): NativeLedgerLine => {
+        const dimensionRefs = normalizedQuickBooksDimensionRefs(posting.dimensionRefs ?? line.dimensionRefs);
+        const partySourceId = posting.partyRef?.sourceObjectId ?? line.partyRef?.sourceObjectId ?? transaction.partyRef?.sourceObjectId;
+        const itemSourceId = posting.itemRef?.sourceObjectId ?? line.itemRef?.sourceObjectId;
+        const sourcePayloadRef = posting.sourcePayloadRef ?? line.sourcePayloadRef;
+        const sourcePostingId = posting.sourcePostingId;
+        return {
+          sourceLineId: line.sourceLineId ?? `${String(lineIndex + 1)}:${String(postingIndex + 1)}`,
+          sourcePostingId,
+          lineNumber: line.lineNumber,
+          accountSourceId: posting.accountRef.sourceObjectId,
+          postingDate: posting.postingDate,
+          ...nativeAmountsFromNormalizedPosting(posting, line),
+          ...(partySourceId === undefined ? {} : { partySourceId }),
+          ...(itemSourceId === undefined ? {} : { itemSourceId }),
+          ...(line.quantity === undefined ? {} : { quantity: line.quantity }),
+          ...(line.unitAmount === undefined ? {} : { unitAmount: line.unitAmount }),
+          ...(line.description === undefined ? {} : { description: line.description }),
+          ...(dimensionRefs.length === 0 ? {} : { dimensionRefs }),
+          ...(sourcePayloadRef === undefined ? {} : { sourcePayloadRef })
+        };
+      });
+    })
+  };
+}
+
 function accountFromNative(context: SourceAdapterContext, account: NativeLedgerAccount): Account {
   return {
     tenantId: context.tenantId,
@@ -467,6 +732,105 @@ function quickBooksAccountToNativeAccount(account: QuickBooksSdkAccount): Native
   };
 }
 
+function nativeLineSourceKey(transaction: NativeLedgerTransaction, line: NativeLedgerLine): string {
+  return line.sourcePostingId ?? `${transaction.sourceTransactionId}:${line.sourceLineId ?? String(line.lineNumber)}`;
+}
+
+function nativeAmountsFromNormalizedPosting(
+  posting: NormalizedQuickBooksLedgerPostingResource["resource"],
+  line: NormalizedQuickBooksLedgerTransaction["lines"][number]
+): Pick<NativeLedgerLine, "amount" | "creditAmount" | "debitAmount"> {
+  if (posting.debitAmount !== undefined || posting.creditAmount !== undefined) {
+    return {
+      ...(posting.debitAmount === undefined ? {} : { debitAmount: posting.debitAmount }),
+      ...(posting.creditAmount === undefined ? {} : { creditAmount: posting.creditAmount })
+    };
+  }
+  if (posting.netAmount !== undefined) {
+    return { amount: posting.netAmount };
+  }
+  if (line.amount !== undefined) {
+    return { amount: line.amount };
+  }
+  throw new Error(`Normalized QuickBooks posting ${posting.sourcePostingId} must include debitAmount, creditAmount, netAmount, or line amount`);
+}
+
+function normalizedQuickBooksPartiesToCanonicalParties(
+  context: SourceAdapterContext,
+  resources: readonly (NormalizedQuickBooksPartyResource | NormalizedQuickBooksCustomerResource | NormalizedQuickBooksVendorResource)[]
+): readonly Party[] {
+  const seen = new Set<string>();
+  const parties: Party[] = [];
+  for (const resource of resources) {
+    const party = resource.resource;
+    const key = `${party.partyType}:${party.sourceObjectId}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    parties.push({
+      tenantId: context.tenantId,
+      sourceId: context.sourceId,
+      partyId: canonicalRecordId(context, "party", party.sourceObjectId),
+      sourcePartyId: party.sourceObjectId,
+      partyType: party.partyType,
+      displayName: party.displayName ?? party.sourceObjectId,
+      active: party.active ?? true
+    });
+  }
+  return parties;
+}
+
+function normalizedQuickBooksItemsToCanonicalItems(
+  context: SourceAdapterContext,
+  resources: readonly NormalizedQuickBooksItemResource[]
+): readonly Item[] {
+  return resources.map((resource): Item => {
+    const item = resource.resource;
+    return {
+      tenantId: context.tenantId,
+      sourceId: context.sourceId,
+      itemId: canonicalRecordId(context, "item", item.sourceObjectId),
+      sourceItemId: item.sourceObjectId,
+      itemType: item.itemType ?? "other",
+      name: item.name,
+      ...(item.incomeAccountRef === undefined ? {} : { incomeAccountId: canonicalRecordId(context, "account", item.incomeAccountRef.sourceObjectId) }),
+      ...(item.expenseAccountRef === undefined ? {} : { expenseAccountId: canonicalRecordId(context, "account", item.expenseAccountRef.sourceObjectId) }),
+      ...(item.assetAccountRef === undefined ? {} : { assetAccountId: canonicalRecordId(context, "account", item.assetAccountRef.sourceObjectId) }),
+      active: item.active ?? true
+    };
+  });
+}
+
+function normalizedQuickBooksDimensionsToCanonicalDimensions(
+  context: SourceAdapterContext,
+  resources: readonly (NormalizedQuickBooksDimensionResource | NormalizedQuickBooksClassResource | NormalizedQuickBooksDepartmentResource)[]
+): readonly AccountingDimension[] {
+  const seen = new Set<string>();
+  const dimensions: AccountingDimension[] = [];
+  for (const resource of resources) {
+    const dimension = resource.resource;
+    const key = `${dimension.dimensionKind}:${dimension.sourceObjectId}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    dimensions.push({
+      tenantId: context.tenantId,
+      sourceId: context.sourceId,
+      dimensionId: canonicalRecordId(context, "dimension", key),
+      dimensionKind: dimension.dimensionKind,
+      sourceDimensionId: dimension.sourceObjectId,
+      name: dimension.name,
+      ...(dimension.parentDimensionRef === undefined
+        ? {}
+        : { parentDimensionId: canonicalRecordId(context, "dimension", `${dimension.parentDimensionRef.dimensionKind}:${dimension.parentDimensionRef.sourceObjectId}`) }),
+      active: dimension.active ?? true
+    });
+  }
+  return dimensions;
+}
+
 function quickBooksAccountClassification(accountType: string): AccountClassification {
   const normalized = accountType.toLowerCase().replaceAll(" ", "");
   if (["bank", "accountsreceivable", "othercurrentasset", "fixedasset", "otherasset"].includes(normalized)) {
@@ -493,11 +857,51 @@ function quickBooksAccountClassification(accountType: string): AccountClassifica
   return "expense";
 }
 
+function normalizedQuickBooksDimensionRefs(refs: readonly NormalizedQuickBooksDimensionRef[] | undefined): DimensionRef[] {
+  return (refs ?? []).map((ref) => ({
+    dimensionKind: ref.dimensionKind,
+    sourceDimensionId: ref.sourceObjectId,
+    ...(ref.displayName === undefined ? {} : { name: ref.displayName })
+  }));
+}
+
 function quickBooksDimensionRefs(detail: QuickBooksSdkJournalEntryLineDetail): DimensionRef[] {
   const refs: DimensionRef[] = [];
   appendQuickBooksDimensionRef(refs, "class", detail.ClassRef);
   appendQuickBooksDimensionRef(refs, "department", detail.DepartmentRef);
   return refs;
+}
+
+function assertQuickBooksResourceContext(
+  context: QuickBooksAdapterContext,
+  resource: HandrailQuickBooksNormalizedResource<string, unknown>
+): void {
+  if (resource.providerEnvironment !== context.providerEnvironment) {
+    throw new Error(
+      `QuickBooks ${resource.resourceType} providerEnvironment ${resource.providerEnvironment} does not match context ${context.providerEnvironment}`
+    );
+  }
+  if (resource.realmId !== context.realmId) {
+    throw new Error(`QuickBooks ${resource.resourceType} realmId ${resource.realmId} does not match context ${context.realmId}`);
+  }
+  if (resource.sourcePayloadRef !== undefined) {
+    assertSafeSourcePayloadRef(resource.sourcePayloadRef);
+  }
+}
+
+function assertQuickBooksResourceId(resource: HandrailQuickBooksNormalizedResource<string, unknown>, expectedResourceId: string): void {
+  if (resource.resourceId !== expectedResourceId) {
+    throw new Error(`QuickBooks ${resource.resourceType} resourceId ${resource.resourceId} does not match ${expectedResourceId}`);
+  }
+}
+
+function checkedSourcePayloadRef(sourcePayloadRef: SafeSourcePayloadRef): SafeSourcePayloadRef {
+  assertSafeSourcePayloadRef(sourcePayloadRef);
+  return sourcePayloadRef;
+}
+
+function quickBooksJournalEntryLineSourceId(line: Pick<QuickBooksSdkJournalEntryLine, "Id" | "LineNum">, index: number): string {
+  return line.Id ?? String(line.LineNum ?? index + 1);
 }
 
 function appendQuickBooksDimensionRef(refs: DimensionRef[], dimensionKind: string, ref: QuickBooksSdkRef | undefined): void {

@@ -17,6 +17,7 @@ import type {
   ReportFreshness,
   ReportFreshnessStatus,
   ReportSnapshot,
+  ReportSnapshotSource,
   ReportSnapshotLine,
   ReportSnapshotTotal,
   SourceId,
@@ -24,10 +25,11 @@ import type {
   TenantId,
   TransactionLine
 } from "./canonical-model.js";
-import { assertLedgerPostingAmounts, assertNoCredentialKeys, assertSafeSourcePayloadRef } from "./canonical-model.js";
-import type { BuiltReport } from "./report-builders.js";
+import { assertLedgerPostingAmounts, assertNoCredentialKeys, assertSafeDrilldownRef, assertSafeSourcePayloadRef } from "./canonical-model.js";
+import type { BuiltReport, ReportBuilderInput, ReportName } from "./report-builders.js";
 import { type StatementFixtureSet } from "./fixtures.js";
 import {
+  DISALLOWED_CREDENTIAL_COLUMN_PATTERNS,
   POSTGRES_CANONICAL_SCHEMA_MANIFEST,
   assertManifestHasNoCredentialColumns,
   renderPostgresSchemaSql
@@ -81,7 +83,7 @@ export type PostgresSchemaValidationResult = {
   readonly issues: readonly PostgresSchemaValidationIssue[];
 };
 
-export type RollupBucketGrain = "day" | "month" | "fiscal_period";
+export type RollupBucketGrain = "day" | "month" | "fiscal_period" | "fiscal_quarter" | "fiscal_year";
 
 export type RollupBucket = {
   readonly rollupBucketId: string;
@@ -143,6 +145,46 @@ export type ReportFreshnessRow = {
   readonly updatedAt: IsoDateTime;
 };
 
+export type LoadReportBuilderInput = {
+  readonly tenantId: TenantId;
+  readonly companyId: string;
+  readonly sourceId: SourceId;
+  readonly reportName: ReportName;
+  readonly accountingBasis: AccountingBasis;
+  readonly periodStart: IsoDate;
+  readonly periodEnd: IsoDate;
+  readonly asOfDate?: IsoDate;
+  readonly currencyCode: IsoCurrencyCode;
+  readonly generatedAt?: IsoDateTime;
+};
+
+export type StoredReportSnapshot = {
+  readonly snapshot: ReportSnapshot;
+  readonly lines: readonly ReportSnapshotLine[];
+  readonly totals: readonly ReportSnapshotTotal[];
+};
+
+export type LoadReportSnapshotInput = {
+  readonly tenantId: TenantId;
+  readonly reportName: ReportName;
+  readonly accountingBasis: AccountingBasis;
+  readonly periodStart: IsoDate;
+  readonly periodEnd: IsoDate;
+  readonly asOfDate?: IsoDate;
+  readonly currencyCode: IsoCurrencyCode;
+};
+
+export type LoadRollupBucketsInput = {
+  readonly tenantId: TenantId;
+  readonly companyId: string;
+  readonly sourceId: SourceId;
+  readonly accountingBasis: AccountingBasis;
+  readonly bucketGrain: RollupBucketGrain;
+  readonly bucketStart: IsoDate;
+  readonly bucketEnd: IsoDate;
+  readonly currencyCode: IsoCurrencyCode;
+};
+
 export type FixtureLoadResult = {
   readonly companies: number;
   readonly sources: number;
@@ -179,6 +221,9 @@ export type PostgresStorageAdapter = {
   writeFreshnessRows(rows: readonly ReportFreshnessRow[]): Promise<number>;
   markReportSnapshotsStale(input: MarkReportSnapshotsStaleInput): Promise<number>;
   markReportSnapshotsStaleForPostingChanges(input: MarkReportSnapshotsStaleForPostingChangesInput): Promise<number>;
+  loadReportBuilderInput(input: LoadReportBuilderInput): Promise<ReportBuilderInput>;
+  loadLatestReportSnapshot(input: LoadReportSnapshotInput): Promise<StoredReportSnapshot | undefined>;
+  loadRollupBuckets(input: LoadRollupBucketsInput): Promise<readonly RollupBucket[]>;
 };
 
 export type MarkReportSnapshotsStaleInput = {
@@ -250,7 +295,11 @@ export function createPostgresStorageAdapter(
       ]);
     },
     async upsertImportBatch(importBatch) {
-      return upsertRows(client, manifest, "import_batches", [importBatchRow(importBatch)], ["import_batch_id"]);
+      return upsertRows(client, manifest, "import_batches", [importBatchRow(importBatch)], [
+        "tenant_id",
+        "source_id",
+        "import_batch_id"
+      ]);
     },
     async upsertSyncCheckpoint(checkpoint) {
       return upsertRows(client, manifest, "sync_checkpoints", [syncCheckpointRow(checkpoint)], [
@@ -358,6 +407,15 @@ export function createPostgresStorageAdapter(
     },
     async markReportSnapshotsStaleForPostingChanges(input) {
       return markReportSnapshotsStaleForPostingChanges(client, manifest, input);
+    },
+    async loadReportBuilderInput(input) {
+      return loadReportBuilderInput(client, manifest, input);
+    },
+    async loadLatestReportSnapshot(input) {
+      return loadLatestReportSnapshot(client, manifest, input);
+    },
+    async loadRollupBuckets(input) {
+      return loadRollupBuckets(client, manifest, input);
     }
   };
 }
@@ -420,7 +478,7 @@ export async function validatePostgresSchema(
           message: `missing column ${manifest.namespace}.${table.name}.${column.name}`
         });
       }
-      if (/token|secret|password|credential|private_key/i.test(column.name)) {
+      if (isDisallowedCredentialColumnName(column.name)) {
         issues.push({
           kind: "credential_column",
           table: table.name,
@@ -595,6 +653,157 @@ where ${filters.join(" and ")}`,
   );
 
   return result.rowCount ?? 0;
+}
+
+async function loadReportBuilderInput(
+  client: PostgresQueryClient,
+  manifest: PostgresSchemaManifest,
+  input: LoadReportBuilderInput
+): Promise<ReportBuilderInput> {
+  const accountResult = await client.query<Row>(
+    `select "account_id", "tenant_id", "source_id", "source_account_id", "account_number", "name", "type", "subtype", "classification", "parent_account_id", "currency_code", "active"
+from ${qualifiedTable(manifest, "accounts")}
+where "tenant_id" = $1 and "source_id" = $2 and "active" = true
+order by "account_number" nulls last, "name", "account_id"`,
+    [input.tenantId, input.sourceId]
+  );
+  const postingResult = await client.query<Row>(
+    `select "posting_id", "tenant_id", "source_id", "source_posting_id", "transaction_id", "transaction_line_id", "account_id", "party_id", "item_id", "posting_date", "accounting_basis", "debit_amount", "credit_amount", "net_amount", "currency_code", "dimension_hash", "dimension_refs", "source_payload_ref", "import_batch_id", "checkpoint_id"
+from ${qualifiedTable(manifest, "ledger_postings")}
+where "tenant_id" = $1
+  and "source_id" = $2
+  and "accounting_basis" = $3
+  and "currency_code" = $4
+  and "posting_date" <= coalesce($5::date, $6::date)
+order by "posting_date", "transaction_id", "posting_id"`,
+    [input.tenantId, input.sourceId, input.accountingBasis, input.currencyCode, input.asOfDate, input.periodEnd]
+  );
+  const freshnessResult = await client.query<Row>(
+    `select "status", "source_id", "import_batch_id", "checkpoint_id", "fresh_through", "stale_reason"
+from ${qualifiedTable(manifest, "report_freshness")}
+where "tenant_id" = $1
+  and "company_id" = $2
+  and "source_id" = $3
+  and "report_name" = $4
+  and "accounting_basis" = $5
+  and "period_start" = $6::date
+  and "period_end" = $7::date
+  and "currency_code" = $8
+order by "updated_at" desc
+limit 1`,
+    [
+      input.tenantId,
+      input.companyId,
+      input.sourceId,
+      input.reportName,
+      input.accountingBasis,
+      input.periodStart,
+      input.periodEnd,
+      input.currencyCode
+    ]
+  );
+
+  return {
+    tenantId: input.tenantId,
+    accounts: accountResult.rows.map(accountFromRow),
+    postings: postingResult.rows.map(ledgerPostingFromRow),
+    accountingBasis: input.accountingBasis,
+    sourceId: input.sourceId,
+    currencyCode: input.currencyCode,
+    periodStart: input.periodStart,
+    periodEnd: input.periodEnd,
+    ...(input.asOfDate === undefined ? {} : { asOfDate: input.asOfDate }),
+    ...(input.generatedAt === undefined ? {} : { generatedAt: input.generatedAt }),
+    ...(freshnessResult.rows[0] === undefined ? {} : { freshness: reportFreshnessFromRow(freshnessResult.rows[0]) })
+  };
+}
+
+async function loadLatestReportSnapshot(
+  client: PostgresQueryClient,
+  manifest: PostgresSchemaManifest,
+  input: LoadReportSnapshotInput
+): Promise<StoredReportSnapshot | undefined> {
+  const snapshotResult = await client.query<Row>(
+    `select "report_snapshot_id", "tenant_id", "report_name", "snapshot_source", "accounting_basis", "period_start", "period_end", "as_of_date", "currency_code", "generated_at", "freshness", "reconciliation_status", "reconciliation_difference"
+from ${qualifiedTable(manifest, "report_snapshots")}
+where "tenant_id" = $1
+  and "report_name" = $2
+  and "accounting_basis" = $3
+  and "period_start" = $4::date
+  and "period_end" = $5::date
+  and "as_of_date" = coalesce($6::date, $5::date)
+  and "currency_code" = $7
+order by "generated_at" desc
+limit 1`,
+    [
+      input.tenantId,
+      input.reportName,
+      input.accountingBasis,
+      input.periodStart,
+      input.periodEnd,
+      input.asOfDate,
+      input.currencyCode
+    ]
+  );
+  const snapshotRow = snapshotResult.rows[0];
+
+  if (snapshotRow === undefined) {
+    return undefined;
+  }
+
+  const snapshot = reportSnapshotFromRow(snapshotRow);
+  const lineResult = await client.query<Row>(
+    `select "report_line_id", "tenant_id", "report_snapshot_id", "parent_report_line_id", "section", "label", "account_id", "amount", "sort_order", "drilldown_ref"
+from ${qualifiedTable(manifest, "report_snapshot_lines")}
+where "tenant_id" = $1 and "report_snapshot_id" = $2
+order by "sort_order", "report_line_id"`,
+    [input.tenantId, snapshot.reportSnapshotId]
+  );
+  const totalResult = await client.query<Row>(
+    `select "report_total_id", "tenant_id", "report_snapshot_id", "total_key", "label", "amount", "drilldown_ref"
+from ${qualifiedTable(manifest, "report_snapshot_totals")}
+where "tenant_id" = $1 and "report_snapshot_id" = $2
+order by "report_total_id"`,
+    [input.tenantId, snapshot.reportSnapshotId]
+  );
+
+  return {
+    snapshot,
+    lines: lineResult.rows.map(reportSnapshotLineFromRow),
+    totals: totalResult.rows.map(reportSnapshotTotalFromRow)
+  };
+}
+
+async function loadRollupBuckets(
+  client: PostgresQueryClient,
+  manifest: PostgresSchemaManifest,
+  input: LoadRollupBucketsInput
+): Promise<readonly RollupBucket[]> {
+  const result = await client.query<Row>(
+    `select "rollup_bucket_id", "tenant_id", "company_id", "source_id", "account_id", "accounting_basis", "bucket_grain", "bucket_start", "bucket_end", "currency_code", "dimension_hash", "debit_amount", "credit_amount", "net_amount", "posting_count", "source_posting_max_updated_at", "import_batch_id", "generated_at"
+from ${qualifiedTable(manifest, "rollup_buckets")}
+where "tenant_id" = $1
+  and "company_id" = $2
+  and "source_id" = $3
+  and "accounting_basis" = $4
+  and "bucket_grain" = $5
+  and "bucket_start" >= $6::date
+  and "bucket_end" <= $7::date
+  and "currency_code" = $8
+order by "bucket_start", "account_id", "dimension_hash"`,
+    [
+      input.tenantId,
+      input.companyId,
+      input.sourceId,
+      input.accountingBasis,
+      input.bucketGrain,
+      input.bucketStart,
+      input.bucketEnd,
+      input.currencyCode
+    ]
+  );
+
+  return result.rows.map(rollupBucketFromRow);
 }
 
 async function replaceRollupBucketsForWindows(
@@ -961,6 +1170,7 @@ function reportSnapshotRow(snapshot: ReportSnapshot): Row {
 }
 
 function reportSnapshotLineRow(line: ReportSnapshotLine): Row {
+  assertSafeDrilldownRef(line.drilldownRef);
   return {
     report_line_id: line.reportLineId,
     tenant_id: line.tenantId,
@@ -976,6 +1186,7 @@ function reportSnapshotLineRow(line: ReportSnapshotLine): Row {
 }
 
 function reportSnapshotTotalRow(total: ReportSnapshotTotal): Row {
+  assertSafeDrilldownRef(total.drilldownRef);
   return {
     report_total_id: total.reportTotalId,
     tenant_id: total.tenantId,
@@ -1040,15 +1251,270 @@ function reportFreshnessRow(row: ReportFreshnessRow): Row {
   };
 }
 
+function accountFromRow(row: Row): Account {
+  const accountNumber = optionalString(row.account_number);
+  const subtype = optionalString(row.subtype);
+  const parentAccountId = optionalString(row.parent_account_id);
+  const currencyCode = optionalString(row.currency_code);
+
+  return {
+    accountId: requiredString(row.account_id, "account_id"),
+    tenantId: requiredString(row.tenant_id, "tenant_id"),
+    sourceId: requiredString(row.source_id, "source_id"),
+    sourceAccountId: requiredString(row.source_account_id, "source_account_id"),
+    ...(accountNumber === undefined ? {} : { accountNumber }),
+    name: requiredString(row.name, "name"),
+    type: requiredString(row.type, "type"),
+    ...(subtype === undefined ? {} : { subtype }),
+    classification: requiredString(row.classification, "classification") as Account["classification"],
+    ...(parentAccountId === undefined ? {} : { parentAccountId }),
+    ...(currencyCode === undefined ? {} : { currencyCode }),
+    active: Boolean(row.active)
+  };
+}
+
+function ledgerPostingFromRow(row: Row): LedgerPosting {
+  const sourcePayloadRef = optionalJson(row.source_payload_ref) as LedgerPosting["sourcePayloadRef"] | undefined;
+  const transactionLineId = optionalString(row.transaction_line_id);
+  const partyId = optionalString(row.party_id);
+  const itemId = optionalString(row.item_id);
+  const checkpointId = optionalString(row.checkpoint_id);
+
+  if (sourcePayloadRef !== undefined) {
+    assertSafeSourcePayloadRef(sourcePayloadRef);
+  }
+
+  return {
+    postingId: requiredString(row.posting_id, "posting_id"),
+    tenantId: requiredString(row.tenant_id, "tenant_id"),
+    sourceId: requiredString(row.source_id, "source_id"),
+    sourcePostingId: requiredString(row.source_posting_id, "source_posting_id"),
+    transactionId: requiredString(row.transaction_id, "transaction_id"),
+    ...(transactionLineId === undefined ? {} : { transactionLineId }),
+    accountId: requiredString(row.account_id, "account_id"),
+    ...(partyId === undefined ? {} : { partyId }),
+    ...(itemId === undefined ? {} : { itemId }),
+    postingDate: isoDate(row.posting_date, "posting_date"),
+    accountingBasis: requiredString(row.accounting_basis, "accounting_basis") as AccountingBasis,
+    debitAmount: requiredString(row.debit_amount, "debit_amount"),
+    creditAmount: requiredString(row.credit_amount, "credit_amount"),
+    netAmount: requiredString(row.net_amount, "net_amount"),
+    currencyCode: requiredString(row.currency_code, "currency_code"),
+    dimensionHash: requiredString(row.dimension_hash, "dimension_hash"),
+    dimensionRefs: (optionalJson(row.dimension_refs) as LedgerPosting["dimensionRefs"] | undefined) ?? [],
+    ...(sourcePayloadRef === undefined ? {} : { sourcePayloadRef }),
+    importBatchId: requiredString(row.import_batch_id, "import_batch_id"),
+    ...(checkpointId === undefined ? {} : { checkpointId })
+  };
+}
+
+function reportFreshnessFromRow(row: Row): ReportFreshness {
+  const sourceId = optionalString(row.source_id);
+  const importBatchId = optionalString(row.import_batch_id);
+  const checkpointId = optionalString(row.checkpoint_id);
+  const freshThrough = optionalIsoDateTime(row.fresh_through);
+  const staleReason = optionalString(row.stale_reason);
+
+  return {
+    status: requiredString(row.status, "status") as ReportFreshnessStatus,
+    ...(sourceId === undefined ? {} : { sourceId }),
+    ...(importBatchId === undefined ? {} : { importBatchId }),
+    ...(checkpointId === undefined ? {} : { checkpointId }),
+    ...(freshThrough === undefined ? {} : { freshThrough }),
+    ...(staleReason === undefined ? {} : { staleReason })
+  };
+}
+
+function reportSnapshotFromRow(row: Row): ReportSnapshot {
+  const freshness = (optionalJson(row.freshness) as ReportFreshness | undefined) ?? { status: "unknown" };
+  assertNoCredentialKeys(freshness);
+
+  return {
+    reportSnapshotId: requiredString(row.report_snapshot_id, "report_snapshot_id"),
+    tenantId: requiredString(row.tenant_id, "tenant_id"),
+    reportName: requiredString(row.report_name, "report_name"),
+    snapshotSource: requiredString(row.snapshot_source, "snapshot_source") as ReportSnapshotSource,
+    accountingBasis: requiredString(row.accounting_basis, "accounting_basis") as AccountingBasis,
+    periodStart: isoDate(row.period_start, "period_start"),
+    periodEnd: isoDate(row.period_end, "period_end"),
+    asOfDate: isoDate(row.as_of_date, "as_of_date"),
+    currencyCode: requiredString(row.currency_code, "currency_code"),
+    generatedAt: isoDateTime(row.generated_at, "generated_at"),
+    freshness,
+    reconciliationStatus: requiredString(row.reconciliation_status, "reconciliation_status") as ReportSnapshot["reconciliationStatus"],
+    reconciliationDifference: requiredString(row.reconciliation_difference, "reconciliation_difference")
+  };
+}
+
+function reportSnapshotLineFromRow(row: Row): ReportSnapshotLine {
+  const drilldownRef = optionalJson(row.drilldown_ref) as ReportSnapshotLine["drilldownRef"] | undefined;
+  const parentReportLineId = optionalString(row.parent_report_line_id);
+  const accountId = optionalString(row.account_id);
+  if (drilldownRef === undefined) {
+    throw new Error("report snapshot line is missing drilldown_ref");
+  }
+  assertSafeDrilldownRef(drilldownRef);
+
+  return {
+    reportLineId: requiredString(row.report_line_id, "report_line_id"),
+    tenantId: requiredString(row.tenant_id, "tenant_id"),
+    reportSnapshotId: requiredString(row.report_snapshot_id, "report_snapshot_id"),
+    ...(parentReportLineId === undefined ? {} : { parentReportLineId }),
+    section: requiredString(row.section, "section"),
+    label: requiredString(row.label, "label"),
+    ...(accountId === undefined ? {} : { accountId }),
+    amount: requiredString(row.amount, "amount"),
+    sortOrder: requiredNumber(row.sort_order, "sort_order"),
+    drilldownRef
+  };
+}
+
+function reportSnapshotTotalFromRow(row: Row): ReportSnapshotTotal {
+  const drilldownRef = optionalJson(row.drilldown_ref) as ReportSnapshotTotal["drilldownRef"] | undefined;
+  if (drilldownRef === undefined) {
+    throw new Error("report snapshot total is missing drilldown_ref");
+  }
+  assertSafeDrilldownRef(drilldownRef);
+
+  return {
+    reportTotalId: requiredString(row.report_total_id, "report_total_id"),
+    tenantId: requiredString(row.tenant_id, "tenant_id"),
+    reportSnapshotId: requiredString(row.report_snapshot_id, "report_snapshot_id"),
+    totalKey: requiredString(row.total_key, "total_key"),
+    label: requiredString(row.label, "label"),
+    amount: requiredString(row.amount, "amount"),
+    drilldownRef
+  };
+}
+
+function rollupBucketFromRow(row: Row): RollupBucket {
+  const sourcePostingMaxUpdatedAt = optionalIsoDateTime(row.source_posting_max_updated_at);
+  const importBatchId = optionalString(row.import_batch_id);
+
+  return {
+    rollupBucketId: requiredString(row.rollup_bucket_id, "rollup_bucket_id"),
+    tenantId: requiredString(row.tenant_id, "tenant_id"),
+    companyId: requiredString(row.company_id, "company_id"),
+    sourceId: requiredString(row.source_id, "source_id"),
+    accountId: requiredString(row.account_id, "account_id"),
+    accountingBasis: requiredString(row.accounting_basis, "accounting_basis") as AccountingBasis,
+    bucketGrain: requiredString(row.bucket_grain, "bucket_grain") as RollupBucketGrain,
+    bucketStart: isoDate(row.bucket_start, "bucket_start"),
+    bucketEnd: isoDate(row.bucket_end, "bucket_end"),
+    currencyCode: requiredString(row.currency_code, "currency_code"),
+    dimensionHash: requiredString(row.dimension_hash, "dimension_hash"),
+    debitAmount: requiredString(row.debit_amount, "debit_amount"),
+    creditAmount: requiredString(row.credit_amount, "credit_amount"),
+    netAmount: requiredString(row.net_amount, "net_amount"),
+    postingCount: requiredNumber(row.posting_count, "posting_count"),
+    ...(sourcePostingMaxUpdatedAt === undefined ? {} : { sourcePostingMaxUpdatedAt }),
+    ...(importBatchId === undefined ? {} : { importBatchId }),
+    generatedAt: isoDateTime(row.generated_at, "generated_at")
+  };
+}
+
+function requiredString(value: unknown, fieldName: string): string {
+  if (value === undefined || value === null) {
+    throw new Error(`missing required row field ${fieldName}`);
+  }
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "bigint" || typeof value === "boolean") {
+    return value.toString();
+  }
+
+  throw new Error(`row field ${fieldName} must be string-like`);
+}
+
+function optionalString(value: unknown): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "bigint" || typeof value === "boolean") {
+    return value.toString();
+  }
+
+  throw new Error("optional row field must be string-like");
+}
+
+function requiredNumber(value: unknown, fieldName: string): number {
+  if (typeof value === "number") {
+    return value;
+  }
+  if (typeof value === "bigint") {
+    return Number(value);
+  }
+  if (typeof value === "string" && value.trim() !== "") {
+    return Number(value);
+  }
+
+  throw new Error(`missing required numeric row field ${fieldName}`);
+}
+
+function optionalJson(value: unknown): unknown {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  return value;
+}
+
+function isoDate(value: unknown, fieldName: string): IsoDate {
+  if (value instanceof Date) {
+    return value.toISOString().slice(0, 10);
+  }
+
+  return requiredString(value, fieldName).slice(0, 10);
+}
+
+function isoDateTime(value: unknown, fieldName: string): IsoDateTime {
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  return requiredString(value, fieldName);
+}
+
+function optionalIsoDateTime(value: unknown): IsoDateTime | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "bigint" || typeof value === "boolean") {
+    return value.toString();
+  }
+
+  throw new Error("optional datetime row field must be string-like");
+}
+
 function validateCredentialFreeRow(tableName: string, row: Row): void {
   for (const [key, value] of Object.entries(row)) {
-    if (/token|secret|password|credential|private_key/i.test(key)) {
+    if (isDisallowedCredentialColumnName(key)) {
       throw new Error(`credential-like field is not allowed: ${tableName}.${key}`);
     }
     if (isJsonLike(value) && key !== "drilldown_ref") {
       assertNoCredentialKeys(value, `$${tableName}.${key}`);
     }
   }
+}
+
+function isDisallowedCredentialColumnName(name: string): boolean {
+  return DISALLOWED_CREDENTIAL_COLUMN_PATTERNS.some((pattern) => pattern.test(name));
 }
 
 function isJsonLike(value: unknown): value is JsonValue {
