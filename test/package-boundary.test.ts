@@ -3,9 +3,33 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import {
+  POSTGRES_CANONICAL_SCHEMA_MANIFEST,
   ERP_FINANCIALS_PACKAGE,
   PACKAGE_BOUNDARY,
-  describePackageBoundary
+  buildBalanceSheetReport,
+  buildCashFlowReport,
+  buildFutureErpReportFromCanonicalReadModel,
+  buildProfitAndLossReport,
+  buildTrialBalanceReport,
+  checkErpFinancialsInstallHealth,
+  createFutureErpCanonicalFactPersistenceWorker,
+  createFutureErpQuickBooksFullSyncWorker,
+  createFutureErpQuickBooksIncrementalSyncWorker,
+  createFutureErpRollupAndLateArrivalWorker,
+  createFutureErpSnapshotRefreshAndFreshnessWorker,
+  createHandrailQuickBooksFullSyncServiceHandler,
+  createHandrailQuickBooksSyncClient,
+  createPostgresStorageAdapter,
+  createSnapshotRefreshContract,
+  describePackageBoundary,
+  mapHandrailQuickBooksSdkResourcesToCanonicalFacts,
+  mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts,
+  mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts,
+  persistFutureErpCanonicalFacts,
+  reconcileReportFreshness,
+  renderPostgresSchemaSql,
+  validateFutureErpCanonicalSchemaPreflight,
+  validatePostgresSchema
 } from "../src/index.js";
 
 import type { AccountId } from "../src/index.js";
@@ -35,11 +59,57 @@ describe("package boundary", () => {
     expect(boundary.excludes).toContain("provider token storage");
     expect(boundary.sourceAdapterBoundary).toContain("canonical accounting facts");
   });
+
+  it("keeps root package exports as the only public package entry point", () => {
+    const packageManifest = readPackageManifest();
+
+    expect(packageManifest.exports).toEqual({
+      ".": {
+        types: "./dist/index.d.ts",
+        import: "./dist/index.js"
+      }
+    });
+  });
+
+  it("keeps the documented adoption allowlist available from the root barrel", () => {
+    const supportedRuntimeExports = [
+      POSTGRES_CANONICAL_SCHEMA_MANIFEST,
+      renderPostgresSchemaSql,
+      createPostgresStorageAdapter,
+      validatePostgresSchema,
+      checkErpFinancialsInstallHealth,
+      validateFutureErpCanonicalSchemaPreflight,
+      createFutureErpCanonicalFactPersistenceWorker,
+      persistFutureErpCanonicalFacts,
+      mapHandrailQuickBooksSdkResourcesToCanonicalFacts,
+      mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts,
+      mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts,
+      createFutureErpQuickBooksFullSyncWorker,
+      createFutureErpQuickBooksIncrementalSyncWorker,
+      createHandrailQuickBooksFullSyncServiceHandler,
+      createHandrailQuickBooksSyncClient,
+      buildProfitAndLossReport,
+      buildBalanceSheetReport,
+      buildTrialBalanceReport,
+      buildCashFlowReport,
+      buildFutureErpReportFromCanonicalReadModel,
+      createSnapshotRefreshContract,
+      reconcileReportFreshness,
+      createFutureErpRollupAndLateArrivalWorker,
+      createFutureErpSnapshotRefreshAndFreshnessWorker
+    ];
+
+    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.namespace).toBe("erp_financials");
+    for (const supportedExport of supportedRuntimeExports) {
+      expect(supportedExport).toBeDefined();
+    }
+  });
 });
 
 type PackageManifest = {
   readonly name: string;
   readonly version: string;
+  readonly exports: unknown;
 };
 
 function readPackageManifest(): PackageManifest {
@@ -59,7 +129,8 @@ function isPackageManifest(value: unknown): value is PackageManifest {
     "name" in value &&
     typeof value.name === "string" &&
     "version" in value &&
-    typeof value.version === "string"
+    typeof value.version === "string" &&
+    "exports" in value
   );
 }
 

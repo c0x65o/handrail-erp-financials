@@ -2,20 +2,25 @@ import {
   buildBalanceSheetReport,
   buildCashFlowReport,
   buildFutureErpReportFromCanonicalReadModel,
+  buildNormalizedQuickBooksFullSyncResponse,
+  buildNormalizedQuickBooksIncrementalSyncResponse,
   buildProfitAndLossReport,
   buildTrialBalanceReport,
   createFutureErpCanonicalFactPersistenceWorker,
+  createFutureErpQuickBooksFullSyncWorker,
+  createFutureErpQuickBooksIncrementalSyncWorker,
   createFutureErpRollupAndLateArrivalWorker,
   createFutureErpSnapshotRefreshAndFreshnessWorker,
   createHandrailQuickBooksFullSyncServiceHandler,
   createHandrailQuickBooksSyncClient,
-  buildFutureErpQuickBooksSandboxSyncOwnerEvidence,
   createPostgresStorageAdapter,
   createSnapshotRefreshContract,
+  fetchFutureErpQuickBooksProviderReportParitySnapshot,
   mapHandrailQuickBooksSdkResourcesToCanonicalFacts,
+  mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts,
+  mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts,
   persistFutureErpCanonicalFacts,
   reconcileReportFreshness,
-  runFutureErpQuickBooksSandboxReplay,
   validateFutureErpCanonicalSchemaPreflight
 } from "@handrail/erp-financials";
 import type {
@@ -35,9 +40,15 @@ import type {
   FutureErpFreshnessReconciliationWorkerRequest,
   FutureErpFreshnessReconciliationWorkerResult,
   FutureErpWorkerScope,
-  FutureErpQuickBooksSandboxReplayClient,
-  FutureErpQuickBooksSandboxReplayResult,
-  FutureErpQuickBooksSandboxSyncOwnerEvidence,
+  FutureErpQuickBooksFullSyncWorker,
+  FutureErpQuickBooksFullSyncRunResult,
+  FutureErpQuickBooksIncrementalSyncWorker,
+  FutureErpQuickBooksIncrementalSyncRunResult,
+  FutureErpQuickBooksProviderReportParityClient,
+  FutureErpQuickBooksProviderReportParityRequest,
+  FutureErpQuickBooksProviderReportParityResult,
+  FutureErpQuickBooksProviderReportParitySnapshot,
+  FutureErpQuickBooksProviderReportParityStatus,
   FreshnessReconcileInput,
   HandrailQuickBooksFullSyncServiceHandler,
   HandrailQuickBooksSdkResourcesAdapterInput,
@@ -64,10 +75,14 @@ export const futureErpResolvedFinancialImports = {
   createFutureErpCanonicalFactPersistenceWorker,
   persistFutureErpCanonicalFacts,
   mapHandrailQuickBooksSdkResourcesToCanonicalFacts,
+  mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts,
+  mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts,
   buildProfitAndLossReport,
   buildBalanceSheetReport,
   buildTrialBalanceReport,
   buildCashFlowReport,
+  createFutureErpQuickBooksFullSyncWorker,
+  createFutureErpQuickBooksIncrementalSyncWorker,
   buildFutureErpReportFromCanonicalReadModel,
   createFutureErpRollupAndLateArrivalWorker,
   createFutureErpSnapshotRefreshAndFreshnessWorker,
@@ -78,8 +93,9 @@ export const futureErpResolvedFinancialImports = {
 export const futureErpResolvedQuickBooksClientImports = {
   createHandrailQuickBooksFullSyncServiceHandler,
   createHandrailQuickBooksSyncClient,
-  buildFutureErpQuickBooksSandboxSyncOwnerEvidence,
-  runFutureErpQuickBooksSandboxReplay
+  buildNormalizedQuickBooksFullSyncResponse,
+  buildNormalizedQuickBooksIncrementalSyncResponse,
+  fetchFutureErpQuickBooksProviderReportParitySnapshot
 };
 
 export type FutureErpResolvedQuickBooksSyncEnvelopeTypes = {
@@ -95,17 +111,21 @@ export type FutureErpResolvedQuickBooksServiceClientTypes = {
   readonly clientFactory: typeof createHandrailQuickBooksSyncClient;
 };
 
-export type FutureErpResolvedQuickBooksSandboxReplaySmokeTypes = {
+export type FutureErpResolvedQuickBooksSyncAndParityTypes = {
   readonly normalizedResources: NormalizedQuickBooksResourceSet;
   readonly providerReportName: NormalizedQuickBooksProviderReportName;
   readonly providerReportResult: NormalizedQuickBooksProviderReportResult;
   readonly sdkServiceFactory: typeof createHandrailQuickBooksFullSyncServiceHandler;
-  readonly replayClient: FutureErpQuickBooksSandboxReplayClient;
-  readonly replayRunner: typeof runFutureErpQuickBooksSandboxReplay;
-  readonly replayResult: FutureErpQuickBooksSandboxReplayResult;
-  readonly ownerEvidenceBuilder: typeof buildFutureErpQuickBooksSandboxSyncOwnerEvidence;
-  readonly ownerEvidence: FutureErpQuickBooksSandboxSyncOwnerEvidence;
   readonly smokeHarnessResult: QuickBooksContractSmokeHarnessResult;
+  readonly fullSyncWorker: FutureErpQuickBooksFullSyncWorker;
+  readonly fullSyncResult: FutureErpQuickBooksFullSyncRunResult;
+  readonly incrementalSyncWorker: FutureErpQuickBooksIncrementalSyncWorker;
+  readonly incrementalSyncResult: FutureErpQuickBooksIncrementalSyncRunResult;
+  readonly providerParityClient: FutureErpQuickBooksProviderReportParityClient;
+  readonly providerParityRequest: FutureErpQuickBooksProviderReportParityRequest;
+  readonly providerParityResult: FutureErpQuickBooksProviderReportParityResult;
+  readonly providerParitySnapshot: FutureErpQuickBooksProviderReportParitySnapshot;
+  readonly providerParityStatus: FutureErpQuickBooksProviderReportParityStatus;
 };
 
 export type FutureErpResolvedFinancialWorkflowTypes = {

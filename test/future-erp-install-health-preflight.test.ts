@@ -39,7 +39,7 @@ describe("Future ERP install health preflight", () => {
       generatedAt: "2026-06-20T07:00:00.000Z",
       install: {
         packageName: "@handrail/erp-financials",
-        packageVersion: "0.1.1",
+        packageVersion: "0.1.2",
         manifestVersion: "2026-06-19.storage-v1",
         schemaVersion: 2,
         namespace: "erp_financials",

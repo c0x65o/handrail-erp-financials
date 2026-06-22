@@ -25,20 +25,32 @@ For safe retry cadence, deterministic evidence fields, fixture smoke
 interpretation, drilldown health failure handling, and escalation boundaries,
 use [operations-runbook.md](operations-runbook.md).
 
-## Executable contract summary
+## Only supported adoption API
 
-Host apps and the future Handrail capability should call these exported
-`@handrail/erp-financials` APIs directly:
+Host apps and the future Handrail capability must import ERP Financials through
+the root `@handrail/erp-financials` entry point only. The package manifest
+intentionally publishes no supported subpath exports. Imports from package
+subpaths, copied package folders, generated `dist/` internals, `src` internals,
+or host-app compatibility shims are unsupported.
+
+Host apps should call these exported `@handrail/erp-financials` APIs directly:
 
 | Contract area | Exported API |
 | --- | --- |
-| Install validation | `checkErpFinancialsInstallHealth`, `preflightFutureErpInstallHealth`, `createFutureErpInstallHealthPreflightWorker` |
-| Schema health | `createPostgresStorageAdapter(...).validateSchema()`, `validatePostgresSchema`, `POSTGRES_CANONICAL_SCHEMA_MANIFEST`, `renderPostgresSchemaSql` |
-| Schedule descriptor | `buildScheduledRollupJobResult`, `buildLateArrivalReprocessExecutionContract`, `executeLateArrivalReprocess`, `executeSnapshotRefresh`, `createSnapshotRefreshContract`, `reconcileReportFreshness`, `ScheduledRollupJobName`, `LateArrivalReprocessJobName`, `SnapshotRefreshJobName`, `ScheduledRollupJobRequest`, `SnapshotRefreshRequest`, `FreshnessReconcileInput` |
-| Future ERP scheduler binding | `createFutureErpRollupAndLateArrivalWorker`, `createFutureErpSnapshotRefreshAndFreshnessWorker` |
+| Canonical schema, install, and health | `POSTGRES_CANONICAL_SCHEMA_MANIFEST`, `renderPostgresSchemaSql`, `createPostgresStorageAdapter(...).installSchema()`, `createPostgresStorageAdapter(...).validateSchema()`, `validatePostgresSchema`, `checkErpFinancialsInstallHealth`, `validateFutureErpCanonicalSchemaPreflight`, `preflightFutureErpInstallHealth`, `createFutureErpInstallHealthPreflightWorker` |
+| Storage adapter and persistence | `createPostgresStorageAdapter`, `createFutureErpCanonicalFactPersistenceWorker`, `persistFutureErpCanonicalFacts` |
+| QuickBooks normalized mapping | `HandrailQuickBooksSdkResourcesAdapterInput`, `mapHandrailQuickBooksSdkResourcesToCanonicalFacts`, `mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts`, `mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts` |
+| QuickBooks sync worker contracts | `createFutureErpQuickBooksFullSyncWorker`, `createFutureErpQuickBooksIncrementalSyncWorker`, `NormalizedQuickBooksFullSyncRequestEnvelope`, `NormalizedQuickBooksFullSyncResponseEnvelope`, `NormalizedQuickBooksIncrementalSyncRequestEnvelope`, `NormalizedQuickBooksIncrementalSyncResponseEnvelope`, `createHandrailQuickBooksFullSyncServiceHandler`, `createHandrailQuickBooksSyncClient`, `HandrailQuickBooksSyncClient`, `HandrailQuickBooksSyncClientTransport` |
+| Report builders and persisted report flow | `buildProfitAndLossReport`, `buildBalanceSheetReport`, `buildTrialBalanceReport`, `buildCashFlowReport`, `buildFutureErpReportFromCanonicalReadModel`, `createSnapshotRefreshContract`, `reconcileReportFreshness`, `createFutureErpRollupAndLateArrivalWorker`, `createFutureErpSnapshotRefreshAndFreshnessWorker` |
+| Schedule descriptor | `buildScheduledRollupJobResult`, `buildLateArrivalReprocessExecutionContract`, `executeLateArrivalReprocess`, `executeSnapshotRefresh`, `ScheduledRollupJobName`, `LateArrivalReprocessJobName`, `SnapshotRefreshJobName`, `ScheduledRollupJobRequest`, `SnapshotRefreshRequest`, `FreshnessReconcileInput` |
 | Fixture smoke | `runErpFinancialsFixtureSmokeHealth` |
-| Freshness reconciliation | `reconcileReportFreshness`, `createSnapshotRefreshContract`, `createFutureErpSnapshotRefreshAndFreshnessWorker(...).runFreshnessReconciliation(...)` |
 | Drilldown health | `checkErpFinancialsFreshnessAndDrilldownHealth`, `assertSafeDrilldownRef`, `assertSafeSourcePayloadRef` |
+
+Host apps should not bypass `createPostgresStorageAdapter` or the persistence
+workers for canonical financial fact writes except through explicit
+package-compatible migrations or audited backfills. Normal report reads should
+use canonical report snapshots, rollups, freshness rows, and safe drilldown
+refs produced by this package.
 
 The schedule descriptor is executable package code plus exported request/result
 types. It lets a host app or separately approved platform capability register
@@ -414,7 +426,8 @@ record degraded evidence, or escalate config, deploy, or credential work.
 `erp_financials` and `quickbooks` are separate capability concerns.
 
 `quickbooks` owns provider access through the Handrail QuickBooks SDK/runtime
-contract. QuickBooks OAuth and token custody stay inside the integration
+contract. QuickBooks OAuth, token custody, raw provider calls, provider
+resource normalization, and tenant/provider access stay inside the integration
 service. Host apps should use `@handrail/sdk-node` helpers and the
 Handrail-managed runtime keys:
 
@@ -426,8 +439,11 @@ Handrail-managed runtime keys:
 `HANDRAIL_QBO_BASE_URL` is only for local or service override scenarios.
 
 `erp_financials` owns canonical financial schema, deterministic report
-builders, rollup/snapshot/freshness contracts, fixtures, and validation. It
-must not store Intuit access tokens, Intuit refresh tokens, provider OAuth
-secrets, or new QuickBooks credential environment variables. QuickBooks helper
-inputs should contain normalized resources plus safe runtime/source references
-only. They must not contain raw unbounded provider payloads.
+builders, storage adapter contracts, rollup/snapshot/freshness contracts,
+bounded reconciliation evidence, fixtures, and validation. It must not store
+Intuit access tokens, Intuit refresh tokens, provider OAuth secrets, or new
+QuickBooks credential environment variables. QuickBooks helper inputs should
+contain normalized resources plus safe runtime/source references only. They
+must not contain raw unbounded provider payloads. Provider reports are allowed
+only as bounded parity evidence; ERP Financials canonical snapshots and
+freshness rows are the durable reporting source.

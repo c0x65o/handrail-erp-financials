@@ -53,7 +53,7 @@ provider credentials, hidden platform state, production data, or CI/CD.
 
 | Item | Exact source | Version/evidence |
 | --- | --- | --- |
-| Package | `package.json` | `@handrail/erp-financials@0.1.1` |
+| Package | `package.json` | `@handrail/erp-financials@0.1.2` |
 | Node engine | `package.json` | `>=20.11.0` |
 | Lockfile | `package-lock.json` | lockfileVersion `3` |
 | `@eslint/js` | `package-lock.json` | `9.39.4` |

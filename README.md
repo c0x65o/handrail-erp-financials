@@ -25,6 +25,9 @@ npm install
 
 The published package entry point is `@handrail/erp-financials`; local
 development builds emit ESM JavaScript and TypeScript declarations to `dist/`.
+Consumers must import from that root entry point only. Subpath imports such as
+`@handrail/erp-financials/quickbooks/*`, copied package shims, and host-local
+re-exports are not supported compatibility surfaces.
 
 ```ts
 import {
@@ -101,6 +104,52 @@ scheduled job expectations, freshness checks, and future Handrail capability
 validation checklist, see [docs/host-app-install.md](docs/host-app-install.md).
 For the worker-facing QuickBooks SDK/service to host-app storage contract, see
 [docs/storage-host-app-handoff.md](docs/storage-host-app-handoff.md).
+
+## Only Supported Adoption API
+
+Host apps adopting ERP Financials should treat the root
+`@handrail/erp-financials` package entry point as the complete public adoption
+contract. The package manifest intentionally exposes no supported subpath
+exports; direct imports from `src/`, `dist/`, provider-specific copied package
+folders, or app-local compatibility shims are unsupported.
+
+The supported adoption surfaces are:
+
+- Canonical schema, install, and health:
+  `POSTGRES_CANONICAL_SCHEMA_MANIFEST`, `renderPostgresSchemaSql`,
+  `createPostgresStorageAdapter(...).installSchema()`,
+  `createPostgresStorageAdapter(...).validateSchema()`,
+  `validatePostgresSchema`, `checkErpFinancialsInstallHealth`, and
+  `validateFutureErpCanonicalSchemaPreflight`.
+- Storage adapter and persistence: `createPostgresStorageAdapter`,
+  `createFutureErpCanonicalFactPersistenceWorker`, and
+  `persistFutureErpCanonicalFacts`. Host apps should write canonical financial
+  facts through the adapter/worker contract and should not bypass it except for
+  explicit package-compatible migrations or audited backfills.
+- QuickBooks normalized mapping: `HandrailQuickBooksSdkResourcesAdapterInput`,
+  `mapHandrailQuickBooksSdkResourcesToCanonicalFacts`,
+  `mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts`, and
+  `mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts`.
+- QuickBooks sync worker contracts:
+  `createFutureErpQuickBooksFullSyncWorker`,
+  `createFutureErpQuickBooksIncrementalSyncWorker`, the normalized
+  full/incremental QuickBooks sync envelope types, and the package-root
+  QuickBooks service/client facade including
+  `createHandrailQuickBooksFullSyncServiceHandler` and
+  `createHandrailQuickBooksSyncClient`.
+- Report builders and persisted report flow: `buildProfitAndLossReport`,
+  `buildBalanceSheetReport`, `buildTrialBalanceReport`,
+  `buildCashFlowReport`, `buildFutureErpReportFromCanonicalReadModel`,
+  `createSnapshotRefreshContract`, `reconcileReportFreshness`,
+  `createFutureErpRollupAndLateArrivalWorker`, and
+  `createFutureErpSnapshotRefreshAndFreshnessWorker`.
+
+The QuickBooks service owns OAuth, token custody, raw provider calls, provider
+resource normalization, and tenant/provider access. ERP Financials owns the
+provider-neutral canonical schema, storage adapter contract, report formulas,
+rollups, snapshots, freshness, and bounded reconciliation evidence. Provider
+report data may be used as parity evidence only; it is not the product
+reporting source of truth.
 
 ## Source Adapters
 

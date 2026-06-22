@@ -22,7 +22,9 @@ Checked surfaces:
 
 The package manifest exposes only the root package entry point:
 `@handrail/erp-financials`. Public compatibility therefore depends on
-`src/index.ts` re-exporting consumer-facing values and types.
+`src/index.ts` re-exporting consumer-facing values and types. Subpath imports,
+copied package shims, generated `dist/` internals, and `src/` internals are not
+supported adoption APIs.
 
 ## Linked Repo Availability
 
@@ -49,15 +51,25 @@ The audit also compared all ERP-owned references that import from
 `test/future-erp-consumer-type-imports.ts` against `src/index.ts`. Result: no
 referenced public import is missing from the package root.
 
-The in-repo Future ERP consumer type fixture covers these required public
-surfaces from the package root:
+The in-repo Future ERP consumer type fixture and package-boundary test cover
+these required supported adoption surfaces from the package root:
 
-- Canonical storage: `createPostgresStorageAdapter`,
-  `validateFutureErpCanonicalSchemaPreflight`,
+- Canonical schema, install, and health:
+  `POSTGRES_CANONICAL_SCHEMA_MANIFEST`, `renderPostgresSchemaSql`,
+  `createPostgresStorageAdapter(...).installSchema()`,
+  `createPostgresStorageAdapter(...).validateSchema()`,
+  `validatePostgresSchema`, `checkErpFinancialsInstallHealth`, and
+  `validateFutureErpCanonicalSchemaPreflight`.
+- Storage adapter and persistence: `createPostgresStorageAdapter`,
   `createFutureErpCanonicalFactPersistenceWorker`, and
   `persistFutureErpCanonicalFacts`.
 - QuickBooks mapping and SDK/service contracts:
+  `HandrailQuickBooksSdkResourcesAdapterInput`,
   `mapHandrailQuickBooksSdkResourcesToCanonicalFacts`,
+  `mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts`,
+  `mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts`,
+  `createFutureErpQuickBooksFullSyncWorker`,
+  `createFutureErpQuickBooksIncrementalSyncWorker`,
   `createHandrailQuickBooksFullSyncServiceHandler`,
   `createHandrailQuickBooksSyncClient`, normalized full/incremental sync
   envelopes, provider report result types, and normalized resource sets.
