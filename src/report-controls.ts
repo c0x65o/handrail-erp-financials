@@ -102,6 +102,16 @@ export type StandardReportPresentationRequest = {
   readonly weekStartsOn?: 0 | 1 | 2 | 3 | 4 | 5 | 6;
 };
 
+export type StandardReportPresentationReadModelRequest = Omit<StandardReportPresentationRequest, "reportInput" | "parties" | "items"> & {
+  readonly tenantId: string;
+  readonly companyId: string;
+  readonly sourceId: string;
+  readonly periodStart: IsoDate;
+  readonly periodEnd: IsoDate;
+  readonly asOfDate?: IsoDate;
+  readonly currencyCode: string;
+};
+
 export type StandardReportColumnKind = "actual" | "comparison" | "calculation";
 
 export type StandardReportPresentationColumn = {
@@ -142,6 +152,24 @@ export type StandardReportPresentation = {
   readonly rows: readonly StandardReportPresentationRow[];
   readonly primaryReport: BuiltReport;
   readonly comparisonReports: Readonly<Record<string, BuiltReport>>;
+};
+
+export type StandardReportPresentationReportColumn = {
+  readonly column: StandardReportPresentationColumn;
+  readonly report: BuiltReport;
+};
+
+export type StandardReportPresentationReportSet = {
+  readonly reportName: ReportName;
+  readonly accountingMethod: StandardReportAccountingMethod;
+  readonly displayColumnsBy: StandardReportDisplayColumnsBy;
+  readonly primaryReport: BuiltReport;
+  readonly amountColumns: readonly StandardReportPresentationReportColumn[];
+  readonly calculationColumns?: readonly StandardReportPresentationColumn[];
+};
+
+export type StandardReportPresentationReadModelStorage = {
+  loadStandardReportPresentation(request: StandardReportPresentationReadModelRequest): Promise<StandardReportPresentationReportSet>;
 };
 
 type AmountColumnBuildSpec = {
@@ -194,7 +222,54 @@ export function assertStandardReportControlsSupported(request: StandardReportPre
   }
 }
 
-export function buildStandardReportPresentation(request: StandardReportPresentationRequest): StandardReportPresentation {
+export async function buildStandardReportPresentationFromReadModel(
+  storage: StandardReportPresentationReadModelStorage,
+  request: StandardReportPresentationReadModelRequest
+): Promise<StandardReportPresentation> {
+  assertStandardReportAccountingMethod(request.accountingMethod ?? "accrual");
+  assertDisplayColumnsBySupported(request.displayColumnsBy ?? "none");
+  for (const period of request.compareTo?.periods ?? []) {
+    assertCompareToPeriodSupported(period);
+  }
+  for (const calculation of request.compareTo?.calculations ?? []) {
+    assertComparisonCalculationSupported(calculation);
+  }
+  if (request.compareTo?.periods?.includes("custom_period") === true && request.compareTo.customPeriod === undefined) {
+    throw new Error("custom_period comparison requires compareTo.customPeriod");
+  }
+
+  return buildStandardReportPresentationFromReports(await storage.loadStandardReportPresentation(request));
+}
+
+export function buildStandardReportPresentationFromReports(reportSet: StandardReportPresentationReportSet): StandardReportPresentation {
+  const amountReports = new Map<string, BuiltReport>(
+    reportSet.amountColumns.map((entry) => [entry.column.columnId, entry.report])
+  );
+  const amountColumns = reportSet.amountColumns.map((entry) => entry.column);
+  const calculationColumns = reportSet.calculationColumns ?? [];
+  const comparisonReports = Object.fromEntries(
+    [...amountReports.entries()]
+      .filter(([columnId]) => columnId.startsWith("comparison:"))
+      .map(([columnId, report]) => [columnId, report])
+  );
+
+  return {
+    reportName: reportSet.reportName,
+    accountingMethod: reportSet.accountingMethod,
+    displayColumnsBy: reportSet.displayColumnsBy,
+    columns: [...amountColumns, ...calculationColumns],
+    rows: presentationRows(reportSet.primaryReport, amountReports, amountColumns, calculationColumns),
+    primaryReport: reportSet.primaryReport,
+    comparisonReports
+  };
+}
+
+/**
+ * Reference/fixture implementation for small canonical fact sets. Production
+ * standard-report presentation should use buildStandardReportPresentationFromReadModel
+ * so snapshots, rollups, or SQL aggregates do the heavy lifting before Node formats rows.
+ */
+export function buildReferenceStandardReportPresentationFromFacts(request: StandardReportPresentationRequest): StandardReportPresentation {
   assertStandardReportControlsSupported(request);
 
   const requestedAccountingMethod = request.accountingMethod ?? request.reportInput.accountingBasis;
@@ -212,23 +287,26 @@ export function buildStandardReportPresentation(request: StandardReportPresentat
   );
   const amountColumns = amountSpecs.map((spec) => spec.column);
   const calculationColumns = calculationColumnSpecs(request, reportInput, amountColumns);
-  const rows = presentationRows(primaryReport, amountReports, amountColumns, calculationColumns);
-  const comparisonReports = Object.fromEntries(
-    [...amountReports.entries()]
-      .filter(([columnId]) => columnId.startsWith("comparison:"))
-      .map(([columnId, report]) => [columnId, report])
-  );
 
-  return {
+  return buildStandardReportPresentationFromReports({
     reportName: request.reportName,
     accountingMethod,
     displayColumnsBy,
-    columns: [...amountColumns, ...calculationColumns],
-    rows,
     primaryReport,
-    comparisonReports
-  };
+    amountColumns: amountColumns.map((column) => ({
+      column,
+      report: amountReports.get(column.columnId) ?? primaryReport
+    })),
+    calculationColumns
+  });
 }
+
+/**
+ * @deprecated Use buildReferenceStandardReportPresentationFromFacts for fixture
+ * and formula-reference coverage. Production presentation should use
+ * buildStandardReportPresentationFromReadModel with snapshots, rollups, or SQL aggregates.
+ */
+export const buildStandardReportPresentationFromFacts = buildReferenceStandardReportPresentationFromFacts;
 
 function assertDisplayColumnsBySupported(value: StandardReportDisplayColumnsBy): void {
   if (!STANDARD_REPORT_DISPLAY_COLUMNS_BY_OPTIONS.some((option) => option.value === value)) {

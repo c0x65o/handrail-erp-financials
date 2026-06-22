@@ -2,8 +2,9 @@
 
 Provider-neutral TypeScript foundation for reusable ERP financial reporting.
 This package is intended to give host ERP apps a shared kernel for canonical
-accounting facts, schema and migration manifests, deterministic report builders,
-rollups, snapshots, freshness tracking, fixtures, and validation utilities.
+accounting facts, schema and migration manifests, deterministic
+fixture/reference report formulas, rollups, snapshots, freshness tracking,
+fixtures, and validation utilities.
 
 The package boundary follows the repository docs:
 
@@ -42,6 +43,7 @@ import {
 const boundary = describePackageBoundary();
 const manifest = POSTGRES_CANONICAL_SCHEMA_MANIFEST;
 const sql = renderPostgresSchemaSql(manifest);
+// Raw-posting builders are fixture/reference formula helpers.
 const profitAndLoss = buildProfitAndLossReport({
   ...ERP_FINANCIALS_STATEMENT_FIXTURE.reportRequest,
   accounts: ERP_FINANCIALS_STATEMENT_FIXTURE.accounts,
@@ -58,12 +60,13 @@ refs, not provider OAuth tokens or raw unbounded provider payloads.
 
 The first deterministic fixture set exports representative companies, sources,
 accounts, parties, items, dimensions, transactions, transaction lines, and
-ledger postings. The report builders currently calculate profit and loss,
-balance sheet, trial balance, and cash flow from canonical postings. Results
-emit snapshot metadata, line rows, named totals, freshness/reconciliation
-fields, and compact drilldown refs for app UI and AI-safe report APIs. Cash flow
-uses cash-account ledger movement and marks output `partial` when fixture or
-host data cannot classify a cash movement.
+ledger postings. The raw-posting report builders calculate profit and loss,
+balance sheet, trial balance, and cash flow from canonical postings as
+fixture/reference formula helpers for smoke tests, snapshot refresh/rebuild, and
+bounded repair flows. Results emit snapshot metadata, line rows, named totals,
+freshness/reconciliation fields, and compact drilldown refs for app UI and
+AI-safe report APIs. Cash flow uses cash-account ledger movement and marks
+output `partial` when fixture or host data cannot classify a cash movement.
 
 ## Postgres Storage Boundary
 
@@ -137,11 +140,19 @@ The supported adoption surfaces are:
   QuickBooks service/client facade including
   `createHandrailQuickBooksFullSyncServiceHandler` and
   `createHandrailQuickBooksSyncClient`.
-- Report builders and persisted report flow: `buildProfitAndLossReport`,
-  `buildBalanceSheetReport`, `buildTrialBalanceReport`,
-  `buildCashFlowReport`, `buildFutureErpReportFromCanonicalReadModel`,
-  `createSnapshotRefreshContract`, `reconcileReportFreshness`,
-  `createFutureErpRollupAndLateArrivalWorker`, and
+- Fixture/reference report formulas and persisted report flow:
+  `buildProfitAndLossReport`, `buildBalanceSheetReport`,
+  `buildTrialBalanceReport`, and `buildCashFlowReport` are raw-posting formula
+  helpers for fixtures, smoke tests, snapshot refresh/rebuild, and bounded
+  repair flows. `buildReferenceStandardReportPresentationFromFacts` is the
+  explicitly fixture/reference-only in-memory standard-report presentation
+  helper; `buildStandardReportPresentationFromFacts` remains only as a
+  deprecated compatibility alias and is not recommended for production
+  presentation. Production standard-report presentation should use
+  `buildStandardReportPresentationFromReadModel` backed by snapshots, rollups,
+  or SQL aggregates. Persisted reporting flows use
+  `buildFutureErpReportFromCanonicalReadModel`, `createSnapshotRefreshContract`,
+  `reconcileReportFreshness`, `createFutureErpRollupAndLateArrivalWorker`, and
   `createFutureErpSnapshotRefreshAndFreshnessWorker`.
 
 The QuickBooks service owns OAuth, token custody, raw provider calls, provider

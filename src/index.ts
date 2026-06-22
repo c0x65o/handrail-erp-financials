@@ -82,6 +82,7 @@ export {
   ERP_FINANCIALS_STATEMENT_FIXTURE
 } from "./fixtures.js";
 export {
+  assertReportBuilderInputComplete,
   buildBalanceSheetReport,
   buildCashFlowReport,
   buildProfitAndLossReport,
@@ -94,7 +95,10 @@ export {
   STANDARD_REPORT_DISPLAY_COLUMNS_BY_OPTIONS,
   assertStandardReportAccountingMethod,
   assertStandardReportControlsSupported,
-  buildStandardReportPresentation
+  buildReferenceStandardReportPresentationFromFacts,
+  buildStandardReportPresentationFromFacts,
+  buildStandardReportPresentationFromReadModel,
+  buildStandardReportPresentationFromReports
 } from "./report-controls.js";
 export {
   buildLateArrivalReprocessExecutionContract,
@@ -201,6 +205,10 @@ export type {
   StandardReportPresentationCell,
   StandardReportPresentationColumn,
   StandardReportPresentationRequest,
+  StandardReportPresentationReadModelRequest,
+  StandardReportPresentationReadModelStorage,
+  StandardReportPresentationReportColumn,
+  StandardReportPresentationReportSet,
   StandardReportPresentationRow,
   StandardReportPresentationRowKind
 } from "./report-controls.js";

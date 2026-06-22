@@ -57,6 +57,29 @@ The rollup engine turns canonical facts into durable aggregates. The snapshot
 engine persists expensive report outputs and their drilldown evidence. These
 read models are what dashboards and AI tools query for normal report windows.
 
+### Aggregate-first standard reports
+
+Standard report presentation APIs must use snapshots, rollups, or SQL aggregate
+read models by default. They should not load raw ledger postings into Node and
+rebuild report columns for normal app traffic.
+
+This rule applies especially to multi-column reports such as two-year P&L
+comparisons by month, quarter, year, customer, vendor, employee, or
+product/service. Raw ledger postings are appropriate for drilldown, fixtures,
+small reference builders, and explicitly bounded repair workflows, but the
+primary presentation path should aggregate before formatting rows.
+
+Date-grained columns should be served from report snapshots, rollup buckets, or
+equivalent grouped SQL. Party and item display columns need persisted aggregate
+grouping keys or grouped SQL reads with indexes that match tenant, source,
+accounting basis, date range, currency, and grouping dimensions.
+
+The package naming follows that boundary: production presentation should call
+`buildStandardReportPresentationFromReadModel`, while the raw-facts
+`buildReferenceStandardReportPresentationFromFacts` helper is reserved for
+fixtures and reference formulas. `buildStandardReportPresentationFromFacts`
+exists only as a deprecated compatibility alias.
+
 ### App layer
 
 Individual ERP apps own:

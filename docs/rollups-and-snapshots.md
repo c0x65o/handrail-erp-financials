@@ -14,6 +14,14 @@ Normal dashboard and AI reads should query:
 4. source/raw provider objects only through explicit drilldown or integration
    tooling
 
+Production standard-report presentation should format prepared report sets with
+`buildStandardReportPresentationFromReadModel`, backed by snapshots, rollups, or
+SQL aggregate read models. The in-memory
+`buildReferenceStandardReportPresentationFromFacts` helper is fixture/reference
+only; the older `buildStandardReportPresentationFromFacts` export is a
+deprecated compatibility alias and should not be used for production
+presentation.
+
 ## Rollup Buckets
 
 Rollup buckets aggregate ledger postings by fixed periods and bounded
@@ -132,12 +140,18 @@ set. Missing snapshots, stale snapshots, partial snapshots, and unknown
 freshness snapshots are rebuilt from canonical facts loaded through
 `loadReportBuilderInput`.
 
-Rebuilds call the package report builders:
+Rebuilds call the package raw-posting report builders:
 
 - `buildProfitAndLossReport`
 - `buildBalanceSheetReport`
 - `buildTrialBalanceReport`
 - `buildCashFlowReport`
+
+These builders are formula/reference helpers for fixtures, smoke tests,
+snapshot refresh/rebuild, and bounded repair flows. They are appropriate here
+because the refresh contract is rebuilding a durable snapshot for a bounded
+request; normal multi-column presentation should still read snapshots, rollups,
+or SQL aggregate read models instead of scanning raw postings in Node.
 
 The rebuilt snapshot is persisted with `storage.writeReportSnapshot`, and the
 matching dashboard freshness row is persisted with `storage.writeFreshnessRows`.

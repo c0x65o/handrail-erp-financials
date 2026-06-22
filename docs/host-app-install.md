@@ -41,7 +41,7 @@ Host apps should call these exported `@handrail/erp-financials` APIs directly:
 | Storage adapter and persistence | `createPostgresStorageAdapter`, `createFutureErpCanonicalFactPersistenceWorker`, `persistFutureErpCanonicalFacts` |
 | QuickBooks normalized mapping | `HandrailQuickBooksSdkResourcesAdapterInput`, `mapHandrailQuickBooksSdkResourcesToCanonicalFacts`, `mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts`, `mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts` |
 | QuickBooks sync worker contracts | `createFutureErpQuickBooksFullSyncWorker`, `createFutureErpQuickBooksIncrementalSyncWorker`, `NormalizedQuickBooksFullSyncRequestEnvelope`, `NormalizedQuickBooksFullSyncResponseEnvelope`, `NormalizedQuickBooksIncrementalSyncRequestEnvelope`, `NormalizedQuickBooksIncrementalSyncResponseEnvelope`, `createHandrailQuickBooksFullSyncServiceHandler`, `createHandrailQuickBooksSyncClient`, `HandrailQuickBooksSyncClient`, `HandrailQuickBooksSyncClientTransport` |
-| Report builders and persisted report flow | `buildProfitAndLossReport`, `buildBalanceSheetReport`, `buildTrialBalanceReport`, `buildCashFlowReport`, `buildFutureErpReportFromCanonicalReadModel`, `createSnapshotRefreshContract`, `reconcileReportFreshness`, `createFutureErpRollupAndLateArrivalWorker`, `createFutureErpSnapshotRefreshAndFreshnessWorker` |
+| Fixture/reference report formulas and persisted report flow | `buildProfitAndLossReport`, `buildBalanceSheetReport`, `buildTrialBalanceReport`, `buildCashFlowReport`, `buildReferenceStandardReportPresentationFromFacts`, `buildStandardReportPresentationFromReadModel`, `buildFutureErpReportFromCanonicalReadModel`, `createSnapshotRefreshContract`, `reconcileReportFreshness`, `createFutureErpRollupAndLateArrivalWorker`, `createFutureErpSnapshotRefreshAndFreshnessWorker` |
 | Schedule descriptor | `buildScheduledRollupJobResult`, `buildLateArrivalReprocessExecutionContract`, `executeLateArrivalReprocess`, `executeSnapshotRefresh`, `ScheduledRollupJobName`, `LateArrivalReprocessJobName`, `SnapshotRefreshJobName`, `ScheduledRollupJobRequest`, `SnapshotRefreshRequest`, `FreshnessReconcileInput` |
 | Fixture smoke | `runErpFinancialsFixtureSmokeHealth` |
 | Drilldown health | `checkErpFinancialsFreshnessAndDrilldownHealth`, `assertSafeDrilldownRef`, `assertSafeSourcePayloadRef` |
@@ -118,6 +118,15 @@ It compiles a Future ERP-shaped consumer import harness through the public
 `createSnapshotRefreshContract`, `reconcileReportFreshness`, the local
 QuickBooks sync client facade, and normalized QuickBooks sync/report envelope
 types.
+
+The four raw-posting report builders above are fixture/reference formula
+helpers for deterministic smoke checks, snapshot refresh/rebuild, and bounded
+repair flows. Production standard-report presentation should use
+`buildStandardReportPresentationFromReadModel` with snapshots, rollups, or SQL
+aggregates. `buildReferenceStandardReportPresentationFromFacts` is the
+in-memory fixture/reference presentation helper; the older
+`buildStandardReportPresentationFromFacts` name is a deprecated compatibility
+alias only.
 
 For local package development from this repository, validate a clean checkout
 with:
@@ -260,6 +269,12 @@ for (const report of reports) {
   await storage.writeReportSnapshot(report);
 }
 ```
+
+These raw-posting builders are intentionally used here because fixture smoke and
+snapshot rebuilds need deterministic formula coverage from canonical postings.
+They are not the production multi-column presentation path; standard report
+presentation should read prepared report sets through
+`buildStandardReportPresentationFromReadModel`.
 
 Fixture smoke tests should assert expected totals, balanced trial balance and
 balance sheet reconciliation status, cash-flow support status, and drilldown

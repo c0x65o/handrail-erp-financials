@@ -10,6 +10,8 @@ import {
   buildCashFlowReport,
   buildFutureErpReportFromCanonicalReadModel,
   buildProfitAndLossReport,
+  buildReferenceStandardReportPresentationFromFacts,
+  buildStandardReportPresentationFromFacts,
   buildTrialBalanceReport,
   checkErpFinancialsInstallHealth,
   createFutureErpCanonicalFactPersistenceWorker,
@@ -48,6 +50,7 @@ describe("package boundary", () => {
     expect(PACKAGE_BOUNDARY.purpose).toContain("provider-neutral");
     expect(PACKAGE_BOUNDARY.owns).toContain("canonical accounting facts");
     expect(PACKAGE_BOUNDARY.owns).toContain("rollup and snapshot jobs");
+    expect(PACKAGE_BOUNDARY.owns).toContain("deterministic fixture/reference report formulas");
     expect(publicAccountId("acct_cash")).toBe("acct_cash");
   });
 
@@ -92,6 +95,7 @@ describe("package boundary", () => {
       buildBalanceSheetReport,
       buildTrialBalanceReport,
       buildCashFlowReport,
+      buildReferenceStandardReportPresentationFromFacts,
       buildFutureErpReportFromCanonicalReadModel,
       createSnapshotRefreshContract,
       reconcileReportFreshness,
@@ -103,6 +107,7 @@ describe("package boundary", () => {
     for (const supportedExport of supportedRuntimeExports) {
       expect(supportedExport).toBeDefined();
     }
+    expect(buildStandardReportPresentationFromFacts).toBe(buildReferenceStandardReportPresentationFromFacts);
   });
 });
 

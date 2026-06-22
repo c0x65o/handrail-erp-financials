@@ -7,10 +7,20 @@ import {
   STANDARD_REPORT_COMPARE_TO_PERIOD_OPTIONS,
   STANDARD_REPORT_DISPLAY_COLUMNS_BY_OPTIONS,
   assertStandardReportControlsSupported,
-  buildStandardReportPresentation
+  buildProfitAndLossReport,
+  buildReferenceStandardReportPresentationFromFacts,
+  buildStandardReportPresentationFromFacts,
+  buildStandardReportPresentationFromReadModel
 } from "../src/index.js";
 
-import type { LedgerPosting, ReportBuilderInput, TransactionLine } from "../src/index.js";
+import type {
+  LedgerPosting,
+  ReportBuilderInput,
+  StandardReportPresentationReadModelRequest,
+  StandardReportPresentationReadModelStorage,
+  StandardReportPresentationReportSet,
+  TransactionLine
+} from "../src/index.js";
 
 const fixture = ERP_FINANCIALS_STATEMENT_FIXTURE;
 
@@ -45,7 +55,7 @@ describe("standard report controls", () => {
   });
 
   it("builds comparison columns for all compare-to periods and calculation options", () => {
-    const presentation = buildStandardReportPresentation({
+    const presentation = buildReferenceStandardReportPresentationFromFacts({
       reportName: "profit_and_loss",
       reportInput: enrichedReportInput(),
       accountingMethod: "accrual",
@@ -98,7 +108,7 @@ describe("standard report controls", () => {
     ["product_service", ["Installation", "Production Equipment", "Widget"]],
     ["vendor", ["Landlord LLC", "Supply Vendor"]]
   ] as const)("builds %s display columns from posting dimensions", (displayColumnsBy, expectedLabels) => {
-    const presentation = buildStandardReportPresentation({
+    const presentation = buildReferenceStandardReportPresentationFromFacts({
       reportName: "profit_and_loss",
       reportInput: enrichedReportInput(),
       displayColumnsBy,
@@ -117,7 +127,7 @@ describe("standard report controls", () => {
     ["quarters", ["Q1 2026"]],
     ["years", ["2026"]]
   ] as const)("builds %s display columns from the report period", (displayColumnsBy, expectedStartingLabels) => {
-    const presentation = buildStandardReportPresentation({
+    const presentation = buildReferenceStandardReportPresentationFromFacts({
       reportName: "profit_and_loss",
       reportInput: enrichedReportInput(),
       displayColumnsBy,
@@ -137,13 +147,47 @@ describe("standard report controls", () => {
         accountingBasis: "cash" as const
       }))
     } satisfies ReportBuilderInput;
-    const presentation = buildStandardReportPresentation({
+    const presentation = buildReferenceStandardReportPresentationFromFacts({
       reportName: "profit_and_loss",
       reportInput,
       accountingMethod: "cash"
     });
 
     expect(presentation.accountingMethod).toBe("cash");
+    expect(rowCell(presentation, "total:net_income", "actual:none:total")?.amount).toBe("13800.00");
+  });
+
+  it("builds the production presentation surface from a read model request without raw postings", async () => {
+    const storage = new RecordingPresentationReadModelStorage();
+
+    const presentation = await buildStandardReportPresentationFromReadModel(storage, {
+      tenantId: fixture.company.tenantId,
+      companyId: fixture.company.companyId,
+      sourceId: fixture.source.sourceId,
+      reportName: "profit_and_loss",
+      accountingMethod: "accrual",
+      periodStart: "2026-01-01",
+      periodEnd: "2027-12-31",
+      asOfDate: "2027-12-31",
+      currencyCode: "USD",
+      displayColumnsBy: "months"
+    });
+
+    expect(storage.requests).toHaveLength(1);
+    expect(Object.hasOwn(storage.requests[0] ?? {}, "reportInput")).toBe(false);
+    expect(presentation.columns.map((column) => column.columnId)).toEqual(["actual:months:2026-01"]);
+    expect(rowCell(presentation, "total:net_income", "actual:months:2026-01")?.amount).toBe("13800.00");
+  });
+
+  it("keeps the deprecated raw-facts alias only as reference fixture compatibility", () => {
+    expect(buildStandardReportPresentationFromFacts).toBe(buildReferenceStandardReportPresentationFromFacts);
+
+    const presentation = buildStandardReportPresentationFromFacts({
+      reportName: "profit_and_loss",
+      reportInput: enrichedReportInput()
+    });
+
+    expect(presentation.columns.map((column) => column.columnId)).toEqual(["actual:none:total"]);
     expect(rowCell(presentation, "total:net_income", "actual:none:total")?.amount).toBe("13800.00");
   });
 
@@ -169,6 +213,38 @@ describe("standard report controls", () => {
     }).toThrow(/customPeriod/);
   });
 });
+
+class RecordingPresentationReadModelStorage implements StandardReportPresentationReadModelStorage {
+  readonly requests: StandardReportPresentationReadModelRequest[] = [];
+
+  loadStandardReportPresentation(request: StandardReportPresentationReadModelRequest): Promise<StandardReportPresentationReportSet> {
+    this.requests.push(request);
+    const reportInput = enrichedReportInput();
+    const report = buildProfitAndLossReport(reportInput);
+
+    return Promise.resolve({
+      reportName: "profit_and_loss",
+      accountingMethod: "accrual",
+      displayColumnsBy: "months",
+      primaryReport: report,
+      amountColumns: [
+        {
+          column: {
+            columnId: "actual:months:2026-01",
+            label: "01/2026",
+            kind: "actual",
+            periodStart: reportInput.periodStart,
+            periodEnd: reportInput.periodEnd,
+            asOfDate: reportInput.asOfDate ?? reportInput.periodEnd,
+            displayColumnsBy: "months",
+            groupKey: "2026-01"
+          },
+          report
+        }
+      ]
+    });
+  }
+}
 
 function enrichedReportInput(): ReportBuilderInput {
   const lineById = new Map(fixture.transactionLines.map((line) => [line.transactionLineId, line]));
@@ -197,7 +273,7 @@ function postingWithLineDimensions(posting: LedgerPosting, line: TransactionLine
 }
 
 function rowCell(
-  presentation: ReturnType<typeof buildStandardReportPresentation>,
+  presentation: ReturnType<typeof buildReferenceStandardReportPresentationFromFacts>,
   rowId: string,
   columnId: string
 ): { readonly amount?: string; readonly percent?: string } | undefined {

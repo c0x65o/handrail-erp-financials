@@ -9,6 +9,8 @@ import type {
   IsoDate,
   IsoDateTime,
   LedgerPosting,
+  Party,
+  PartyType,
   ProviderEnvironment,
   ReportFreshness,
   SourceId,
@@ -43,6 +45,7 @@ export type RollupBuildInput = {
   readonly fiscalYearStartMonth: number;
   readonly generatedAt: IsoDateTime;
   readonly importBatchId?: string;
+  readonly parties?: readonly Party[];
 };
 
 export type BuiltRollupBucket = RollupBucket & {
@@ -102,6 +105,7 @@ export type ScheduledRollupJobRequest = ScheduledRollupScope & {
   readonly sourceEvidence?: ScheduledRollupSourceEvidence;
   readonly importEvidence?: ScheduledRollupImportEvidence;
   readonly checkpointEvidence?: ScheduledRollupCheckpointEvidence;
+  readonly parties?: readonly Party[];
   readonly postings?: readonly LedgerPosting[];
   readonly postingReader?: ScheduledRollupCanonicalPostingReader;
 };
@@ -154,6 +158,7 @@ export type LateArrivalReprocessInput = {
   readonly freshThrough?: IsoDateTime;
   readonly importBatchId?: string;
   readonly checkpointId?: string;
+  readonly parties?: readonly Party[];
 };
 
 export type LateArrivalReprocessPlan = {
@@ -337,6 +342,9 @@ type RollupAccumulator = {
   readonly bucketEnd: IsoDate;
   readonly currencyCode: IsoCurrencyCode;
   readonly dimensionHash: string;
+  readonly partyId?: string;
+  readonly partyType?: PartyType;
+  readonly itemId?: string;
   debitMinor: bigint;
   creditMinor: bigint;
   netMinor: bigint;
@@ -349,8 +357,10 @@ type RollupAccumulator = {
 export function buildRollupBuckets(input: RollupBuildInput): readonly BuiltRollupBucket[] {
   assertFiscalYearStartMonth(input.fiscalYearStartMonth);
   const accumulators = new Map<string, RollupAccumulator>();
+  const partyTypesById = buildPartyTypesById(input.parties);
 
   for (const posting of input.postings) {
+    const partyType = posting.partyId === undefined ? undefined : partyTypesById.get(posting.partyId);
     for (const grain of input.bucketGrains) {
       const window = bucketWindowForDate(posting.postingDate, grain, input.fiscalYearStartMonth);
       const key = rollupBucketIdentity({
@@ -363,7 +373,10 @@ export function buildRollupBuckets(input: RollupBuildInput): readonly BuiltRollu
         bucketEnd: window.bucketEnd,
         accountId: posting.accountId,
         currencyCode: posting.currencyCode,
-        dimensionHash: posting.dimensionHash
+        dimensionHash: posting.dimensionHash,
+        ...(posting.partyId === undefined ? {} : { partyId: posting.partyId }),
+        ...(partyType === undefined ? {} : { partyType }),
+        ...(posting.itemId === undefined ? {} : { itemId: posting.itemId })
       });
       const existing = accumulators.get(key);
 
@@ -379,6 +392,9 @@ export function buildRollupBuckets(input: RollupBuildInput): readonly BuiltRollu
           bucketEnd: window.bucketEnd,
           currencyCode: posting.currencyCode,
           dimensionHash: posting.dimensionHash,
+          ...(posting.partyId === undefined ? {} : { partyId: posting.partyId }),
+          ...(partyType === undefined ? {} : { partyType }),
+          ...(posting.itemId === undefined ? {} : { itemId: posting.itemId }),
           debitMinor: parseMoney(posting.debitAmount),
           creditMinor: parseMoney(posting.creditAmount),
           netMinor: parseMoney(posting.netAmount),
@@ -412,6 +428,7 @@ export async function buildScheduledRollupJobResult(input: ScheduledRollupJobReq
   assertNoCredentialKeys(input.sourceEvidence);
   assertNoCredentialKeys(input.importEvidence);
   assertNoCredentialKeys(input.checkpointEvidence);
+  assertNoCredentialKeys(input.parties);
 
   const postings = await readScheduledRollupPostings(input);
   assertNoCredentialKeys(postings);
@@ -423,6 +440,7 @@ export async function buildScheduledRollupJobResult(input: ScheduledRollupJobReq
     bucketGrains: input.bucketGrains,
     fiscalYearStartMonth: input.fiscalYearStartMonth,
     generatedAt: input.generatedAt,
+    ...(input.parties === undefined ? {} : { parties: input.parties }),
     ...(input.importEvidence?.importBatchId === undefined ? {} : { importBatchId: input.importEvidence.importBatchId })
   });
   const buckets = builtBuckets.map(writeReadyRollupBucket);
@@ -477,6 +495,7 @@ export async function buildLateArrivalReprocessExecutionContract(
   assertLateArrivalReprocessExecutionInput(input);
   assertNoCredentialKeys(input.changedPostings);
   assertNoCredentialKeys(input.postings);
+  assertNoCredentialKeys(input.parties);
 
   const plan = planLateArrivalReprocess(input);
   const postings = await readLateArrivalReprocessPostings(input, plan);
@@ -488,6 +507,7 @@ export async function buildLateArrivalReprocessExecutionContract(
     bucketGrains: input.bucketGrains,
     fiscalYearStartMonth: input.fiscalYearStartMonth,
     generatedAt: input.generatedAt,
+    ...(input.parties === undefined ? {} : { parties: input.parties }),
     ...(input.importBatchId === undefined ? {} : { importBatchId: input.importBatchId })
   })
     .map(writeReadyRollupBucket)
@@ -939,6 +959,9 @@ function writeReadyRollupBucket(bucket: BuiltRollupBucket): RollupBucket {
     bucketEnd: bucket.bucketEnd,
     currencyCode: bucket.currencyCode,
     dimensionHash: bucket.dimensionHash,
+    ...(bucket.partyId === undefined ? {} : { partyId: bucket.partyId }),
+    ...(bucket.partyType === undefined ? {} : { partyType: bucket.partyType }),
+    ...(bucket.itemId === undefined ? {} : { itemId: bucket.itemId }),
     debitAmount: bucket.debitAmount,
     creditAmount: bucket.creditAmount,
     netAmount: bucket.netAmount,
@@ -1057,6 +1080,16 @@ function emptyObjectToUndefined<Evidence extends object>(evidence: Evidence): Ev
   return Object.keys(evidence).length === 0 ? undefined : evidence;
 }
 
+function buildPartyTypesById(parties: readonly Party[] | undefined): ReadonlyMap<string, PartyType> {
+  const partyTypesById = new Map<string, PartyType>();
+
+  for (const party of parties ?? []) {
+    partyTypesById.set(party.partyId, party.partyType);
+  }
+
+  return partyTypesById;
+}
+
 function uniqueSortedStrings(values: readonly string[]): readonly string[] {
   return [...new Set(values)].sort((left, right) => left.localeCompare(right));
 }
@@ -1095,6 +1128,9 @@ function rollupBucketFromAccumulator(accumulator: RollupAccumulator, input: Roll
     bucketEnd: accumulator.bucketEnd,
     currencyCode: accumulator.currencyCode,
     dimensionHash: accumulator.dimensionHash,
+    ...(accumulator.partyId === undefined ? {} : { partyId: accumulator.partyId }),
+    ...(accumulator.partyType === undefined ? {} : { partyType: accumulator.partyType }),
+    ...(accumulator.itemId === undefined ? {} : { itemId: accumulator.itemId }),
     debitAmount: formatMoney(accumulator.debitMinor),
     creditAmount: formatMoney(accumulator.creditMinor),
     netAmount: formatMoney(accumulator.netMinor),
@@ -1117,7 +1153,8 @@ function rollupBucketFromAccumulator(accumulator: RollupAccumulator, input: Roll
         periodStart: accumulator.bucketStart,
         periodEnd: accumulator.bucketEnd,
         accountIds: [accumulator.accountId],
-        dimensionHash: accumulator.dimensionHash
+        dimensionHash: accumulator.dimensionHash,
+        ...(accumulator.itemId === undefined ? {} : { itemIds: [accumulator.itemId] })
       }
     })
   };
@@ -1308,8 +1345,11 @@ function rollupBucketIdentity(input: {
   readonly accountId: string;
   readonly currencyCode: IsoCurrencyCode;
   readonly dimensionHash: string;
+  readonly partyId?: string;
+  readonly partyType?: PartyType;
+  readonly itemId?: string;
 }): string {
-  return [
+  const keyParts = [
     "rollup",
     input.tenantId,
     input.companyId,
@@ -1321,7 +1361,16 @@ function rollupBucketIdentity(input: {
     input.accountId,
     input.currencyCode,
     input.dimensionHash
-  ].join(":");
+  ];
+
+  if (input.partyId !== undefined || input.partyType !== undefined) {
+    keyParts.push(input.partyId ?? "", input.partyType ?? "");
+  }
+  if (input.itemId !== undefined) {
+    keyParts.push(input.itemId);
+  }
+
+  return keyParts.join(":");
 }
 
 function rollupWindowScopeIdentity(input: {
@@ -1366,7 +1415,10 @@ function compareRollupAccumulators(left: RollupAccumulator, right: RollupAccumul
     left.bucketEnd.localeCompare(right.bucketEnd) ||
     left.accountId.localeCompare(right.accountId) ||
     left.currencyCode.localeCompare(right.currencyCode) ||
-    left.dimensionHash.localeCompare(right.dimensionHash)
+    left.dimensionHash.localeCompare(right.dimensionHash) ||
+    (left.partyType ?? "").localeCompare(right.partyType ?? "") ||
+    (left.partyId ?? "").localeCompare(right.partyId ?? "") ||
+    (left.itemId ?? "").localeCompare(right.itemId ?? "")
   );
 }
 

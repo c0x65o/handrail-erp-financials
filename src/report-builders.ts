@@ -19,13 +19,22 @@ import type {
   SourceId,
   TenantId
 } from "./canonical-model.js";
-import { createCompactDrilldownRef } from "./canonical-model.js";
+import { assertLedgerPostingAmounts, assertSafeSourcePayloadRef, createCompactDrilldownRef } from "./canonical-model.js";
 
 export type ReportName = "profit_and_loss" | "balance_sheet" | "trial_balance" | "cash_flow";
 export type ReportSourceKind = "ledger_postings" | "rollup_buckets" | "report_snapshot";
 export type CashFlowActivity = "operating" | "investing" | "financing" | "unclassified";
 export type CashFlowSupportStatus = "supported" | "partial" | "unsupported";
 
+/**
+ * Raw-posting formula input for fixture/reference report builders.
+ *
+ * These helpers are intended for deterministic fixtures, smoke tests, snapshot
+ * refresh/rebuild, and bounded repair flows. Production standard-report
+ * presentation should use snapshots, rollups, SQL aggregates, or
+ * buildStandardReportPresentationFromReadModel instead of scanning raw postings
+ * to build multi-column presentation rows.
+ */
 export type ReportBuilderInput = {
   readonly tenantId: TenantId;
   readonly accounts: readonly Account[];
@@ -80,9 +89,18 @@ const PROFIT_AND_LOSS_SECTIONS: readonly AccountClassification[] = [
 ];
 
 const BALANCE_SHEET_SECTIONS: readonly AccountClassification[] = ["asset", "liability", "equity"];
+const ACCOUNT_CLASSIFICATIONS: ReadonlySet<string> = new Set([
+  ...PROFIT_AND_LOSS_SECTIONS,
+  ...BALANCE_SHEET_SECTIONS
+]);
 
+/**
+ * Builds the P&L formula from canonical postings for fixture/reference flows.
+ * Not the production standard-report presentation path.
+ */
 export function buildProfitAndLossReport(input: ReportBuilderInput): BuiltReport {
-  const accountMap = createAccountMap(input.accounts);
+  assertReportBuilderInputComplete(input);
+  const accountMap = createAccountMap(input);
   const postings = filterPeriodPostings(input);
   const lines = buildAccountLines({
     input,
@@ -120,9 +138,14 @@ export function buildProfitAndLossReport(input: ReportBuilderInput): BuiltReport
   });
 }
 
+/**
+ * Builds the balance sheet formula from canonical postings for fixture/reference
+ * flows. Not the production standard-report presentation path.
+ */
 export function buildBalanceSheetReport(input: ReportBuilderInput): BuiltReport {
+  assertReportBuilderInputComplete(input);
   const asOfInput = { ...input, periodEnd: input.asOfDate ?? input.periodEnd };
-  const accountMap = createAccountMap(input.accounts);
+  const accountMap = createAccountMap(input);
   const postings = filterAsOfPostings(asOfInput);
   const snapshot = snapshotId("balance_sheet", input);
   const accountLines = buildAccountLines({
@@ -182,8 +205,13 @@ export function buildBalanceSheetReport(input: ReportBuilderInput): BuiltReport 
   });
 }
 
+/**
+ * Builds the trial balance formula from canonical postings for fixture/reference
+ * flows. Not the production standard-report presentation path.
+ */
 export function buildTrialBalanceReport(input: ReportBuilderInput): BuiltReport {
-  const accountMap = createAccountMap(input.accounts);
+  assertReportBuilderInputComplete(input);
+  const accountMap = createAccountMap(input);
   const postings = filterAsOfPostings(input);
   const balances = aggregateByAccount(postings, accountMap, signedDebitMinusCredit);
   const snapshot = snapshotId("trial_balance", input);
@@ -229,7 +257,13 @@ export function buildTrialBalanceReport(input: ReportBuilderInput): BuiltReport 
   });
 }
 
+/**
+ * Builds the cash-flow formula from canonical postings for fixture/reference
+ * flows and bounded snapshot refresh/rebuild. Not the production standard-report
+ * presentation path.
+ */
 export function buildCashFlowReport(input: CashFlowBuilderInput): BuiltReport {
+  assertReportBuilderInputComplete(input);
   const cashAccountIds = new Set(input.cashAccountIds);
   const periodPostings = filterPeriodPostings(input);
   const cashPostings = periodPostings.filter((posting) => cashAccountIds.has(posting.accountId));
@@ -324,6 +358,23 @@ export function buildCashFlowReport(input: CashFlowBuilderInput): BuiltReport {
       unclassifiedCashMovementPostingIds: [...activityTotals.unclassified.postingIds].sort()
     }
   });
+}
+
+export function assertReportBuilderInputComplete(input: ReportBuilderInput): void {
+  const accountMap = createAccountMap(input);
+
+  for (const posting of input.postings.filter((entry) => postingMatchesReportScope(input, entry))) {
+    assertLedgerPostingAmounts(posting);
+    if (parseMoney(posting.netAmount) !== signedDebitMinusCredit(posting)) {
+      throw new Error(`Report builder input posting ${posting.postingId} has inconsistent netAmount`);
+    }
+    if (accountMap.get(posting.accountId) === undefined) {
+      throw new Error(`Report builder input posting ${posting.postingId} references missing account ${posting.accountId}`);
+    }
+    if (posting.sourcePayloadRef !== undefined) {
+      assertSafeSourcePayloadRef(posting.sourcePayloadRef);
+    }
+  }
 }
 
 function buildReportResult(
@@ -463,17 +514,28 @@ function currentEarningsAccumulator(input: ReportBuilderInput, accountMap: Reado
   };
 }
 
-function createAccountMap(accounts: readonly Account[]): ReadonlyMap<AccountId, Account> {
-  return new Map(accounts.map((account) => [account.accountId, account]));
+function createAccountMap(input: ReportBuilderInput): ReadonlyMap<AccountId, Account> {
+  const accounts = input.accounts.filter((account) => accountMatchesReportScope(input, account));
+  const accountMap = new Map<AccountId, Account>();
+
+  for (const account of accounts) {
+    if (!ACCOUNT_CLASSIFICATIONS.has(account.classification)) {
+      throw new Error(`Report builder input account ${account.accountId} has unsupported classification ${account.classification}`);
+    }
+    if (accountMap.has(account.accountId)) {
+      throw new Error(`Report builder input has duplicate account ${account.accountId}`);
+    }
+    accountMap.set(account.accountId, account);
+  }
+
+  return accountMap;
 }
 
 function filterPeriodPostings(input: ReportBuilderInput): LedgerPosting[] {
   return input.postings
     .filter(
       (posting) =>
-        posting.tenantId === input.tenantId &&
-        posting.accountingBasis === input.accountingBasis &&
-        posting.currencyCode === input.currencyCode &&
+        postingMatchesReportScope(input, posting) &&
         posting.postingDate >= input.periodStart &&
         posting.postingDate <= input.periodEnd
     )
@@ -485,9 +547,7 @@ function filterAsOfPostings(input: ReportBuilderInput): LedgerPosting[] {
   return input.postings
     .filter(
       (posting) =>
-        posting.tenantId === input.tenantId &&
-        posting.accountingBasis === input.accountingBasis &&
-        posting.currencyCode === input.currencyCode &&
+        postingMatchesReportScope(input, posting) &&
         posting.postingDate <= asOfDate
     )
     .sort(comparePostings);
@@ -497,12 +557,23 @@ function filterBeforeDatePostings(input: ReportBuilderInput): LedgerPosting[] {
   return input.postings
     .filter(
       (posting) =>
-        posting.tenantId === input.tenantId &&
-        posting.accountingBasis === input.accountingBasis &&
-        posting.currencyCode === input.currencyCode &&
+        postingMatchesReportScope(input, posting) &&
         posting.postingDate < input.periodStart
     )
     .sort(comparePostings);
+}
+
+function accountMatchesReportScope(input: ReportBuilderInput, account: Account): boolean {
+  return account.tenantId === input.tenantId && (input.sourceId === undefined || account.sourceId === input.sourceId);
+}
+
+function postingMatchesReportScope(input: ReportBuilderInput, posting: LedgerPosting): boolean {
+  return (
+    posting.tenantId === input.tenantId &&
+    (input.sourceId === undefined || posting.sourceId === input.sourceId) &&
+    posting.accountingBasis === input.accountingBasis &&
+    posting.currencyCode === input.currencyCode
+  );
 }
 
 function incomeStatementAmount(posting: LedgerPosting, classification: AccountClassification): bigint {

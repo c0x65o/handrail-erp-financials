@@ -23,6 +23,7 @@ import type {
   PostgresQueryResult,
   ReportBuilderInput,
   ReportFreshnessRow,
+  Party,
   ScheduledRollupCanonicalPostingReader,
   SnapshotRefreshStorage,
   StoredReportSnapshot
@@ -196,6 +197,124 @@ describe("rollup, snapshot, freshness, and late-arrival job contracts", () => {
           bucketStart: "2026-04-01",
           bucketEnd: "2027-03-31"
         })
+      ])
+    );
+  });
+
+  it("keeps customer, vendor, and employee rollup groups separate in persisted bucket identity", () => {
+    const basePosting = fixture.postings.find((posting) => posting.postingId === "post_cash_sale_revenue");
+    if (basePosting === undefined) {
+      throw new Error("fixture must include cash sale revenue posting");
+    }
+
+    const parties: readonly Party[] = [
+      {
+        tenantId: fixture.company.tenantId,
+        sourceId: fixture.source.sourceId,
+        partyId: "party_rollup_customer",
+        sourcePartyId: "rollup_customer",
+        partyType: "customer",
+        displayName: "Rollup Customer",
+        active: true
+      },
+      {
+        tenantId: fixture.company.tenantId,
+        sourceId: fixture.source.sourceId,
+        partyId: "party_rollup_vendor",
+        sourcePartyId: "rollup_vendor",
+        partyType: "vendor",
+        displayName: "Rollup Vendor",
+        active: true
+      },
+      {
+        tenantId: fixture.company.tenantId,
+        sourceId: fixture.source.sourceId,
+        partyId: "party_rollup_employee",
+        sourcePartyId: "rollup_employee",
+        partyType: "employee",
+        displayName: "Rollup Employee",
+        active: true
+      }
+    ];
+    const postings: readonly LedgerPosting[] = parties.map((party) => ({
+      ...basePosting,
+      postingId: `post_${party.partyType}_grouped_revenue`,
+      sourcePostingId: `${party.partyType}_grouped_revenue`,
+      transactionId: `txn_${party.partyType}_grouped_revenue`,
+      transactionLineId: `line_${party.partyType}_grouped_revenue`,
+      partyId: party.partyId
+    }));
+
+    const buckets = buildRollupBuckets({
+      companyId: fixture.company.companyId,
+      postings,
+      parties,
+      bucketGrains: ["month"],
+      fiscalYearStartMonth: fixture.company.fiscalYearStartMonth,
+      generatedAt: "2026-02-01T00:00:00.000Z"
+    });
+
+    expect(buckets).toHaveLength(3);
+    expect(buckets.map((bucket) => [bucket.partyType, bucket.partyId, bucket.postingCount])).toEqual([
+      ["customer", "party_rollup_customer", 1],
+      ["employee", "party_rollup_employee", 1],
+      ["vendor", "party_rollup_vendor", 1]
+    ]);
+    expect(new Set(buckets.map((bucket) => bucket.rollupBucketId)).size).toBe(3);
+    expect(buckets.map((bucket) => bucket.rollupBucketId)).toEqual(
+      expect.arrayContaining([
+        `${basePosting.dimensionHash}:party_rollup_customer:customer`,
+        `${basePosting.dimensionHash}:party_rollup_vendor:vendor`,
+        `${basePosting.dimensionHash}:party_rollup_employee:employee`
+      ].map(
+        (suffix) =>
+          `rollup:${fixture.company.tenantId}:${fixture.company.companyId}:${fixture.source.sourceId}:accrual:month:2026-01-01:2026-01-31:acct_sales:USD:${suffix}`
+      ))
+    );
+  });
+
+  it("keeps product and service rollup groups separate in persisted bucket identity", () => {
+    const basePosting = fixture.postings.find((posting) => posting.postingId === "post_cash_sale_revenue");
+    if (basePosting === undefined) {
+      throw new Error("fixture must include cash sale revenue posting");
+    }
+
+    const postings: readonly LedgerPosting[] = ["item_rollup_product", "item_rollup_service"].map((itemId) => ({
+      ...basePosting,
+      postingId: `post_${itemId}_grouped_revenue`,
+      sourcePostingId: `${itemId}_grouped_revenue`,
+      transactionId: `txn_${itemId}_grouped_revenue`,
+      transactionLineId: `line_${itemId}_grouped_revenue`,
+      itemId
+    }));
+
+    const buckets = buildRollupBuckets({
+      companyId: fixture.company.companyId,
+      postings,
+      bucketGrains: ["month"],
+      fiscalYearStartMonth: fixture.company.fiscalYearStartMonth,
+      generatedAt: "2026-02-01T00:00:00.000Z"
+    });
+
+    expect(buckets).toHaveLength(2);
+    expect(buckets.map((bucket) => [bucket.itemId, bucket.postingCount])).toEqual([
+      ["item_rollup_product", 1],
+      ["item_rollup_service", 1]
+    ]);
+    expect(new Set(buckets.map((bucket) => bucket.rollupBucketId)).size).toBe(2);
+    expect(buckets.map((bucket) => bucket.rollupBucketId)).toEqual(
+      expect.arrayContaining([
+        `${basePosting.dimensionHash}:item_rollup_product`,
+        `${basePosting.dimensionHash}:item_rollup_service`
+      ].map(
+        (suffix) =>
+          `rollup:${fixture.company.tenantId}:${fixture.company.companyId}:${fixture.source.sourceId}:accrual:month:2026-01-01:2026-01-31:acct_sales:USD:${suffix}`
+      ))
+    );
+    expect(buckets.map((bucket) => bucket.drilldownRef.query)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ itemIds: ["item_rollup_product"] }),
+        expect.objectContaining({ itemIds: ["item_rollup_service"] })
       ])
     );
   });
@@ -548,7 +667,7 @@ describe("rollup, snapshot, freshness, and late-arrival job contracts", () => {
     );
     expect(client.calls[1]?.sql).toContain('insert into "erp_financials"."rollup_buckets"');
     expect(client.calls[1]?.sql).toContain(
-      'on conflict ("tenant_id", "company_id", "source_id", "accounting_basis", "bucket_grain", "bucket_start", "bucket_end", "account_id", "currency_code", "dimension_hash") do update'
+      'on conflict ("tenant_id", "company_id", "source_id", "accounting_basis", "bucket_grain", "bucket_start", "bucket_end", "account_id", "currency_code", "dimension_hash", "party_id", "party_type", "item_id") do update'
     );
     expect(client.calls[2]?.sql).toContain('update "erp_financials"."report_snapshots"');
     expect(client.calls[2]?.sql).toContain('"report_name" = any($5::text[])');

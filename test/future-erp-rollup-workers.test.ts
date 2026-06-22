@@ -129,7 +129,7 @@ describe("Future ERP rollup and late-arrival worker bindings", () => {
     ]);
     expect(postgresClient.calls[0]?.sql).toContain('insert into "erp_financials"."rollup_buckets"');
     expect(postgresClient.calls[0]?.sql).toContain(
-      'on conflict ("tenant_id", "company_id", "source_id", "accounting_basis", "bucket_grain", "bucket_start", "bucket_end", "account_id", "currency_code", "dimension_hash") do update'
+      'on conflict ("tenant_id", "company_id", "source_id", "accounting_basis", "bucket_grain", "bucket_start", "bucket_end", "account_id", "currency_code", "dimension_hash", "party_id", "party_type", "item_id") do update'
     );
     expect(postgresClient.calls[1]?.sql).toContain('insert into "erp_financials"."report_freshness"');
     expect(JSON.stringify(result)).not.toMatch(/access[_-]?token|refresh[_-]?token|client[_-]?secret|credential|rawPayload/i);

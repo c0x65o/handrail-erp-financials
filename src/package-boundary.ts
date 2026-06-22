@@ -1,6 +1,6 @@
 export const ERP_FINANCIALS_PACKAGE = {
   name: "@handrail/erp-financials",
-  version: "0.1.3"
+  version: "0.1.5"
 } as const;
 
 export const PACKAGE_BOUNDARY = {
@@ -8,7 +8,7 @@ export const PACKAGE_BOUNDARY = {
   owns: [
     "canonical accounting facts",
     "schema and migration manifests",
-    "deterministic report builders",
+    "deterministic fixture/reference report formulas",
     "rollup and snapshot jobs",
     "freshness and cursor tracking",
     "drilldown evidence",

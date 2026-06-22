@@ -43,7 +43,7 @@ export type PostgresTableManifest = {
 
 export type PostgresSchemaManifest = {
   readonly manifestVersion: "2026-06-19.storage-v1";
-  readonly schemaVersion: 2;
+  readonly schemaVersion: 5;
   readonly dialect: "postgres";
   readonly namespace: "erp_financials";
   readonly tables: readonly PostgresTableManifest[];
@@ -119,7 +119,7 @@ const table = (
 
 export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
   manifestVersion: "2026-06-19.storage-v1",
-  schemaVersion: 2,
+  schemaVersion: 5,
   dialect: "postgres",
   namespace: "erp_financials",
   tables: [
@@ -408,6 +408,9 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         date("bucket_end"),
         text("currency_code"),
         text("dimension_hash"),
+        text("party_id"),
+        text("party_type"),
+        text("item_id"),
         numeric("debit_amount"),
         numeric("credit_amount"),
         numeric("net_amount"),
@@ -451,13 +454,30 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
             "bucket_end",
             "account_id",
             "currency_code",
-            "dimension_hash"
+            "dimension_hash",
+            "party_id",
+            "party_type",
+            "item_id"
           ],
           unique: true
         },
         {
           name: "rollup_buckets_report_idx",
-          columns: ["tenant_id", "company_id", "accounting_basis", "bucket_start", "bucket_end", "currency_code"]
+          columns: [
+            "tenant_id",
+            "company_id",
+            "source_id",
+            "accounting_basis",
+            "bucket_grain",
+            "currency_code",
+            "bucket_start",
+            "bucket_end",
+            "account_id",
+            "dimension_hash",
+            "party_type",
+            "party_id",
+            "item_id"
+          ]
         }
       ]
     ),

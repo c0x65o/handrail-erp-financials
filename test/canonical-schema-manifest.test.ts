@@ -21,7 +21,7 @@ const FUTURE_ERP_CANONICAL_SCHEMA_MIGRATION_SQL = readFileSync(
 describe("canonical schema manifest", () => {
   it("is versioned and covers the documented canonical entities", () => {
     expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.manifestVersion).toBe("2026-06-19.storage-v1");
-    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion).toBe(2);
+    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion).toBe(5);
 
     const tableNames = POSTGRES_CANONICAL_SCHEMA_MANIFEST.tables.map((table) => table.name);
 
@@ -57,7 +57,10 @@ describe("canonical schema manifest", () => {
       'create unique index if not exists "ledger_postings_source_posting_uidx" on "erp_financials"."ledger_postings" ("tenant_id", "source_id", "accounting_basis", "source_posting_id");'
     );
     expect(firstRender).toContain(
-      'create unique index if not exists "rollup_buckets_identity_uidx" on "erp_financials"."rollup_buckets" ("tenant_id", "company_id", "source_id", "accounting_basis", "bucket_grain", "bucket_start", "bucket_end", "account_id", "currency_code", "dimension_hash");'
+      'create unique index if not exists "rollup_buckets_identity_uidx" on "erp_financials"."rollup_buckets" ("tenant_id", "company_id", "source_id", "accounting_basis", "bucket_grain", "bucket_start", "bucket_end", "account_id", "currency_code", "dimension_hash", "party_id", "party_type", "item_id");'
+    );
+    expect(firstRender).toContain(
+      'create index if not exists "rollup_buckets_report_idx" on "erp_financials"."rollup_buckets" ("tenant_id", "company_id", "source_id", "accounting_basis", "bucket_grain", "currency_code", "bucket_start", "bucket_end", "account_id", "dimension_hash", "party_type", "party_id", "item_id");'
     );
     expect(firstRender).toContain(
       'create unique index if not exists "report_freshness_identity_uidx" on "erp_financials"."report_freshness" ("tenant_id", "company_id", "source_id", "report_name", "accounting_basis", "period_start", "period_end", "currency_code");'

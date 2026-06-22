@@ -185,6 +185,9 @@ create table if not exists "erp_financials"."rollup_buckets" (
   "bucket_end" date not null,
   "currency_code" text not null,
   "dimension_hash" text not null,
+  "party_id" text not null,
+  "party_type" text not null,
+  "item_id" text not null,
   "debit_amount" numeric not null,
   "credit_amount" numeric not null,
   "net_amount" numeric not null,
@@ -200,9 +203,9 @@ create table if not exists "erp_financials"."rollup_buckets" (
   constraint "rollup_buckets_posting_count_check" check (posting_count >= 0)
 );
 
-create unique index if not exists "rollup_buckets_identity_uidx" on "erp_financials"."rollup_buckets" ("tenant_id", "company_id", "source_id", "accounting_basis", "bucket_grain", "bucket_start", "bucket_end", "account_id", "currency_code", "dimension_hash");
+create unique index if not exists "rollup_buckets_identity_uidx" on "erp_financials"."rollup_buckets" ("tenant_id", "company_id", "source_id", "accounting_basis", "bucket_grain", "bucket_start", "bucket_end", "account_id", "currency_code", "dimension_hash", "party_id", "party_type", "item_id");
 
-create index if not exists "rollup_buckets_report_idx" on "erp_financials"."rollup_buckets" ("tenant_id", "company_id", "accounting_basis", "bucket_start", "bucket_end", "currency_code");
+create index if not exists "rollup_buckets_report_idx" on "erp_financials"."rollup_buckets" ("tenant_id", "company_id", "source_id", "accounting_basis", "bucket_grain", "currency_code", "bucket_start", "bucket_end", "account_id", "dimension_hash", "party_type", "party_id", "item_id");
 
 create table if not exists "erp_financials"."import_batches" (
   "import_batch_id" text not null,

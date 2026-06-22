@@ -247,6 +247,7 @@ export type DrilldownQueryRef = {
   readonly periodStart?: IsoDate;
   readonly periodEnd?: IsoDate;
   readonly accountIds?: readonly AccountId[];
+  readonly itemIds?: readonly ItemId[];
   readonly dimensionHash?: DimensionHash;
 };
 
