@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ERP_FINANCIALS_PACKAGE,
   POSTGRES_CANONICAL_SCHEMA_MANIFEST,
   createFutureErpInstallHealthPreflightWorker,
   preflightFutureErpInstallHealth
@@ -39,7 +40,7 @@ describe("Future ERP install health preflight", () => {
       generatedAt: "2026-06-20T07:00:00.000Z",
       install: {
         packageName: "@handrail/erp-financials",
-        packageVersion: "0.1.5",
+        packageVersion: ERP_FINANCIALS_PACKAGE.version,
         manifestVersion: "2026-06-19.storage-v1",
         schemaVersion: 5,
         namespace: "erp_financials",

@@ -1,7 +1,11 @@
+import { readFileSync } from "node:fs";
+
+const packageManifest = readPackageManifest();
+
 export const ERP_FINANCIALS_PACKAGE = {
-  name: "@handrail/erp-financials",
-  version: "0.1.5"
-} as const;
+  name: packageManifest.name,
+  version: packageManifest.version
+};
 
 export const PACKAGE_BOUNDARY = {
   purpose: "provider-neutral ERP financial reporting kernel",
@@ -47,5 +51,25 @@ export function describePackageBoundary(): PackageBoundaryDescription {
     owns: PACKAGE_BOUNDARY.owns,
     excludes: PACKAGE_BOUNDARY.excludes,
     sourceAdapterBoundary: PACKAGE_BOUNDARY.sourceAdapterBoundary
+  };
+}
+
+function readPackageManifest(): { readonly name: string; readonly version: string } {
+  const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as unknown;
+
+  if (
+    typeof manifest !== "object" ||
+    manifest === null ||
+    !("name" in manifest) ||
+    !("version" in manifest) ||
+    typeof manifest.name !== "string" ||
+    typeof manifest.version !== "string"
+  ) {
+    throw new Error("ERP Financials package manifest must declare string name and version fields.");
+  }
+
+  return {
+    name: manifest.name,
+    version: manifest.version
   };
 }

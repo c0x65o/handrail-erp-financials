@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ERP_FINANCIALS_PACKAGE,
   POSTGRES_CANONICAL_SCHEMA_MANIFEST,
   checkErpFinancialsInstallHealth
 } from "../src/index.js";
@@ -29,7 +30,7 @@ describe("ERP Financials install health", () => {
 
     expect(health).toMatchObject({
       packageName: "@handrail/erp-financials",
-      packageVersion: "0.1.5",
+      packageVersion: ERP_FINANCIALS_PACKAGE.version,
       manifestVersion: "2026-06-19.storage-v1",
       schemaVersion: 5,
       status: "healthy",
