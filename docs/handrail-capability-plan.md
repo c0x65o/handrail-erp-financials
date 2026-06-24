@@ -219,6 +219,6 @@ An ERP app may use both, but native-only apps should be able to use
 When QuickBooks is present, host app code should consume the Handrail
 QuickBooks SDK/runtime contract (`HANDRAIL_QBO_SERVICE_ENV`,
 `HANDRAIL_QBO_PROVIDER_MODE`, `HANDRAIL_QBO_API_KEY`, and
-`HANDRAIL_QBO_TENANT_ID`) through `@handrail/sdk-node` helpers. ERP Financials
-must not define new QuickBooks credential env vars or store Intuit access or
-refresh tokens.
+`HANDRAIL_QBO_TENANT_ID`) through the QuickBooks-specific
+`@handrail/quickbooks-node-sdk` client. ERP Financials must not define new
+QuickBooks credential env vars or store Intuit access or refresh tokens.

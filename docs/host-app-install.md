@@ -68,11 +68,12 @@ npm install @handrail/erp-financials
 
 Future ERP should also depend on the Handrail QuickBooks SDK/service client
 using its existing package-manager convention. In the current Handrail runtime
-contract that is the Handrail SDK/runtime helper package plus capability-managed
-QuickBooks env references, not Intuit credentials or new provider OAuth vars:
+contract that means the QuickBooks-specific service client plus
+capability-managed QuickBooks env references, not Intuit credentials or new
+provider OAuth vars:
 
 ```sh
-npm install @handrail/sdk-node
+npm install @handrail/quickbooks-node-sdk
 ```
 
 When `@handrail/erp-financials` is not published in the dev environment, use a
@@ -87,7 +88,7 @@ npm run typecheck:future-erp-imports
 
 # from /opt/handrail/repos/hitcents/hitcents-future-erp/hitcents-erp-future
 npm install @handrail/erp-financials@file:/opt/handrail/repos/handrail/erp-financials/handrail-erp-financials
-npm install @handrail/sdk-node
+npm install @handrail/quickbooks-node-sdk@file:/opt/handrail/repos/handrail/handrail-quickbooks-integrations/handrail-integration-quickbooks-node-sdk
 npm run typecheck
 ```
 
@@ -98,7 +99,7 @@ preserve that convention and wire the same two dependencies in package metadata:
 {
   "dependencies": {
     "@handrail/erp-financials": "file:/opt/handrail/repos/handrail/erp-financials/handrail-erp-financials",
-    "@handrail/sdk-node": "<existing Handrail SDK range or workspace link>"
+    "@handrail/quickbooks-node-sdk": "file:/opt/handrail/repos/handrail/handrail-quickbooks-integrations/handrail-integration-quickbooks-node-sdk"
   }
 }
 ```
@@ -443,7 +444,8 @@ record degraded evidence, or escalate config, deploy, or credential work.
 `quickbooks` owns provider access through the Handrail QuickBooks SDK/runtime
 contract. QuickBooks OAuth, token custody, raw provider calls, provider
 resource normalization, and tenant/provider access stay inside the integration
-service. Host apps should use `@handrail/sdk-node` helpers and the
+service. Host apps should use `@handrail/quickbooks-node-sdk` for QuickBooks
+service calls and the
 Handrail-managed runtime keys:
 
 - `HANDRAIL_QBO_SERVICE_ENV`
