@@ -6,6 +6,9 @@ import {
   POSTGRES_CANONICAL_SCHEMA_MANIFEST,
   ERP_FINANCIALS_PACKAGE,
   PACKAGE_BOUNDARY,
+  AccountHierarchyValidationError,
+  assertValidAccountHierarchy,
+  buildAccountHierarchyRollupLines,
   buildBalanceSheetReport,
   buildCashFlowReport,
   buildFutureErpReportFromCanonicalReadModel,
@@ -30,11 +33,12 @@ import {
   persistFutureErpCanonicalFacts,
   reconcileReportFreshness,
   renderPostgresSchemaSql,
+  validateAccountHierarchy,
   validateFutureErpCanonicalSchemaPreflight,
   validatePostgresSchema
 } from "../src/index.js";
 
-import type { AccountId } from "../src/index.js";
+import type { Account, AccountHierarchyDiagnostic, AccountId } from "../src/index.js";
 
 describe("package boundary", () => {
   it("keeps runtime package metadata aligned with the package manifest", () => {
@@ -100,14 +104,35 @@ describe("package boundary", () => {
       createSnapshotRefreshContract,
       reconcileReportFreshness,
       createFutureErpRollupAndLateArrivalWorker,
-      createFutureErpSnapshotRefreshAndFreshnessWorker
+      createFutureErpSnapshotRefreshAndFreshnessWorker,
+      validateAccountHierarchy,
+      assertValidAccountHierarchy,
+      AccountHierarchyValidationError,
+      buildAccountHierarchyRollupLines
     ];
 
     expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.namespace).toBe("erp_financials");
     for (const supportedExport of supportedRuntimeExports) {
       expect(supportedExport).toBeDefined();
     }
+    // eslint-disable-next-line @typescript-eslint/no-deprecated -- The package boundary intentionally keeps this alias available for existing consumers.
     expect(buildStandardReportPresentationFromFacts).toBe(buildReferenceStandardReportPresentationFromFacts);
+  });
+
+  it("preserves account hierarchy types and validation helpers at the root package boundary", () => {
+    const parentAccount = packageBoundaryAccount("acct_income_parent");
+    const childAccount: Account = {
+      ...packageBoundaryAccount("acct_income_child"),
+      parentAccountId: parentAccount.accountId
+    };
+    const diagnostics: readonly AccountHierarchyDiagnostic[] = validateAccountHierarchy([parentAccount, childAccount]);
+
+    expect(childAccount.parentAccountId).toBe(parentAccount.accountId);
+    expect(diagnostics).toEqual([]);
+    expect(() => {
+      assertValidAccountHierarchy([parentAccount, childAccount]);
+    }).not.toThrow();
+    expect(new AccountHierarchyValidationError([]).name).toBe("AccountHierarchyValidationError");
   });
 });
 
@@ -141,4 +166,18 @@ function isPackageManifest(value: unknown): value is PackageManifest {
 
 function publicAccountId(accountId: AccountId): AccountId {
   return accountId;
+}
+
+function packageBoundaryAccount(accountId: AccountId): Account {
+  return {
+    accountId,
+    tenantId: "tenant_package_boundary",
+    sourceId: "source_package_boundary",
+    sourceAccountId: accountId,
+    accountNumber: accountId.replace("acct_", ""),
+    name: accountId,
+    type: "Income",
+    classification: "income",
+    active: true
+  };
 }

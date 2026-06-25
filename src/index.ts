@@ -1,4 +1,10 @@
 export {
+  AccountHierarchyValidationError,
+  assertValidAccountHierarchy,
+  validateAccountHierarchy
+} from "./account-hierarchy.js";
+export { buildAccountHierarchyRollupLines } from "./account-hierarchy-rollup-lines.js";
+export {
   ERP_FINANCIALS_PACKAGE,
   PACKAGE_BOUNDARY,
   describePackageBoundary
@@ -101,12 +107,15 @@ export {
   buildStandardReportPresentationFromReports
 } from "./report-controls.js";
 export {
+  ACCOUNT_HIERARCHY_CHANGED_STALE_REASON,
   buildLateArrivalReprocessExecutionContract,
   buildScheduledRollupJobResult,
   buildRollupBuckets,
   createSnapshotRefreshContract,
   executeSnapshotRefresh,
   executeLateArrivalReprocess,
+  markAccountHierarchyChangedSnapshotsStale,
+  planAccountHierarchyChangeStaleSnapshots,
   planLateArrivalReprocess,
   reconcileReportFreshness
 } from "./rollup-jobs.js";
@@ -130,6 +139,16 @@ export {
   createQuickBooksContractSmokeHarness
 } from "./quickbooks-contract-smoke.js";
 
+export type {
+  AccountHierarchyDiagnostic,
+  AccountHierarchyDiagnosticCode,
+  AccountHierarchyValidationOptions
+} from "./account-hierarchy.js";
+export type {
+  AccountHierarchyRollupLineAmount,
+  AccountHierarchyRollupLineDrilldownQuery,
+  BuildAccountHierarchyRollupLinesInput
+} from "./account-hierarchy-rollup-lines.js";
 export type {
   Account,
   AccountClassification,
@@ -233,6 +252,7 @@ export type {
   LoadReportBuilderInput,
   LoadReportSnapshotInput,
   LoadRollupBucketsInput,
+  MarkReportSnapshotsStaleForAccountHierarchyChangesInput,
   MarkReportSnapshotsStaleInput,
   MarkReportSnapshotsStaleForPostingChangesInput,
   PostgresQueryClient,
@@ -567,6 +587,9 @@ export type {
 } from "./source-adapters.js";
 export type {
   BuiltRollupBucket,
+  AccountHierarchyChangeStaleInput,
+  AccountHierarchyChangeStaleResult,
+  AccountHierarchyChangeStaleStorage,
   FreshnessReconcileInput,
   LateArrivalReprocessCanonicalPostingReader,
   LateArrivalReprocessExecuteInput,

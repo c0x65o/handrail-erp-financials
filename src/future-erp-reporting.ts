@@ -906,6 +906,7 @@ function reportReconciliationDifferenceDrilldown(
       query: {
         kind: "ledger_postings",
         tenantId: report.snapshot.tenantId,
+        ...(report.snapshot.freshness.sourceId === undefined ? {} : { sourceId: report.snapshot.freshness.sourceId }),
         accountingBasis: report.snapshot.accountingBasis,
         periodStart: report.snapshot.periodStart,
         periodEnd: report.snapshot.periodEnd

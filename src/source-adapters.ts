@@ -84,6 +84,7 @@ export type SourceAdapter<Input> = {
 
 export type NativeLedgerAccount = {
   readonly sourceAccountId: string;
+  readonly parentAccountSourceId?: string;
   readonly name: string;
   readonly classification: AccountClassification;
   readonly accountNumber?: string;
@@ -163,6 +164,7 @@ export type QuickBooksSdkRef = {
 export type QuickBooksSdkAccount = {
   readonly Id: string;
   readonly Name: string;
+  readonly ParentRef?: QuickBooksSdkRef;
   readonly AcctNum?: string;
   readonly AccountType: string;
   readonly AccountSubType?: string;
@@ -709,6 +711,9 @@ function accountFromNative(context: SourceAdapterContext, account: NativeLedgerA
     sourceId: context.sourceId,
     accountId: canonicalRecordId(context, "account", account.sourceAccountId),
     sourceAccountId: account.sourceAccountId,
+    ...(account.parentAccountSourceId === undefined
+      ? {}
+      : { parentAccountId: canonicalRecordId(context, "account", account.parentAccountSourceId) }),
     ...(account.accountNumber === undefined ? {} : { accountNumber: account.accountNumber }),
     name: account.name,
     type: account.type ?? account.classification,
@@ -722,6 +727,7 @@ function accountFromNative(context: SourceAdapterContext, account: NativeLedgerA
 function quickBooksAccountToNativeAccount(account: QuickBooksSdkAccount): NativeLedgerAccount {
   return {
     sourceAccountId: account.Id,
+    ...(account.ParentRef?.value === undefined ? {} : { parentAccountSourceId: account.ParentRef.value }),
     name: account.Name,
     classification: quickBooksAccountClassification(account.AccountType),
     ...(account.AcctNum === undefined ? {} : { accountNumber: account.AcctNum }),

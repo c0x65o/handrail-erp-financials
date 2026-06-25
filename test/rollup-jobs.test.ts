@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ACCOUNT_HIERARCHY_CHANGED_STALE_REASON,
   ERP_FINANCIALS_STATEMENT_FIXTURE,
   assertNoCredentialKeys,
   buildLateArrivalReprocessExecutionContract,
@@ -11,11 +12,14 @@ import {
   createSnapshotRefreshContract,
   executeSnapshotRefresh,
   executeLateArrivalReprocess,
+  markAccountHierarchyChangedSnapshotsStale,
+  planAccountHierarchyChangeStaleSnapshots,
   planLateArrivalReprocess,
   reconcileReportFreshness
 } from "../src/index.js";
 
 import type {
+  Account,
   BuiltReport,
   LedgerPosting,
   LoadReportBuilderInput,
@@ -23,6 +27,7 @@ import type {
   PostgresQueryResult,
   ReportBuilderInput,
   ReportFreshnessRow,
+  ReportSnapshotLine,
   Party,
   ScheduledRollupCanonicalPostingReader,
   SnapshotRefreshStorage,
@@ -385,7 +390,7 @@ describe("rollup, snapshot, freshness, and late-arrival job contracts", () => {
       generatedAt: "2026-02-01T00:00:00.000Z",
       currencyCode: "USD",
       postingCount: 20,
-      accountCount: 10,
+      accountCount: 11,
       dimensionHashCount: 3,
       currencyCodes: ["USD"],
       sourceEvidence: {
@@ -411,7 +416,7 @@ describe("rollup, snapshot, freshness, and late-arrival job contracts", () => {
       },
       {
         bucketGrain: "month",
-        bucketCount: 12,
+        bucketCount: 13,
         windowCount: 1,
         bucketStartMin: "2026-01-01",
         bucketEndMax: "2026-01-31"
@@ -458,11 +463,11 @@ describe("rollup, snapshot, freshness, and late-arrival job contracts", () => {
     ]);
     expect(result.summary).toMatchObject({
       postingCount: 20,
-      bucketCount: 12,
+      bucketCount: 13,
       bucketSummaries: [
         {
           bucketGrain: "month",
-          bucketCount: 12,
+          bucketCount: 13,
           windowCount: 1,
           bucketStartMin: "2026-01-01",
           bucketEndMax: "2026-01-31"
@@ -729,6 +734,55 @@ describe("rollup, snapshot, freshness, and late-arrival job contracts", () => {
     });
   });
 
+  it("plans provider-neutral snapshot stale marking for canonical account hierarchy changes", async () => {
+    const storageInputs: unknown[] = [];
+
+    const planned = planAccountHierarchyChangeStaleSnapshots({
+      tenantId: fixture.company.tenantId,
+      companyId: fixture.company.companyId,
+      sourceId: fixture.source.sourceId,
+      reportNames: ["profit_and_loss", "balance_sheet"],
+      accountingBasis: "accrual",
+      currencyCode: "USD"
+    });
+    const result = await markAccountHierarchyChangedSnapshotsStale({
+      tenantId: fixture.company.tenantId,
+      companyId: fixture.company.companyId,
+      sourceId: fixture.source.sourceId,
+      reportNames: ["profit_and_loss"],
+      accountingBasis: "accrual",
+      currencyCode: "USD",
+      storage: {
+        markReportSnapshotsStaleForAccountHierarchyChanges(input) {
+          storageInputs.push(input);
+          return Promise.resolve(2);
+        }
+      }
+    });
+
+    expect(planned).toEqual({
+      tenantId: fixture.company.tenantId,
+      companyId: fixture.company.companyId,
+      sourceId: fixture.source.sourceId,
+      staleReason: ACCOUNT_HIERARCHY_CHANGED_STALE_REASON,
+      reportNames: ["profit_and_loss", "balance_sheet"],
+      accountingBasis: "accrual",
+      currencyCode: "USD"
+    });
+    expect(result.snapshotsMarkedStale).toBe(2);
+    expect(storageInputs).toEqual([
+      {
+        tenantId: fixture.company.tenantId,
+        companyId: fixture.company.companyId,
+        sourceId: fixture.source.sourceId,
+        staleReason: ACCOUNT_HIERARCHY_CHANGED_STALE_REASON,
+        reportNames: ["profit_and_loss"],
+        accountingBasis: "accrual",
+        currencyCode: "USD"
+      }
+    ]);
+  });
+
   it("reuses fresh stored snapshots without rebuilding or writing", async () => {
     const freshReport = buildProfitAndLossReport({
       ...fixture.reportRequest,
@@ -768,6 +822,63 @@ describe("rollup, snapshot, freshness, and late-arrival job contracts", () => {
     expect(storage.builderRequests).toEqual([]);
     expect(storage.writtenReports).toEqual([]);
     expect(storage.writtenFreshnessRows).toEqual([]);
+  });
+
+  it("rebuilds instead of reusing a fresh snapshot after account hierarchy stale marking", async () => {
+    const oldFlatReport = buildProfitAndLossReport({
+      ...fixture.reportRequest,
+      sourceId: fixture.source.sourceId,
+      accounts: fixture.accounts,
+      postings: fixture.postings,
+      freshness: {
+        status: "fresh",
+        sourceId: fixture.source.sourceId,
+        freshThrough: "2026-02-01T00:00:00.000Z"
+      }
+    });
+    const staleStoredSnapshot: StoredReportSnapshot = {
+      snapshot: {
+        ...oldFlatReport.snapshot,
+        freshness: {
+          ...oldFlatReport.snapshot.freshness,
+          status: "stale",
+          staleReason: ACCOUNT_HIERARCHY_CHANGED_STALE_REASON
+        }
+      },
+      lines: oldFlatReport.lines,
+      totals: oldFlatReport.totals
+    };
+    const storage = new SnapshotRefreshMemoryStorage(storedReportBuilderInputWithExpenseParent(), staleStoredSnapshot);
+
+    const result = await executeSnapshotRefresh({
+      tenantId: fixture.company.tenantId,
+      companyId: fixture.company.companyId,
+      sourceId: fixture.source.sourceId,
+      reportName: "profit_and_loss",
+      accountingBasis: "accrual",
+      periodStart: "2026-01-01",
+      periodEnd: "2026-01-31",
+      asOfDate: "2026-01-31",
+      currencyCode: "USD",
+      generatedAt: "2026-02-02T00:00:00.000Z",
+      freshThrough: "2026-02-01T00:00:00.000Z",
+      importBatchId: fixture.importBatch.importBatchId,
+      checkpointId: fixture.checkpoint.checkpointId,
+      storage
+    });
+    const rebuiltParent = requiredSnapshotLine(result.snapshot.lines, "acct_expense_parent");
+    const rebuiltChild = requiredSnapshotLine(result.snapshot.lines, "acct_expense");
+
+    expect(result.action).toBe("rebuilt");
+    expect(storage.builderRequests).toHaveLength(1);
+    expect(storage.writtenReports).toHaveLength(1);
+    expect(storage.writtenFreshnessRows).toHaveLength(1);
+    expect(rebuiltChild.parentReportLineId).toBe(rebuiltParent.reportLineId);
+    expect(storage.writtenFreshnessRows[0]).toMatchObject({
+      reportName: "profit_and_loss",
+      status: "fresh",
+      freshThrough: "2026-02-01T00:00:00.000Z"
+    });
   });
 
   it("rebuilds stale and missing snapshots through package report builders and writes freshness rows", async () => {
@@ -963,6 +1074,44 @@ function storedReportBuilderInput(): ReportBuilderInput {
     accounts: fixture.accounts,
     postings: fixture.postings
   };
+}
+
+function storedReportBuilderInputWithExpenseParent(): ReportBuilderInput {
+  return {
+    ...storedReportBuilderInput(),
+    accounts: fixture.accounts.flatMap((account) => {
+      if (account.accountId !== "acct_expense") {
+        return [account];
+      }
+
+      return [
+        parentExpenseAccount(account),
+        {
+          ...account,
+          parentAccountId: "acct_expense_parent"
+        }
+      ];
+    })
+  };
+}
+
+function parentExpenseAccount(child: Account): Account {
+  return {
+    ...child,
+    accountId: "acct_expense_parent",
+    sourceAccountId: "expense_parent",
+    accountNumber: "6000",
+    name: "Operating Expense Parent"
+  };
+}
+
+function requiredSnapshotLine(lines: readonly ReportSnapshotLine[], accountId: string): ReportSnapshotLine {
+  const line = lines.find((entry) => entry.accountId === accountId);
+  if (line === undefined) {
+    throw new Error(`missing snapshot line for ${accountId}`);
+  }
+
+  return line;
 }
 
 function storedSnapshotFromReport(report: BuiltReport): StoredReportSnapshot {

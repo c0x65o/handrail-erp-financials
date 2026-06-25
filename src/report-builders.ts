@@ -19,7 +19,11 @@ import type {
   SourceId,
   TenantId
 } from "./canonical-model.js";
+import { buildAccountHierarchyRollupLines } from "./account-hierarchy-rollup-lines.js";
+import { assertValidAccountHierarchy } from "./account-hierarchy.js";
 import { assertLedgerPostingAmounts, assertSafeSourcePayloadRef, createCompactDrilldownRef } from "./canonical-model.js";
+
+import type { AccountHierarchyRollupLineAmount } from "./account-hierarchy-rollup-lines.js";
 
 export type ReportName = "profit_and_loss" | "balance_sheet" | "trial_balance" | "cash_flow";
 export type ReportSourceKind = "ledger_postings" | "rollup_buckets" | "report_snapshot";
@@ -89,6 +93,16 @@ const PROFIT_AND_LOSS_SECTIONS: readonly AccountClassification[] = [
 ];
 
 const BALANCE_SHEET_SECTIONS: readonly AccountClassification[] = ["asset", "liability", "equity"];
+const TRIAL_BALANCE_ACCOUNT_SECTIONS: readonly AccountClassification[] = [
+  "asset",
+  "cost_of_goods_sold",
+  "equity",
+  "expense",
+  "income",
+  "liability",
+  "other_expense",
+  "other_income"
+];
 const ACCOUNT_CLASSIFICATIONS: ReadonlySet<string> = new Set([
   ...PROFIT_AND_LOSS_SECTIONS,
   ...BALANCE_SHEET_SECTIONS
@@ -102,30 +116,52 @@ export function buildProfitAndLossReport(input: ReportBuilderInput): BuiltReport
   assertReportBuilderInputComplete(input);
   const accountMap = createAccountMap(input);
   const postings = filterPeriodPostings(input);
-  const lines = buildAccountLines({
-    input,
-    reportName: "profit_and_loss",
-    snapshotId: snapshotId("profit_and_loss", input),
+  const snapshot = snapshotId("profit_and_loss", input);
+  const directBalances = aggregateByAccount(
     postings,
     accountMap,
-    classifications: PROFIT_AND_LOSS_SECTIONS,
-    amountForClassification: incomeStatementAmount
+    (posting, account) => incomeStatementAmount(posting, account.classification)
+  );
+  const profitAndLossAccounts = [...accountMap.values()].filter((account) =>
+    PROFIT_AND_LOSS_SECTIONS.includes(account.classification)
+  );
+  const directAmounts = accountHierarchyAmountsForBalances(directBalances, PROFIT_AND_LOSS_SECTIONS);
+  const directAccumulators = accumulatorsForAccountBalances(directBalances, PROFIT_AND_LOSS_SECTIONS);
+  const lines = buildAccountHierarchyRollupLines({
+    tenantId: input.tenantId,
+    ...(input.sourceId === undefined ? {} : { sourceId: input.sourceId }),
+    reportSnapshotId: snapshot,
+    reportName: "profit_and_loss",
+    accounts: profitAndLossAccounts,
+    accountAmounts: directAmounts,
+    sectionOrder: PROFIT_AND_LOSS_SECTIONS,
+    drilldownQuery: {
+      ...(input.sourceId === undefined ? {} : { sourceId: input.sourceId }),
+      accountingBasis: input.accountingBasis,
+      periodStart: input.periodStart,
+      periodEnd: input.periodEnd
+    }
   });
   const totalByKey = new Map<string, LineAccumulator>();
 
-  addTotal(totalByKey, "total_income", "Total Income", linesForSection(lines, "income"));
-  addTotal(totalByKey, "total_cost_of_goods_sold", "Total Cost of Goods Sold", linesForSection(lines, "cost_of_goods_sold"));
+  addTotal(totalByKey, "total_income", "Total Income", accumulatorsForSection(directAccumulators, "income"));
+  addTotal(
+    totalByKey,
+    "total_cost_of_goods_sold",
+    "Total Cost of Goods Sold",
+    accumulatorsForSection(directAccumulators, "cost_of_goods_sold")
+  );
   addTotal(totalByKey, "gross_profit", "Gross Profit", [
     lineAsAccumulator(linesForTotal(totalByKey, "total_income"), 1),
     lineAsAccumulator(linesForTotal(totalByKey, "total_cost_of_goods_sold"), -1)
   ]);
-  addTotal(totalByKey, "total_expenses", "Total Expenses", linesForSection(lines, "expense"));
+  addTotal(totalByKey, "total_expenses", "Total Expenses", accumulatorsForSection(directAccumulators, "expense"));
   addTotal(totalByKey, "net_operating_income", "Net Operating Income", [
     lineAsAccumulator(linesForTotal(totalByKey, "gross_profit"), 1),
     lineAsAccumulator(linesForTotal(totalByKey, "total_expenses"), -1)
   ]);
-  addTotal(totalByKey, "total_other_income", "Total Other Income", linesForSection(lines, "other_income"));
-  addTotal(totalByKey, "total_other_expense", "Total Other Expense", linesForSection(lines, "other_expense"));
+  addTotal(totalByKey, "total_other_income", "Total Other Income", accumulatorsForSection(directAccumulators, "other_income"));
+  addTotal(totalByKey, "total_other_expense", "Total Other Expense", accumulatorsForSection(directAccumulators, "other_expense"));
   addTotal(totalByKey, "net_income", "Net Income", [
     lineAsAccumulator(linesForTotal(totalByKey, "net_operating_income"), 1),
     lineAsAccumulator(linesForTotal(totalByKey, "total_other_income"), 1),
@@ -148,19 +184,37 @@ export function buildBalanceSheetReport(input: ReportBuilderInput): BuiltReport 
   const accountMap = createAccountMap(input);
   const postings = filterAsOfPostings(asOfInput);
   const snapshot = snapshotId("balance_sheet", input);
-  const accountLines = buildAccountLines({
-    input,
-    reportName: "balance_sheet",
-    snapshotId: snapshot,
+  const directBalances = aggregateByAccount(
     postings,
     accountMap,
-    classifications: BALANCE_SHEET_SECTIONS,
-    amountForClassification: balanceSheetAmount
+    (posting, account) => balanceSheetAmount(posting, account.classification)
+  );
+  const balanceSheetAccounts = [...accountMap.values()].filter((account) =>
+    BALANCE_SHEET_SECTIONS.includes(account.classification)
+  );
+  const directAmounts = accountHierarchyAmountsForBalances(directBalances, BALANCE_SHEET_SECTIONS);
+  const directAccumulators = accumulatorsForAccountBalances(directBalances, BALANCE_SHEET_SECTIONS);
+  const accountLines = buildAccountHierarchyRollupLines({
+    tenantId: input.tenantId,
+    ...(input.sourceId === undefined ? {} : { sourceId: input.sourceId }),
+    reportSnapshotId: snapshot,
+    reportName: "balance_sheet",
+    accounts: balanceSheetAccounts,
+    accountAmounts: directAmounts,
+    sectionOrder: BALANCE_SHEET_SECTIONS,
+    drilldownQuery: {
+      ...(input.sourceId === undefined ? {} : { sourceId: input.sourceId }),
+      accountingBasis: input.accountingBasis,
+      periodStart: input.periodStart,
+      periodEnd: input.periodEnd
+    }
   });
   const currentEarnings = currentEarningsAccumulator(input, accountMap);
   const lines = [...accountLines];
+  const equityAccumulators = [...accumulatorsForSection(directAccumulators, "equity")];
 
   if (currentEarnings.amountMinor !== 0n) {
+    equityAccumulators.push(currentEarnings);
     lines.push({
       tenantId: input.tenantId,
       reportSnapshotId: snapshot,
@@ -180,22 +234,24 @@ export function buildBalanceSheetReport(input: ReportBuilderInput): BuiltReport 
     });
   }
 
-  const totalAssets = sumLineAmounts(linesForSection(lines, "asset"));
-  const totalLiabilities = sumLineAmounts(linesForSection(lines, "liability"));
-  const totalEquity = sumLineAmounts(linesForSection(lines, "equity"));
+  const assetAccumulators = accumulatorsForSection(directAccumulators, "asset");
+  const liabilityAccumulators = accumulatorsForSection(directAccumulators, "liability");
+  const totalAssets = sumLineAmounts(assetAccumulators);
+  const totalLiabilities = sumLineAmounts(liabilityAccumulators);
+  const totalEquity = sumLineAmounts(equityAccumulators);
   const liabilitiesAndEquity = totalLiabilities + totalEquity;
   const reconciliationDifference = totalAssets - liabilitiesAndEquity;
   const totals = [
-    totalFromLines(input, "balance_sheet", "total_assets", "Total Assets", linesForSection(lines, "asset")),
-    totalFromLines(input, "balance_sheet", "total_liabilities", "Total Liabilities", linesForSection(lines, "liability")),
-    totalFromLines(input, "balance_sheet", "total_equity", "Total Equity", linesForSection(lines, "equity")),
+    totalFromLines(input, "balance_sheet", "total_assets", "Total Assets", assetAccumulators),
+    totalFromLines(input, "balance_sheet", "total_liabilities", "Total Liabilities", liabilityAccumulators),
+    totalFromLines(input, "balance_sheet", "total_equity", "Total Equity", equityAccumulators),
     totalFromAccumulator(input, "balance_sheet", {
       key: "total_liabilities_and_equity",
       label: "Total Liabilities and Equity",
       amountMinor: liabilitiesAndEquity,
-      postingIds: mergePostingIds(linesForSection(lines, "liability"), linesForSection(lines, "equity")),
-      accountIds: mergeAccountIds(linesForSection(lines, "liability"), linesForSection(lines, "equity")),
-      sourceRefs: mergeSourceRefs(linesForSection(lines, "liability"), linesForSection(lines, "equity"))
+      postingIds: mergePostingIds(liabilityAccumulators, equityAccumulators),
+      accountIds: mergeAccountIds(liabilityAccumulators, equityAccumulators),
+      sourceRefs: mergeSourceRefs(liabilityAccumulators, equityAccumulators)
     })
   ];
 
@@ -213,42 +269,39 @@ export function buildTrialBalanceReport(input: ReportBuilderInput): BuiltReport 
   assertReportBuilderInputComplete(input);
   const accountMap = createAccountMap(input);
   const postings = filterAsOfPostings(input);
-  const balances = aggregateByAccount(postings, accountMap, signedDebitMinusCredit);
+  const directBalances = aggregateByAccount(postings, accountMap, signedDebitMinusCredit);
   const snapshot = snapshotId("trial_balance", input);
-  const lines = [...balances.values()]
-    .filter((balance) => balance.amountMinor !== 0n)
-    .sort(compareAccountBalances)
-    .map((balance, index): ReportSnapshotLine => ({
-      tenantId: input.tenantId,
-      reportSnapshotId: snapshot,
-      reportLineId: lineId("trial_balance", index + 1, balance.account.accountId),
-      section: balance.amountMinor >= 0n ? "debit" : "credit",
-      label: accountLabel(balance.account),
-      accountId: balance.account.accountId,
-      amount: formatMoney(balance.amountMinor),
-      sortOrder: (index + 1) * 10,
-      drilldownRef: drilldownRef(input, "trial_balance", balance.account.accountId, balance.postingIds, [balance.account.accountId], balance.sourceRefs)
-    }));
-  const debitTotal = lines.reduce((sum, line) => (parseMoney(line.amount) > 0n ? sum + parseMoney(line.amount) : sum), 0n);
-  const creditTotal = lines.reduce((sum, line) => (parseMoney(line.amount) < 0n ? sum - parseMoney(line.amount) : sum), 0n);
+  const directAmounts = accountHierarchyAmountsForBalances(directBalances, TRIAL_BALANCE_ACCOUNT_SECTIONS);
+  const lines = buildAccountHierarchyRollupLines({
+    tenantId: input.tenantId,
+    ...(input.sourceId === undefined ? {} : { sourceId: input.sourceId }),
+    reportSnapshotId: snapshot,
+    reportName: "trial_balance",
+    accounts: [...accountMap.values()],
+    accountAmounts: directAmounts,
+    sectionOrder: TRIAL_BALANCE_ACCOUNT_SECTIONS,
+    sectionForAccount: (account) => account.classification,
+    drilldownQuery: {
+      ...(input.sourceId === undefined ? {} : { sourceId: input.sourceId }),
+      accountingBasis: input.accountingBasis,
+      periodStart: input.periodStart,
+      periodEnd: input.periodEnd
+    }
+  }).map((line): ReportSnapshotLine => ({
+    ...line,
+    section: parseMoney(line.amount) >= 0n ? "debit" : "credit"
+  }));
+  const directAccumulators = accumulatorsForAccountBalances(directBalances, TRIAL_BALANCE_ACCOUNT_SECTIONS);
+  const debitAccumulators = directAccumulators.filter((accumulator) => accumulator.amountMinor > 0n);
+  const creditAccumulators = directAccumulators
+    .filter((accumulator) => accumulator.amountMinor < 0n)
+    .map((accumulator): LineAccumulator => ({ ...accumulator, amountMinor: -accumulator.amountMinor }));
+  const debitTotal = sumLineAmounts(debitAccumulators);
+  const creditTotal = sumLineAmounts(creditAccumulators);
   const difference = debitTotal - creditTotal;
   const totals = [
-    totalFromAccumulator(input, "trial_balance", {
-      key: "total_debits",
-      label: "Total Debits",
-      amountMinor: debitTotal,
-      postingIds: postingIdsFromReportLines(lines),
-      accountIds: accountIdsFromReportLines(lines),
-      sourceRefs: sourceRefsFromReportLines(lines)
-    }),
-    totalFromAccumulator(input, "trial_balance", {
-      key: "total_credits",
-      label: "Total Credits",
-      amountMinor: creditTotal,
-      postingIds: postingIdsFromReportLines(lines),
-      accountIds: accountIdsFromReportLines(lines),
-      sourceRefs: sourceRefsFromReportLines(lines)
-    })
+    totalFromLines(input, "trial_balance", "total_debits", "Total Debits", debitAccumulators),
+    totalFromLines(input, "trial_balance", "total_credits", "Total Credits", creditAccumulators)
   ];
 
   return buildReportResult(input, "trial_balance", lines, totals, {
@@ -264,7 +317,8 @@ export function buildTrialBalanceReport(input: ReportBuilderInput): BuiltReport 
  */
 export function buildCashFlowReport(input: CashFlowBuilderInput): BuiltReport {
   assertReportBuilderInputComplete(input);
-  const cashAccountIds = new Set(input.cashAccountIds);
+  const accountMap = createAccountMap(input);
+  const cashAccountIds = expandAccountIdsToDescendants(input.cashAccountIds, accountMap);
   const periodPostings = filterPeriodPostings(input);
   const cashPostings = periodPostings.filter((posting) => cashAccountIds.has(posting.accountId));
   const beginningCashPostings = filterBeforeDatePostings(input).filter((posting) => cashAccountIds.has(posting.accountId));
@@ -281,7 +335,7 @@ export function buildCashFlowReport(input: CashFlowBuilderInput): BuiltReport {
   const postingsByTransaction = groupBy(periodPostings, (posting) => posting.transactionId);
 
   for (const cashPosting of cashPostings) {
-    const activity = classifyCashPosting(cashPosting, postingsByTransaction, cashAccountIds, input.activityByAccountId);
+    const activity = classifyCashPosting(cashPosting, postingsByTransaction, cashAccountIds, accountMap, input.activityByAccountId);
     const cashMovement = signedDebitMinusCredit(cashPosting);
     activityTotals[activity].amountMinor += cashMovement;
     activityTotals[activity].postingIds.push(cashPosting.postingId);
@@ -321,7 +375,7 @@ export function buildCashFlowReport(input: CashFlowBuilderInput): BuiltReport {
       "cash_beginning",
       "Cash at Beginning of Period",
       beginningCash,
-      input.cashAccountIds,
+      [...cashAccountIds],
       beginningCashPostings.map((posting) => posting.postingId)
     ),
     cashTotal(input, "net_operating_cash", "Net Cash from Operating Activities", activityTotals.operating.amountMinor, [
@@ -336,8 +390,8 @@ export function buildCashFlowReport(input: CashFlowBuilderInput): BuiltReport {
     cashTotal(input, "unclassified_cash_movement", "Unclassified Cash Movement", activityTotals.unclassified.amountMinor, [
       ...activityTotals.unclassified.accountIds
     ], activityTotals.unclassified.postingIds),
-    cashTotal(input, "net_cash_flow", "Net Change in Cash", netCashFlow, input.cashAccountIds, cashPostings.map((posting) => posting.postingId)),
-    cashTotal(input, "cash_ending", "Cash at End of Period", endingCash, input.cashAccountIds, cashPostings.map((posting) => posting.postingId))
+    cashTotal(input, "net_cash_flow", "Net Change in Cash", netCashFlow, [...cashAccountIds], cashPostings.map((posting) => posting.postingId)),
+    cashTotal(input, "cash_ending", "Cash at End of Period", endingCash, [...cashAccountIds], cashPostings.map((posting) => posting.postingId))
   ];
   const unsupportedReasons =
     input.cashAccountIds.length === 0
@@ -362,6 +416,7 @@ export function buildCashFlowReport(input: CashFlowBuilderInput): BuiltReport {
 
 export function assertReportBuilderInputComplete(input: ReportBuilderInput): void {
   const accountMap = createAccountMap(input);
+  assertValidAccountHierarchy(input.accounts, { accountsToValidate: [...accountMap.values()] });
 
   for (const posting of input.postings.filter((entry) => postingMatchesReportScope(input, entry))) {
     assertLedgerPostingAmounts(posting);
@@ -417,44 +472,41 @@ type AccountBalance = {
   readonly sourceRefs: SafeSourcePayloadRef[];
 };
 
-type BuildAccountLinesInput = {
-  readonly input: ReportBuilderInput;
-  readonly reportName: ReportName;
-  readonly snapshotId: string;
-  readonly postings: readonly LedgerPosting[];
-  readonly accountMap: ReadonlyMap<AccountId, Account>;
-  readonly classifications: readonly AccountClassification[];
-  readonly amountForClassification: (posting: LedgerPosting, classification: AccountClassification) => bigint;
-};
+function accountHierarchyAmountsForBalances(
+  balances: ReadonlyMap<AccountId, AccountBalance>,
+  classifications: readonly AccountClassification[]
+): AccountHierarchyRollupLineAmount[] {
+  return sortedMaterialBalancesForClassifications(balances, classifications).map((balance) => ({
+    accountId: balance.account.accountId,
+    amount: formatMoney(balance.amountMinor),
+    section: balance.account.classification,
+    postingIds: unique(balance.postingIds),
+    sourceRefs: uniqueSourceRefs(balance.sourceRefs)
+  }));
+}
 
-function buildAccountLines(buildInput: BuildAccountLinesInput): ReportSnapshotLine[] {
-  const balances = aggregateByAccount(
-    buildInput.postings,
-    buildInput.accountMap,
-    (posting, account) => buildInput.amountForClassification(posting, account.classification)
-  );
+function accumulatorsForAccountBalances(
+  balances: ReadonlyMap<AccountId, AccountBalance>,
+  classifications: readonly AccountClassification[]
+): LineAccumulator[] {
+  return sortedMaterialBalancesForClassifications(balances, classifications).map((balance) => ({
+    key: balance.account.accountId,
+    label: accountLabel(balance.account),
+    section: balance.account.classification,
+    amountMinor: balance.amountMinor,
+    postingIds: unique(balance.postingIds),
+    accountIds: [balance.account.accountId],
+    sourceRefs: uniqueSourceRefs(balance.sourceRefs)
+  }));
+}
 
+function sortedMaterialBalancesForClassifications(
+  balances: ReadonlyMap<AccountId, AccountBalance>,
+  classifications: readonly AccountClassification[]
+): AccountBalance[] {
   return [...balances.values()]
-    .filter((balance) => balance.amountMinor !== 0n && buildInput.classifications.includes(balance.account.classification))
-    .sort((left, right) => compareStatementAccountBalances(left, right, buildInput.classifications))
-    .map((balance, index): ReportSnapshotLine => ({
-      tenantId: buildInput.input.tenantId,
-      reportSnapshotId: buildInput.snapshotId,
-      reportLineId: lineId(buildInput.reportName, index + 1, balance.account.accountId),
-      section: balance.account.classification,
-      label: accountLabel(balance.account),
-      accountId: balance.account.accountId,
-      amount: formatMoney(balance.amountMinor),
-      sortOrder: (index + 1) * 10,
-      drilldownRef: drilldownRef(
-        buildInput.input,
-        buildInput.reportName,
-        balance.account.accountId,
-        balance.postingIds,
-        [balance.account.accountId],
-        balance.sourceRefs
-      )
-    }));
+    .filter((balance) => balance.amountMinor !== 0n && classifications.includes(balance.account.classification))
+    .sort((left, right) => compareStatementAccountBalances(left, right, classifications));
 }
 
 function aggregateByAccount(
@@ -612,6 +664,7 @@ function formatMoney(value: bigint): DecimalString {
 type LineAccumulator = {
   readonly key: string;
   readonly label: string;
+  readonly section?: string;
   readonly amountMinor: bigint;
   readonly postingIds: readonly LedgerPostingId[];
   readonly accountIds: readonly AccountId[];
@@ -629,17 +682,8 @@ function addTotal(target: Map<string, LineAccumulator>, key: string, label: stri
   });
 }
 
-function linesForSection(lines: readonly ReportSnapshotLine[], section: string): LineAccumulator[] {
-  return lines
-    .filter((line) => line.section === section)
-    .map((line) => ({
-      key: line.reportLineId,
-      label: line.label,
-      amountMinor: parseMoney(line.amount),
-      postingIds: line.drilldownRef.postingIds ?? [],
-      accountIds: line.drilldownRef.accountIds ?? [],
-      sourceRefs: line.drilldownRef.sourceRefs ?? []
-    }));
+function accumulatorsForSection(accumulators: readonly LineAccumulator[], section: string): LineAccumulator[] {
+  return accumulators.filter((accumulator) => accumulator.section === section);
 }
 
 function linesForTotal(totals: ReadonlyMap<string, LineAccumulator>, key: string): LineAccumulator {
@@ -724,18 +768,6 @@ function mergeSourceRefs(left: readonly LineAccumulator[], right: readonly LineA
   return uniqueSourceRefs([...left, ...right].flatMap((line) => line.sourceRefs));
 }
 
-function postingIdsFromReportLines(lines: readonly ReportSnapshotLine[]): LedgerPostingId[] {
-  return unique(lines.flatMap((line) => line.drilldownRef.postingIds ?? []));
-}
-
-function accountIdsFromReportLines(lines: readonly ReportSnapshotLine[]): AccountId[] {
-  return unique(lines.flatMap((line) => line.drilldownRef.accountIds ?? []));
-}
-
-function sourceRefsFromReportLines(lines: readonly ReportSnapshotLine[]): SafeSourcePayloadRef[] {
-  return uniqueSourceRefs(lines.flatMap((line) => line.drilldownRef.sourceRefs ?? []));
-}
-
 function drilldownRef(
   input: ReportBuilderInput,
   reportName: ReportName,
@@ -786,15 +818,6 @@ function totalId(reportName: ReportName, key: string): string {
 
 function accountLabel(account: Account): string {
   return account.accountNumber === undefined ? account.name : `${account.accountNumber} ${account.name}`;
-}
-
-function compareAccountBalances(left: AccountBalance, right: AccountBalance): number {
-  return (
-    left.account.classification.localeCompare(right.account.classification) ||
-    (left.account.accountNumber ?? "").localeCompare(right.account.accountNumber ?? "") ||
-    left.account.name.localeCompare(right.account.name) ||
-    left.account.accountId.localeCompare(right.account.accountId)
-  );
 }
 
 function compareStatementAccountBalances(
@@ -889,18 +912,77 @@ function classifyCashPosting(
   cashPosting: LedgerPosting,
   postingsByTransaction: ReadonlyMap<string, readonly LedgerPosting[]>,
   cashAccountIds: ReadonlySet<AccountId>,
+  accountMap: ReadonlyMap<AccountId, Account>,
   activityByAccountId: Readonly<Record<AccountId, Exclude<CashFlowActivity, "unclassified">>>
 ): CashFlowActivity {
   const transactionPostings = postingsByTransaction.get(cashPosting.transactionId) ?? [];
   const activities = unique(
     transactionPostings
       .filter((posting) => posting.postingId !== cashPosting.postingId && !cashAccountIds.has(posting.accountId))
-      .map((posting) => activityByAccountId[posting.accountId])
+      .map((posting) => cashFlowActivityForAccount(posting.accountId, accountMap, activityByAccountId))
       .filter((activity): activity is Exclude<CashFlowActivity, "unclassified"> => activity !== undefined)
   );
 
   const onlyActivity = activities[0];
   return activities.length === 1 && onlyActivity !== undefined ? onlyActivity : "unclassified";
+}
+
+function expandAccountIdsToDescendants(
+  accountIds: readonly AccountId[],
+  accountMap: ReadonlyMap<AccountId, Account>
+): ReadonlySet<AccountId> {
+  const expanded = new Set<AccountId>(accountIds);
+  const childrenByParentId = new Map<AccountId, Account[]>();
+
+  for (const account of accountMap.values()) {
+    if (account.parentAccountId === undefined) {
+      continue;
+    }
+    const children = childrenByParentId.get(account.parentAccountId);
+    if (children === undefined) {
+      childrenByParentId.set(account.parentAccountId, [account]);
+    } else {
+      children.push(account);
+    }
+  }
+
+  const visit = (accountId: AccountId): void => {
+    for (const child of childrenByParentId.get(accountId) ?? []) {
+      if (expanded.has(child.accountId)) {
+        continue;
+      }
+      expanded.add(child.accountId);
+      visit(child.accountId);
+    }
+  };
+
+  for (const accountId of accountIds) {
+    visit(accountId);
+  }
+
+  return expanded;
+}
+
+function cashFlowActivityForAccount(
+  accountId: AccountId,
+  accountMap: ReadonlyMap<AccountId, Account>,
+  activityByAccountId: Readonly<Record<AccountId, Exclude<CashFlowActivity, "unclassified">>>
+): Exclude<CashFlowActivity, "unclassified"> | undefined {
+  const directActivity = activityByAccountId[accountId];
+  if (directActivity !== undefined) {
+    return directActivity;
+  }
+
+  let account = accountMap.get(accountId);
+  while (account?.parentAccountId !== undefined) {
+    const activity = activityByAccountId[account.parentAccountId];
+    if (activity !== undefined) {
+      return activity;
+    }
+    account = accountMap.get(account.parentAccountId);
+  }
+
+  return undefined;
 }
 
 function groupBy<T>(values: readonly T[], keyForValue: (value: T) => string): Map<string, T[]> {

@@ -296,6 +296,14 @@ function normalizedAccountToSdkResource(resource: NormalizedQuickBooksResourceSe
     Id: resource.resource.sourceAccountId,
     Name: resource.resource.name,
     AccountType: resource.resource.accountType,
+    ...(resource.resource.parentAccountRef === undefined
+      ? {}
+      : {
+          ParentRef: {
+            value: resource.resource.parentAccountRef.sourceObjectId,
+            ...(resource.resource.parentAccountRef.displayName === undefined ? {} : { name: resource.resource.parentAccountRef.displayName })
+          }
+        }),
     ...(resource.resource.accountNumber === undefined ? {} : { AcctNum: resource.resource.accountNumber }),
     ...(resource.resource.accountSubType === undefined ? {} : { AccountSubType: resource.resource.accountSubType }),
     ...(resource.resource.active === undefined ? {} : { Active: resource.resource.active }),

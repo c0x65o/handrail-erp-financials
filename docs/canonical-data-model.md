@@ -60,6 +60,13 @@ Core fields:
 - `currency_code`
 - `active`
 
+`parent_account_id` stores the canonical account hierarchy edge. It maps to
+`Account.parentAccountId` and points to canonical `account_id`, not provider
+account identifiers. The normative hierarchy behavior for parent postings,
+descendant totals, inactive parents, orphan parents, cycles, cross-source
+references, and provider mapping boundaries is defined in
+[account-hierarchy-rules.md](account-hierarchy-rules.md).
+
 Expected classifications include:
 
 - asset
@@ -264,6 +271,31 @@ Core fields:
 - `amount`
 - `sort_order`
 - `drilldown_ref`
+
+Nested account hierarchy rows use this same shape. A parent account row and a
+child account row are both `report_snapshot_lines` records; the child references
+the parent with `parent_report_line_id`. The stable `report_line_id` identifies
+the report/account row across snapshot refreshes and comparison periods.
+`section`, `label`, `account_id`, `amount`, `sort_order`, and `drilldown_ref`
+remain populated the same way they are for flat account rows.
+
+Parent rows precede child rows by `sort_order`. Section totals are stored in
+`report_snapshot_totals`, not as hierarchy children, so totals remain
+independent of account hierarchy depth.
+
+Report presentation APIs map these persisted lines into stable presentation
+rows with `rowId`, optional `parentRowId`, optional `hierarchyDepth` for rows
+that participate in account hierarchy, `section`, and `cells`. Presentation
+metadata is derived from `parent_report_line_id`; consumers must not infer
+hierarchy from labels, account numbers, QuickBooks `FullyQualifiedName`, or
+other provider-specific fields.
+
+Line drilldowns are bounded canonical refs. Parent account line drilldowns cover
+the parent account and visible descendant account ids for that subtree; child
+line drilldowns stay limited to the child subtree. Total and reconciliation
+drilldowns may merge bounded canonical refs or compact queries, but not raw
+provider payloads. The full report-line and drilldown contract is defined in
+[account-hierarchy-rules.md](account-hierarchy-rules.md).
 
 ### report_snapshot_totals
 

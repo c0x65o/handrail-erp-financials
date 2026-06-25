@@ -20,6 +20,11 @@ same canonical model.
 - [architecture.md](architecture.md): System boundaries and package ownership.
 - [canonical-data-model.md](canonical-data-model.md): Tables and domain facts
   this package should standardize.
+- [account-hierarchy-rules.md](account-hierarchy-rules.md): Provider-neutral
+  canonical account hierarchy rules for parent postings, descendant rollups,
+  inactive accounts, invalid parent references, cycles, and source-adapter
+  boundaries, plus nested report line shape, presentation row metadata,
+  drilldown scope, and QuickBooks non-inference constraints.
 - [rollups-and-snapshots.md](rollups-and-snapshots.md): Performance strategy for
   P&L, balance sheet, cash flow, expenses, and drilldown.
 - [quickbooks-boundary.md](quickbooks-boundary.md): How this package should

@@ -110,6 +110,14 @@ Recommended identity fields:
 - checkpoint id
 - source payload ref
 
+QuickBooks `parentAccountRef` may be resolved by source adapters into canonical
+`Account.parentAccountId`, but that is the boundary. Report builders, hierarchy
+rollup helpers, snapshot/read-model code, validators, and drilldown helpers must
+not infer hierarchy from QuickBooks names, `FullyQualifiedName`, account
+numbers, categories, `sourceAccountId`, OAuth state, or raw provider payloads.
+The provider-neutral hierarchy and nested report row contract is defined in
+[account-hierarchy-rules.md](account-hierarchy-rules.md).
+
 ## Public Normalized Contracts
 
 `@handrail/erp-financials` exports normalized QuickBooks resource contracts for

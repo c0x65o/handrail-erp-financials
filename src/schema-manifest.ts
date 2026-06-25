@@ -203,6 +203,10 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         {
           name: "accounts_classification_idx",
           columns: ["tenant_id", "classification"]
+        },
+        {
+          name: "accounts_parent_account_idx",
+          columns: ["tenant_id", "source_id", "parent_account_id"]
         }
       ]
     ),

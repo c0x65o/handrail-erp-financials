@@ -539,6 +539,52 @@ describe("source adapter contracts", () => {
     expect(facts.postings.map((posting) => posting.importBatchId)).toEqual(["batch_native_1", "batch_native_1"]);
     expect(facts.postings.map((posting) => posting.checkpointId)).toEqual(["checkpoint_native_1", "checkpoint_native_1"]);
   });
+
+  it("maps native and QuickBooks parent account source references to canonical parent account IDs", () => {
+    const nativeInput = nativeFixtureInput();
+    const nativeFacts = mapNativeLedgerToCanonicalFacts({
+      ...nativeInput,
+      accounts: [
+        ...nativeInput.accounts,
+        {
+          sourceAccountId: "services-consulting",
+          parentAccountSourceId: "services",
+          accountNumber: "4010",
+          name: "Consulting Services",
+          classification: "income",
+          type: "income",
+          subtype: "ServiceRevenue",
+          currencyCode: "USD"
+        }
+      ]
+    });
+    const nativeParent = accountByName(nativeFacts, "Services");
+    const nativeChild = accountByName(nativeFacts, "Consulting Services");
+
+    expect(nativeParent.parentAccountId).toBeUndefined();
+    expect(nativeChild.parentAccountId).toBe(nativeParent.accountId);
+
+    const quickBooksInput = quickBooksFixtureInput();
+    const quickBooksFacts = mapQuickBooksJournalEntriesToCanonicalFacts({
+      ...quickBooksInput,
+      accounts: quickBooksInput.accounts.map((account) =>
+        account.Id === "79"
+          ? {
+              ...account,
+              ParentRef: {
+                value: "35",
+                name: "Checking"
+              }
+            }
+          : account
+      )
+    });
+    const quickBooksParent = accountByName(quickBooksFacts, "Checking");
+    const quickBooksChild = accountByName(quickBooksFacts, "Services");
+
+    expect(quickBooksParent.parentAccountId).toBeUndefined();
+    expect(quickBooksChild.parentAccountId).toBe(quickBooksParent.accountId);
+  });
 });
 
 function quickBooksFixtureInput(): QuickBooksJournalEntryAdapterInput {
@@ -969,4 +1015,13 @@ function postingByAccountName(facts: CanonicalAccountingFactSet, accountName: st
     throw new Error(`Missing posting for account ${accountName}`);
   }
   return posting;
+}
+
+function accountByName(facts: CanonicalAccountingFactSet, accountName: string) {
+  const account = facts.accounts.find((entry) => entry.name === accountName);
+  expect(account).toBeDefined();
+  if (account === undefined) {
+    throw new Error(`Missing account ${accountName}`);
+  }
+  return account;
 }

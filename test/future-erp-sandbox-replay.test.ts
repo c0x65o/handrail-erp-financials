@@ -4,18 +4,47 @@ import { describe, expect, it } from "vitest";
 
 import {
   assertNoCredentialKeys,
+  buildNormalizedQuickBooksFullSyncResponse,
   createPostgresStorageAdapter,
+  ERP_FINANCIALS_NORMALIZED_QUICKBOOKS_SYNC_FIXTURES,
   runFutureErpQuickBooksSandboxReplay
 } from "../src/index.js";
 
-import type { PostgresQueryClient, PostgresQueryResult, PostgresStorageAdapter, ReportName } from "../src/index.js";
+import type {
+  FutureErpQuickBooksSandboxReplayClient,
+  NormalizedQuickBooksAccountResource,
+  NormalizedQuickBooksFullSyncResponseEnvelope,
+  NormalizedQuickBooksLedgerEntryResource,
+  NormalizedQuickBooksResourceSet,
+  PostgresQueryClient,
+  PostgresQueryResult,
+  PostgresStorageAdapter,
+  ReportName,
+  SafeSourcePayloadRef
+} from "../src/index.js";
 
 type ReplayStorageCall = {
   readonly method: ReplayWriteMethod;
   readonly entity: ReplayWriteEntity;
   readonly ids: readonly string[];
   readonly lineIds?: readonly string[];
+  readonly lines?: readonly ReplaySnapshotLine[];
   readonly totalIds?: readonly string[];
+};
+
+type ReplaySnapshotLine = {
+  readonly reportLineId: string;
+  readonly parentReportLineId?: string;
+  readonly accountId?: string;
+  readonly amount: string;
+  readonly sortOrder: number;
+  readonly drilldownRef: {
+    readonly accountIds?: readonly string[];
+    readonly postingIds?: readonly string[];
+    readonly query?: {
+      readonly accountIds?: readonly string[];
+    };
+  };
 };
 
 type ReplayWriteMethod =
@@ -86,7 +115,7 @@ const EXPECTED_REPLAY_WRITE_ENTITIES: readonly ReplayWriteEntity[] = [
 ];
 
 const REPORT_NAMES: readonly ReportName[] = ["profit_and_loss", "balance_sheet", "trial_balance", "cash_flow"];
-const EXPECTED_REPLAY_EVIDENCE_HASH = "58c60bb19d80807e36f5bd4de9f563af3e7c8eef0d894465bf18a6a13f27aec5";
+const EXPECTED_REPLAY_EVIDENCE_HASH = "ebc535c32d5647fdba554331bfea4f31cc3bed990959c3a0262a7a15f6b04413";
 
 describe("Future ERP QuickBooks sandbox replay orchestration", () => {
   it("returns a bounded deterministic replay result without credentials or raw provider payloads", async () => {
@@ -252,6 +281,91 @@ describe("Future ERP QuickBooks sandbox replay orchestration", () => {
         "freshness:tenant_qbo_sync_fixture:company_future_erp_qbo_fixture:source_qbo_sync_fixture:cash_flow:accrual:2026-01-01:2026-01-31:USD"
     });
   });
+
+  it("persists and exposes nested replay snapshot lines and drilldown refs from canonical parent account ids", async () => {
+    const client = new RecordingReplayPostgresClient();
+    const recorded = recordReplayStorage(createPostgresStorageAdapter(client));
+    const nested = nestedReplayFixtureIds();
+
+    const result = await runFutureErpQuickBooksSandboxReplay({
+      postgresStorage: recorded.storage,
+      quickBooksClient: nestedQuickBooksReplayClient(),
+      maxDrilldownRefsPerReport: 6
+    });
+
+    expect(result.normalizedResourceCounts).toMatchObject({
+      accounts: 4,
+      journalEntries: 1,
+      ledgerEntries: 1,
+      ledgerTransactions: 0,
+      ledgerPostings: 3
+    });
+    expect(result.canonicalRowCounts).toMatchObject({
+      accounts: 4,
+      transactions: 1,
+      transactionLines: 3,
+      postings: 3
+    });
+
+    const profitAndLossWrite = requiredSnapshotWrite(recorded.calls, result.snapshotIds.profit_and_loss);
+    const parent = requiredReplayLine(profitAndLossWrite.lines ?? [], nested.parentAccountId);
+    const child = requiredReplayLine(profitAndLossWrite.lines ?? [], nested.childAccountId);
+    const grandchild = requiredReplayLine(profitAndLossWrite.lines ?? [], nested.grandchildAccountId);
+
+    expect(parent.reportLineId).toBe(`profit_and_loss:line:account:${nested.parentAccountId}`);
+    expect(child.reportLineId).toBe(`profit_and_loss:line:account:${nested.childAccountId}`);
+    expect(grandchild.reportLineId).toBe(`profit_and_loss:line:account:${nested.grandchildAccountId}`);
+    expect(child.parentReportLineId).toBe(parent.reportLineId);
+    expect(grandchild.parentReportLineId).toBe(child.reportLineId);
+    expect(parent.sortOrder).toBeLessThan(child.sortOrder);
+    expect(child.sortOrder).toBeLessThan(grandchild.sortOrder);
+    expect(parent.amount).toBe("750.00");
+    expect(child.amount).toBe("250.00");
+    expect(grandchild.amount).toBe("250.00");
+
+    expectReplayLineDrilldown(parent, [nested.parentAccountId, nested.childAccountId, nested.grandchildAccountId], [
+      nested.parentPostingId,
+      nested.grandchildPostingId
+    ]);
+    expectReplayLineDrilldown(child, [nested.childAccountId, nested.grandchildAccountId], [nested.grandchildPostingId]);
+    expectReplayLineDrilldown(grandchild, [nested.grandchildAccountId], [nested.grandchildPostingId]);
+
+    const persistedProfitAndLossLines = reportSnapshotLineRows(client.calls).filter(
+      (row) => row.report_snapshot_id === result.snapshotIds.profit_and_loss
+    );
+    expect(persistedProfitAndLossLines).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          report_line_id: child.reportLineId,
+          parent_report_line_id: parent.reportLineId,
+          account_id: nested.childAccountId,
+          amount: "250.00"
+        }),
+        expect.objectContaining({
+          report_line_id: grandchild.reportLineId,
+          parent_report_line_id: child.reportLineId,
+          account_id: nested.grandchildAccountId,
+          amount: "250.00"
+        })
+      ])
+    );
+
+    const safeParent = requiredSafeLineRef(result.safeDrilldownRefs.profit_and_loss.lineRefs, parent.reportLineId);
+    const safeChild = requiredSafeLineRef(result.safeDrilldownRefs.profit_and_loss.lineRefs, child.reportLineId);
+    const safeGrandchild = requiredSafeLineRef(result.safeDrilldownRefs.profit_and_loss.lineRefs, grandchild.reportLineId);
+
+    expectSafeReplayDrilldown(safeParent, [nested.parentAccountId, nested.childAccountId, nested.grandchildAccountId], [
+      nested.parentPostingId,
+      nested.grandchildPostingId
+    ]);
+    expectSafeReplayDrilldown(safeChild, [nested.childAccountId, nested.grandchildAccountId], [nested.grandchildPostingId]);
+    expectSafeReplayDrilldown(safeGrandchild, [nested.grandchildAccountId], [nested.grandchildPostingId]);
+    expect(Object.values(result.safeDrilldownRefs).every((refs) => refs.lineRefs.length <= 6 && refs.totalRefs.length <= 6)).toBe(true);
+    expect(JSON.stringify(result)).not.toMatch(
+      /access[_-]?token|refresh[_-]?token|client[_-]?secret|clientSecret|credential|rawPayload|rawProviderPayload|parentAccountRef|ParentRef/i
+    );
+    assertNoCredentialKeys(result);
+  });
 });
 
 class RecordingReplayPostgresClient implements PostgresQueryClient {
@@ -335,6 +449,14 @@ function recordReplayStorage(base: PostgresStorageAdapter): {
         entity: "report_snapshots",
         ids: [args[0].snapshot.reportSnapshotId],
         lineIds: args[0].lines.map((line) => line.reportLineId),
+        lines: args[0].lines.map((line) => ({
+          reportLineId: line.reportLineId,
+          ...(line.parentReportLineId === undefined ? {} : { parentReportLineId: line.parentReportLineId }),
+          ...(line.accountId === undefined ? {} : { accountId: line.accountId }),
+          amount: line.amount,
+          sortOrder: line.sortOrder,
+          drilldownRef: line.drilldownRef
+        })),
         totalIds: args[0].totals.map((total) => total.reportTotalId)
       });
       return base.writeReportSnapshot(...args);
@@ -360,6 +482,7 @@ function callIdentity(call: ReplayStorageCall): ReplayStorageCall {
     entity: call.entity,
     ids: call.ids,
     ...(call.lineIds === undefined ? {} : { lineIds: call.lineIds }),
+    ...(call.lines === undefined ? {} : { lines: call.lines }),
     ...(call.totalIds === undefined ? {} : { totalIds: call.totalIds })
   };
 }
@@ -418,4 +541,320 @@ function replayEvidenceHash(result: Awaited<ReturnType<typeof runFutureErpQuickB
   };
 
   return createHash("sha256").update(JSON.stringify(evidence, null, 2)).digest("hex");
+}
+
+function nestedQuickBooksReplayClient(): FutureErpQuickBooksSandboxReplayClient {
+  const fixtures = ERP_FINANCIALS_NORMALIZED_QUICKBOOKS_SYNC_FIXTURES;
+  const fullSyncResponse = nestedQuickBooksFullSyncResponse();
+
+  return {
+    fullSync: () => Promise.resolve(fullSyncResponse),
+    profitAndLossReport: () => Promise.resolve(fixtures.providerReports.profitAndLoss.response),
+    balanceSheetReport: () => Promise.resolve(fixtures.providerReports.balanceSheet.response),
+    trialBalanceReport: () => Promise.resolve(fixtures.providerReports.trialBalance.response),
+    cashFlowParityReport: () => Promise.resolve(fixtures.providerReports.cashFlow.response)
+  };
+}
+
+function nestedQuickBooksFullSyncResponse(): NormalizedQuickBooksFullSyncResponseEnvelope {
+  const fixture = ERP_FINANCIALS_NORMALIZED_QUICKBOOKS_SYNC_FIXTURES.fullSync;
+  const resources = fixture.resources;
+  const checking = requiredAccountResource(resources, "35");
+  const servicesParent = requiredAccountResource(resources, "79");
+  const journalEntry = requiredJournalEntryResource(resources, "100");
+  const cashLine = requiredJournalLine(journalEntry, "1");
+  const parentRevenueLine = requiredJournalLine(journalEntry, "2");
+  const child = derivedAccountResource(servicesParent, {
+    sourceAccountId: "80",
+    name: "Services Rollup",
+    accountNumber: "4010",
+    parentSourceAccountId: "79",
+    parentName: "Services"
+  });
+  const grandchild = derivedAccountResource(servicesParent, {
+    sourceAccountId: "81",
+    name: "Implementation Services",
+    accountNumber: "4011",
+    parentSourceAccountId: "80",
+    parentName: "Services Rollup"
+  });
+
+  const nestedResources: NormalizedQuickBooksResourceSet = {
+    ...resources,
+    accounts: [checking, servicesParent, child, grandchild],
+    journalEntries: [
+      {
+        ...journalEntry,
+        resource: {
+          ...journalEntry.resource,
+          memo: "Recognize services revenue across nested accounts",
+          lines: [
+            withSinglePostingAmount(cashLine, "750.00", "debit"),
+            parentRevenueLine,
+            derivedRevenueLine(parentRevenueLine, {
+              sourceLineId: "3",
+              lineNumber: 3,
+              description: "Implementation services revenue",
+              sourcePostingId: "100:3",
+              amount: "-250.00",
+              sourceAccountId: "81",
+              accountName: "Implementation Services"
+            })
+          ]
+        }
+      }
+    ]
+  };
+
+  return buildNormalizedQuickBooksFullSyncResponse(fixture.request, nestedResources);
+}
+
+function derivedAccountResource(
+  base: NormalizedQuickBooksAccountResource,
+  input: {
+    readonly sourceAccountId: string;
+    readonly name: string;
+    readonly accountNumber: string;
+    readonly parentSourceAccountId: string;
+    readonly parentName: string;
+  }
+): NormalizedQuickBooksAccountResource {
+  return {
+    ...base,
+    resourceId: input.sourceAccountId,
+    sourcePayloadRef: safeQboSourcePayloadRef("Account", input.sourceAccountId, "2026-02-01T09:59:59.000Z", {
+      name: input.name
+    }),
+    resource: {
+      ...base.resource,
+      sourceAccountId: input.sourceAccountId,
+      name: input.name,
+      accountNumber: input.accountNumber,
+      parentAccountRef: {
+        sourceObjectId: input.parentSourceAccountId,
+        displayName: input.parentName
+      },
+      sourcePayloadRef: safeQboSourcePayloadRef("Account", input.sourceAccountId, "2026-02-01T09:59:59.000Z", {
+        name: input.name
+      })
+    }
+  };
+}
+
+function withSinglePostingAmount(
+  line: NormalizedQuickBooksLedgerEntryResource["resource"]["lines"][number],
+  amount: string,
+  postingKind: "debit" | "credit"
+): NormalizedQuickBooksLedgerEntryResource["resource"]["lines"][number] {
+  const posting = line.postings[0];
+  if (posting === undefined) {
+    throw new Error(`expected normalized QuickBooks line ${line.sourceLineId ?? String(line.lineNumber)} to have a posting`);
+  }
+  const { debitAmount, creditAmount, netAmount, ...postingWithoutAmounts } = posting;
+
+  return {
+    ...line,
+    amount,
+    postings: [
+      {
+        ...postingWithoutAmounts,
+        ...(postingKind === "debit" ? { debitAmount: amount } : { creditAmount: positiveDecimal(amount) })
+      }
+    ]
+  };
+}
+
+function derivedRevenueLine(
+  base: NormalizedQuickBooksLedgerEntryResource["resource"]["lines"][number],
+  input: {
+    readonly sourceLineId: string;
+    readonly lineNumber: number;
+    readonly description: string;
+    readonly sourcePostingId: string;
+    readonly amount: string;
+    readonly sourceAccountId: string;
+    readonly accountName: string;
+  }
+): NormalizedQuickBooksLedgerEntryResource["resource"]["lines"][number] {
+  const posting = base.postings[0];
+  if (posting === undefined) {
+    throw new Error(`expected normalized QuickBooks line ${base.sourceLineId ?? String(base.lineNumber)} to have a posting`);
+  }
+  const { debitAmount, creditAmount, netAmount, ...postingWithoutAmounts } = posting;
+  const sourcePayloadRef = safeQboSourcePayloadRef("JournalEntryLine", input.sourcePostingId, "2026-01-15T16:00:00.000Z", {
+    lineNumber: input.lineNumber
+  });
+
+  return {
+    ...base,
+    sourceLineId: input.sourceLineId,
+    lineNumber: input.lineNumber,
+    description: input.description,
+    amount: input.amount,
+    accountRef: {
+      sourceObjectId: input.sourceAccountId,
+      displayName: input.accountName
+    },
+    sourcePayloadRef,
+    postings: [
+      {
+        ...postingWithoutAmounts,
+        sourcePostingId: input.sourcePostingId,
+        accountRef: {
+          sourceObjectId: input.sourceAccountId,
+          displayName: input.accountName
+        },
+        creditAmount: positiveDecimal(input.amount),
+        sourcePayloadRef
+      }
+    ]
+  };
+}
+
+function safeQboSourcePayloadRef(
+  sourceObjectType: string,
+  sourceObjectId: string,
+  sourceUpdatedAt: string,
+  preview: NonNullable<SafeSourcePayloadRef["preview"]>
+): SafeSourcePayloadRef {
+  return {
+    sourceObjectType,
+    sourceObjectId,
+    sourceUpdatedAt,
+    storageRef: `quickbooks-sdk://sandbox/realm/realm_qbo_sync_fixture/${sourceObjectType}/${sourceObjectId}`,
+    checksum: `sha256:${sourceObjectType}:${sourceObjectId}:${sourceUpdatedAt}`,
+    preview
+  };
+}
+
+function positiveDecimal(amount: string): string {
+  return amount.startsWith("-") ? amount.slice(1) : amount;
+}
+
+function requiredAccountResource(resources: NormalizedQuickBooksResourceSet, sourceAccountId: string): NormalizedQuickBooksAccountResource {
+  const account = resources.accounts.find((candidate) => candidate.resource.sourceAccountId === sourceAccountId);
+  if (account === undefined) {
+    throw new Error(`expected normalized QuickBooks account ${sourceAccountId}`);
+  }
+  return account;
+}
+
+function requiredJournalEntryResource(
+  resources: NormalizedQuickBooksResourceSet,
+  sourceTransactionId: string
+): NormalizedQuickBooksLedgerEntryResource {
+  const journalEntry = (resources.journalEntries ?? []).find(
+    (candidate) => candidate.resource.sourceTransactionId === sourceTransactionId
+  );
+  if (journalEntry === undefined) {
+    throw new Error(`expected normalized QuickBooks journal entry ${sourceTransactionId}`);
+  }
+  return journalEntry;
+}
+
+function requiredJournalLine(
+  journalEntry: NormalizedQuickBooksLedgerEntryResource,
+  sourceLineId: string
+): NormalizedQuickBooksLedgerEntryResource["resource"]["lines"][number] {
+  const line = journalEntry.resource.lines.find((candidate) => candidate.sourceLineId === sourceLineId);
+  if (line === undefined) {
+    throw new Error(`expected normalized QuickBooks journal line ${sourceLineId}`);
+  }
+  return line;
+}
+
+function nestedReplayFixtureIds(): {
+  readonly parentAccountId: string;
+  readonly childAccountId: string;
+  readonly grandchildAccountId: string;
+  readonly parentPostingId: string;
+  readonly grandchildPostingId: string;
+} {
+  return {
+    parentAccountId: canonicalQuickBooksFixtureId("account", "79"),
+    childAccountId: canonicalQuickBooksFixtureId("account", "80"),
+    grandchildAccountId: canonicalQuickBooksFixtureId("account", "81"),
+    parentPostingId: canonicalQuickBooksFixtureId("posting", "100:2"),
+    grandchildPostingId: canonicalQuickBooksFixtureId("posting", "100:3")
+  };
+}
+
+function canonicalQuickBooksFixtureId(kind: string, sourceObjectId: string): string {
+  const digest = createHash("sha256")
+    .update(["tenant_qbo_sync_fixture", "source_qbo_sync_fixture", "quickbooks", "sandbox", kind, sourceObjectId].join(":"))
+    .digest("hex")
+    .slice(0, 16);
+  return `${kind}_${digest}`;
+}
+
+function requiredSnapshotWrite(calls: readonly ReplayStorageCall[], snapshotId: string): ReplayStorageCall {
+  const call = calls.find((candidate) => candidate.method === "writeReportSnapshot" && candidate.ids[0] === snapshotId);
+  if (call === undefined) {
+    throw new Error(`expected writeReportSnapshot call for ${snapshotId}`);
+  }
+  return call;
+}
+
+function requiredReplayLine(lines: readonly ReplaySnapshotLine[], accountId: string): ReplaySnapshotLine {
+  const line = lines.find((candidate) => candidate.accountId === accountId);
+  if (line === undefined) {
+    throw new Error(`expected replay snapshot line for account ${accountId}`);
+  }
+  return line;
+}
+
+function expectReplayLineDrilldown(
+  line: ReplaySnapshotLine,
+  expectedAccountIds: readonly string[],
+  expectedPostingIds: readonly string[]
+): void {
+  expect(new Set(line.drilldownRef.accountIds)).toEqual(new Set(expectedAccountIds));
+  expect(new Set(line.drilldownRef.query?.accountIds)).toEqual(new Set(expectedAccountIds));
+  expect(new Set(line.drilldownRef.postingIds)).toEqual(new Set(expectedPostingIds));
+}
+
+function reportSnapshotLineRows(calls: readonly QueryCall[]): readonly Record<string, unknown>[] {
+  return calls.filter((call) => call.sql.includes('"report_snapshot_lines"')).flatMap(insertedRowsFromCall);
+}
+
+function insertedRowsFromCall(call: QueryCall): readonly Record<string, unknown>[] {
+  if (!call.sql.trimStart().startsWith("insert into ")) {
+    return [];
+  }
+  const match = /insert into "erp_financials"\."[^"]+" \(([^)]+)\)/u.exec(call.sql);
+  if (match?.[1] === undefined) {
+    return [];
+  }
+  const columns = match[1].split(",").map((column) => column.trim().replace(/^"|"$/gu, ""));
+  const rows: Record<string, unknown>[] = [];
+  for (let offset = 0; offset < call.params.length; offset += columns.length) {
+    rows.push(Object.fromEntries(columns.map((column, index) => [column, call.params[offset + index]])));
+  }
+  return rows;
+}
+
+function requiredSafeLineRef(
+  refs: readonly Awaited<ReturnType<typeof runFutureErpQuickBooksSandboxReplay>>["safeDrilldownRefs"][ReportName]["lineRefs"][number][],
+  reportLineId: string
+): Awaited<ReturnType<typeof runFutureErpQuickBooksSandboxReplay>>["safeDrilldownRefs"][ReportName]["lineRefs"][number] {
+  const accountId = reportLineId.split(":line:account:")[1];
+  if (accountId === undefined) {
+    throw new Error(`expected account line id, received ${reportLineId}`);
+  }
+  const ref = refs.find((candidate) => candidate.refId === `profit_and_loss:${accountId}`);
+  if (ref === undefined) {
+    throw new Error(`expected safe drilldown ref for ${reportLineId}`);
+  }
+  return ref;
+}
+
+function expectSafeReplayDrilldown(
+  ref: Awaited<ReturnType<typeof runFutureErpQuickBooksSandboxReplay>>["safeDrilldownRefs"][ReportName]["lineRefs"][number],
+  expectedAccountIds: readonly string[],
+  expectedPostingIds: readonly string[]
+): void {
+  expect(new Set(ref.accountIds)).toEqual(new Set(expectedAccountIds));
+  expect(new Set(ref.query?.accountIds)).toEqual(new Set(expectedAccountIds));
+  expect(new Set(ref.postingIds)).toEqual(new Set(expectedPostingIds));
+  expect(ref.postingCount).toBe(expectedPostingIds.length);
 }

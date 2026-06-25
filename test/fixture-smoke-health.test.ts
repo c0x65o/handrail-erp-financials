@@ -64,7 +64,7 @@ describe("ERP Financials fixture smoke health", () => {
         sources: 1,
         importBatches: 1,
         checkpoints: 1,
-        accounts: 11,
+        accounts: 13,
         parties: 5,
         items: 3,
         dimensions: 3,

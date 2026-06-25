@@ -26,6 +26,7 @@ import {
 } from "./report-builders.js";
 import { assertNoCredentialKeys, createCompactDrilldownRef } from "./canonical-model.js";
 import type {
+  MarkReportSnapshotsStaleForAccountHierarchyChangesInput,
   MarkReportSnapshotsStaleForPostingChangesInput,
   PostgresStorageAdapter,
   ReportFreshnessRow,
@@ -250,6 +251,25 @@ export type LateArrivalReprocessStorageWriteResult =
 
 export type LateArrivalReprocessExecutionResult = LateArrivalReprocessExecutionContract & {
   readonly writeResults: readonly LateArrivalReprocessStorageWriteResult[];
+};
+
+export const ACCOUNT_HIERARCHY_CHANGED_STALE_REASON = "hierarchy_account_parent_changed";
+
+export type AccountHierarchyChangeStaleInput = {
+  readonly tenantId: TenantId;
+  readonly companyId: string;
+  readonly sourceId: SourceId;
+  readonly reportNames?: readonly ReportName[];
+  readonly accountingBasis?: AccountingBasis;
+  readonly currencyCode?: IsoCurrencyCode;
+  readonly staleReason?: string;
+};
+
+export type AccountHierarchyChangeStaleStorage = Pick<PostgresStorageAdapter, "markReportSnapshotsStaleForAccountHierarchyChanges">;
+
+export type AccountHierarchyChangeStaleResult = {
+  readonly staleSnapshots: MarkReportSnapshotsStaleForAccountHierarchyChangesInput;
+  readonly snapshotsMarkedStale: number;
 };
 
 export type SnapshotRefreshContractInput = {
@@ -584,6 +604,36 @@ export async function executeLateArrivalReprocess(input: LateArrivalReprocessExe
   return {
     ...contract,
     writeResults
+  };
+}
+
+export function planAccountHierarchyChangeStaleSnapshots(
+  input: AccountHierarchyChangeStaleInput
+): MarkReportSnapshotsStaleForAccountHierarchyChangesInput {
+  const staleSnapshots: MarkReportSnapshotsStaleForAccountHierarchyChangesInput = {
+    tenantId: input.tenantId,
+    companyId: input.companyId,
+    sourceId: input.sourceId,
+    staleReason: input.staleReason ?? ACCOUNT_HIERARCHY_CHANGED_STALE_REASON,
+    ...(input.reportNames === undefined ? {} : { reportNames: input.reportNames }),
+    ...(input.accountingBasis === undefined ? {} : { accountingBasis: input.accountingBasis }),
+    ...(input.currencyCode === undefined ? {} : { currencyCode: input.currencyCode })
+  };
+
+  assertNoCredentialKeys(staleSnapshots);
+
+  return staleSnapshots;
+}
+
+export async function markAccountHierarchyChangedSnapshotsStale(
+  input: AccountHierarchyChangeStaleInput & { readonly storage: AccountHierarchyChangeStaleStorage }
+): Promise<AccountHierarchyChangeStaleResult> {
+  const staleSnapshots = planAccountHierarchyChangeStaleSnapshots(input);
+  const snapshotsMarkedStale = await input.storage.markReportSnapshotsStaleForAccountHierarchyChanges(staleSnapshots);
+
+  return {
+    staleSnapshots,
+    snapshotsMarkedStale
   };
 }
 

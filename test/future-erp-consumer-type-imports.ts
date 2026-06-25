@@ -6,6 +6,7 @@ import {
   buildNormalizedQuickBooksIncrementalSyncResponse,
   buildProfitAndLossReport,
   buildTrialBalanceReport,
+  assertValidAccountHierarchy,
   createFutureErpCanonicalFactPersistenceWorker,
   createFutureErpQuickBooksFullSyncWorker,
   createFutureErpQuickBooksIncrementalSyncWorker,
@@ -21,9 +22,12 @@ import {
   mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts,
   persistFutureErpCanonicalFacts,
   reconcileReportFreshness,
+  validateAccountHierarchy,
   validateFutureErpCanonicalSchemaPreflight
 } from "@handrail/erp-financials";
 import type {
+  Account,
+  AccountHierarchyDiagnostic,
   CanonicalAccountingFactSet,
   FutureErpCanonicalFactPersistenceWorker,
   FutureErpCanonicalReportGenerationRequest,
@@ -81,6 +85,8 @@ export const futureErpResolvedFinancialImports = {
   buildBalanceSheetReport,
   buildTrialBalanceReport,
   buildCashFlowReport,
+  validateAccountHierarchy,
+  assertValidAccountHierarchy,
   createFutureErpQuickBooksFullSyncWorker,
   createFutureErpQuickBooksIncrementalSyncWorker,
   buildFutureErpReportFromCanonicalReadModel,
@@ -96,6 +102,19 @@ export const futureErpResolvedQuickBooksClientImports = {
   buildNormalizedQuickBooksFullSyncResponse,
   buildNormalizedQuickBooksIncrementalSyncResponse,
   fetchFutureErpQuickBooksProviderReportParitySnapshot
+};
+
+export const futureErpConsumerAccountWithParent: Account = {
+  accountId: "acct_consumer_child",
+  tenantId: "tenant_consumer",
+  sourceId: "source_consumer",
+  sourceAccountId: "consumer_child",
+  accountNumber: "4100",
+  name: "Consumer Child Income",
+  type: "Income",
+  classification: "income",
+  parentAccountId: "acct_consumer_parent",
+  active: true
 };
 
 export type FutureErpResolvedQuickBooksSyncEnvelopeTypes = {
@@ -132,6 +151,8 @@ export type FutureErpResolvedFinancialWorkflowTypes = {
   readonly postgresClient: PostgresQueryClient;
   readonly sdkAdapterInput: HandrailQuickBooksSdkResourcesAdapterInput;
   readonly canonicalFacts: CanonicalAccountingFactSet;
+  readonly accountWithParent: Account;
+  readonly hierarchyDiagnostics: readonly AccountHierarchyDiagnostic[];
   readonly persistenceWorker: FutureErpCanonicalFactPersistenceWorker;
   readonly reportBuilderInput: ReportBuilderInput;
   readonly snapshotRefreshInput: SnapshotRefreshContractInput;

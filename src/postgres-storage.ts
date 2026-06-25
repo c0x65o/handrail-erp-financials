@@ -19,8 +19,10 @@ import type {
   ReportFreshnessStatus,
   ReportSnapshot,
   ReportSnapshotSource,
+  DrilldownRef,
   ReportSnapshotLine,
   ReportSnapshotTotal,
+  SafeSourcePayloadRef,
   SourceId,
   SyncCheckpoint,
   TenantId,
@@ -33,7 +35,9 @@ import {
   assertSafeSourcePayloadRef,
   createCompactDrilldownRef
 } from "./canonical-model.js";
+import { buildAccountHierarchyRollupLines } from "./account-hierarchy-rollup-lines.js";
 import type { BuiltReport, ReportBuilderInput, ReportName } from "./report-builders.js";
+import type { AccountHierarchyRollupLineAmount } from "./account-hierarchy-rollup-lines.js";
 import { type StatementFixtureSet } from "./fixtures.js";
 import {
   DISALLOWED_CREDENTIAL_COLUMN_PATTERNS,
@@ -250,6 +254,7 @@ export type PostgresStorageAdapter = StandardReportPresentationReadModelStorage 
   writeFreshnessRows(rows: readonly ReportFreshnessRow[]): Promise<number>;
   markReportSnapshotsStale(input: MarkReportSnapshotsStaleInput): Promise<number>;
   markReportSnapshotsStaleForPostingChanges(input: MarkReportSnapshotsStaleForPostingChangesInput): Promise<number>;
+  markReportSnapshotsStaleForAccountHierarchyChanges(input: MarkReportSnapshotsStaleForAccountHierarchyChangesInput): Promise<number>;
   loadReportBuilderInput(input: LoadReportBuilderInput): Promise<ReportBuilderInput>;
   loadLatestReportSnapshot(input: LoadReportSnapshotInput): Promise<StoredReportSnapshot | undefined>;
   loadRollupBuckets(input: LoadRollupBucketsInput): Promise<readonly RollupBucket[]>;
@@ -265,6 +270,16 @@ export type MarkReportSnapshotsStaleForPostingChangesInput = {
   readonly tenantId: TenantId;
   readonly affectedStart: IsoDate;
   readonly affectedEnd: IsoDate;
+  readonly staleReason: string;
+  readonly reportNames?: readonly string[];
+  readonly accountingBasis?: AccountingBasis;
+  readonly currencyCode?: IsoCurrencyCode;
+};
+
+export type MarkReportSnapshotsStaleForAccountHierarchyChangesInput = {
+  readonly tenantId: TenantId;
+  readonly companyId: string;
+  readonly sourceId: SourceId;
   readonly staleReason: string;
   readonly reportNames?: readonly string[];
   readonly accountingBasis?: AccountingBasis;
@@ -447,6 +462,9 @@ export function createPostgresStorageAdapter(
     },
     async markReportSnapshotsStaleForPostingChanges(input) {
       return markReportSnapshotsStaleForPostingChanges(client, manifest, input);
+    },
+    async markReportSnapshotsStaleForAccountHierarchyChanges(input) {
+      return markReportSnapshotsStaleForAccountHierarchyChanges(client, manifest, input);
     },
     async loadReportBuilderInput(input) {
       return loadReportBuilderInput(client, manifest, input);
@@ -698,6 +716,52 @@ where ${filters.join(" and ")}`,
   return result.rowCount ?? 0;
 }
 
+async function markReportSnapshotsStaleForAccountHierarchyChanges(
+  client: PostgresQueryClient,
+  manifest: PostgresSchemaManifest,
+  input: MarkReportSnapshotsStaleForAccountHierarchyChangesInput
+): Promise<number> {
+  const parameters: unknown[] = [input.tenantId, input.companyId, input.sourceId, input.staleReason];
+  const filters = [
+    `rs."tenant_id" = $1`,
+    `exists (
+  select 1
+  from ${qualifiedTable(manifest, "report_freshness")} rf
+  where rf."tenant_id" = rs."tenant_id"
+    and rf."company_id" = $2
+    and rf."source_id" = $3
+    and rf."report_name" = rs."report_name"
+    and rf."accounting_basis" = rs."accounting_basis"
+    and rf."period_start" = rs."period_start"
+    and rf."period_end" = rs."period_end"
+    and rf."currency_code" = rs."currency_code"
+)`,
+    `(rs."freshness"->>'sourceId' is null or rs."freshness"->>'sourceId' = $3)`
+  ];
+
+  if (input.reportNames !== undefined && input.reportNames.length > 0) {
+    parameters.push(input.reportNames);
+    filters.push(`rs."report_name" = any($${String(parameters.length)}::text[])`);
+  }
+  if (input.accountingBasis !== undefined) {
+    parameters.push(input.accountingBasis);
+    filters.push(`rs."accounting_basis" = $${String(parameters.length)}`);
+  }
+  if (input.currencyCode !== undefined) {
+    parameters.push(input.currencyCode);
+    filters.push(`rs."currency_code" = $${String(parameters.length)}`);
+  }
+
+  const result = await client.query(
+    `update ${qualifiedTable(manifest, "report_snapshots")} rs
+set "freshness" = jsonb_set(coalesce(rs."freshness", '{}'::jsonb), '{status}', '"stale"', true) || jsonb_build_object('staleReason', $4::text)
+where ${filters.join(" and ")}`,
+    parameters
+  );
+
+  return result.rowCount ?? 0;
+}
+
 async function loadReportBuilderInput(
   client: PostgresQueryClient,
   manifest: PostgresSchemaManifest,
@@ -939,13 +1003,17 @@ type RollupPresentationGroup = {
   readonly column: StandardReportPresentationColumn;
 };
 
-type RollupPresentationAccountRow = {
+export type RollupPresentationAccountRow = {
   readonly groupKey: string;
   readonly groupLabel: string;
   readonly accountId: string;
   readonly accountNumber?: string;
   readonly accountName: string;
   readonly accountClassification: string;
+  readonly parentAccountId?: string;
+  readonly parentAccountNumber?: string;
+  readonly parentAccountName?: string;
+  readonly parentAccountClassification?: string;
   readonly debitAmount: DecimalString;
   readonly creditAmount: DecimalString;
   readonly netAmount: DecimalString;
@@ -974,11 +1042,12 @@ async function loadDimensionStandardReportPresentationFromRollups(
   displayColumnsBy: RollupDimensionDisplayColumnsBy
 ): Promise<StandardReportPresentationReportSet> {
   const rows = await loadRollupPresentationAccountRows(client, manifest, request, accountingMethod, displayColumnsBy);
+  const accounts = await loadRollupPresentationAccounts(client, manifest, request, rows);
   const groups = rollupPresentationGroups(request, displayColumnsBy, rows);
   const rowsByGroupKey = groupRollupPresentationRows(rows);
   const amountColumns = groups.map((group): StandardReportPresentationReportColumn => ({
     column: group.column,
-    report: profitAndLossReportFromRollupRows(request, accountingMethod, group, rowsByGroupKey.get(group.groupKey) ?? [])
+    report: profitAndLossReportFromRollupRows(request, accountingMethod, group, accounts, rowsByGroupKey.get(group.groupKey) ?? [])
   }));
   const primarySnapshot = await loadLatestReportSnapshot(client, manifest, {
     tenantId: request.tenantId,
@@ -1037,9 +1106,13 @@ async function loadRollupPresentationAccountRows(
     `select ${groupKeySql} as "group_key",
        ${groupLabelSql} as "group_label",
        rb."account_id",
+       a."parent_account_id",
        a."account_number",
        a."name" as "account_name",
        a."classification" as "account_classification",
+       pa."account_number" as "parent_account_number",
+       pa."name" as "parent_account_name",
+       pa."classification" as "parent_account_classification",
        sum(rb."debit_amount")::text as "debit_amount",
        sum(rb."credit_amount")::text as "credit_amount",
        sum(rb."net_amount")::text as "net_amount",
@@ -1052,6 +1125,10 @@ join ${qualifiedTable(manifest, "accounts")} a
   on a."tenant_id" = rb."tenant_id"
   and a."source_id" = rb."source_id"
   and a."account_id" = rb."account_id"
+left join ${qualifiedTable(manifest, "accounts")} pa
+  on pa."tenant_id" = a."tenant_id"
+  and pa."source_id" = a."source_id"
+  and pa."account_id" = a."parent_account_id"
 left join ${qualifiedTable(manifest, "parties")} p
   on p."tenant_id" = rb."tenant_id"
   and p."source_id" = rb."source_id"
@@ -1068,16 +1145,52 @@ where rb."tenant_id" = $1
   and rb."bucket_start" >= $6::date
   and rb."bucket_end" <= $7::date
   and rb."currency_code" = $8
-  and a."active" = true
   and a."classification" = any($9::text[])
   and ${groupFilterSql}
-group by "group_key", "group_label", rb."account_id", a."account_number", a."name", a."classification"
+group by "group_key", "group_label", rb."account_id", a."parent_account_id", a."account_number", a."name", a."classification", pa."account_number", pa."name", pa."classification"
 having sum(rb."posting_count") > 0
 order by lower("group_label"), "group_key", min(array_position($9::text[], a."classification")), a."account_number" nulls last, a."name", rb."account_id"`,
     parameters
   );
 
   return result.rows.map(rollupPresentationAccountRowFromRow);
+}
+
+async function loadRollupPresentationAccounts(
+  client: PostgresQueryClient,
+  manifest: PostgresSchemaManifest,
+  request: StandardReportPresentationReadModelRequest,
+  rows: readonly RollupPresentationAccountRow[]
+): Promise<readonly Account[]> {
+  const accountIds = uniqueStrings(rows.map((row) => row.accountId));
+
+  if (accountIds.length === 0) {
+    return [];
+  }
+
+  const result = await client.query<Row>(
+    `with recursive "relevant_accounts" as (
+  select a."account_id", a."tenant_id", a."source_id", a."source_account_id", a."account_number", a."name", a."type", a."subtype", a."classification", a."parent_account_id", a."currency_code", a."active"
+  from ${qualifiedTable(manifest, "accounts")} a
+  where a."tenant_id" = $1
+    and a."source_id" = $2
+    and a."account_id" = any($3::text[])
+  union
+  select pa."account_id", pa."tenant_id", pa."source_id", pa."source_account_id", pa."account_number", pa."name", pa."type", pa."subtype", pa."classification", pa."parent_account_id", pa."currency_code", pa."active"
+  from ${qualifiedTable(manifest, "accounts")} pa
+  join "relevant_accounts" child
+    on pa."tenant_id" = child."tenant_id"
+    and pa."source_id" = child."source_id"
+    and pa."account_id" = child."parent_account_id"
+)
+select "account_id", "tenant_id", "source_id", "source_account_id", "account_number", "name", "type", "subtype", "classification", "parent_account_id", "currency_code", "active"
+from "relevant_accounts"
+where "classification" = any($4::text[])
+order by array_position($4::text[], "classification"), "account_number" nulls last, "name", "account_id"`,
+    [request.tenantId, request.sourceId, accountIds, [...PROFIT_AND_LOSS_SECTION_ORDER]]
+  );
+
+  return result.rows.map(accountFromRow);
 }
 
 function presentationRollupBucketGrain(request: StandardReportPresentationReadModelRequest): RollupBucketGrain {
@@ -1089,8 +1202,12 @@ function presentationRollupBucketGrain(request: StandardReportPresentationReadMo
   return startsCalendarMonth && endsCalendarMonth ? "month" : "day";
 }
 
-function rollupPresentationAccountRowFromRow(row: Row): RollupPresentationAccountRow {
+export function rollupPresentationAccountRowFromRow(row: Row): RollupPresentationAccountRow {
   const accountNumber = optionalString(row.account_number);
+  const parentAccountId = optionalString(row.parent_account_id);
+  const parentAccountNumber = optionalString(row.parent_account_number);
+  const parentAccountName = optionalString(row.parent_account_name);
+  const parentAccountClassification = optionalString(row.parent_account_classification);
   const sourcePostingMaxUpdatedAt = optionalIsoDateTime(row.source_posting_max_updated_at);
   const importBatchId = optionalString(row.import_batch_id);
 
@@ -1101,6 +1218,10 @@ function rollupPresentationAccountRowFromRow(row: Row): RollupPresentationAccoun
     ...(accountNumber === undefined ? {} : { accountNumber }),
     accountName: requiredString(row.account_name, "account_name"),
     accountClassification: requiredString(row.account_classification, "account_classification"),
+    ...(parentAccountId === undefined ? {} : { parentAccountId }),
+    ...(parentAccountNumber === undefined ? {} : { parentAccountNumber }),
+    ...(parentAccountName === undefined ? {} : { parentAccountName }),
+    ...(parentAccountClassification === undefined ? {} : { parentAccountClassification }),
     debitAmount: requiredString(row.debit_amount, "debit_amount"),
     creditAmount: requiredString(row.credit_amount, "credit_amount"),
     netAmount: requiredString(row.net_amount, "net_amount"),
@@ -1161,6 +1282,7 @@ function profitAndLossReportFromRollupRows(
   request: StandardReportPresentationReadModelRequest,
   accountingMethod: StandardReportAccountingMethod,
   group: RollupPresentationGroup,
+  accounts: readonly Account[],
   rows: readonly RollupPresentationAccountRow[]
 ): BuiltReport {
   const reportSnapshotId = [
@@ -1180,56 +1302,119 @@ function profitAndLossReportFromRollupRows(
       row,
       amountMinor: profitAndLossAmount(row)
     }))
-    .filter((entry) => entry.amountMinor !== 0n)
-    .sort(
-      (left, right) =>
-        PROFIT_AND_LOSS_SECTION_ORDER.indexOf(left.row.accountClassification as (typeof PROFIT_AND_LOSS_SECTION_ORDER)[number]) -
-          PROFIT_AND_LOSS_SECTION_ORDER.indexOf(right.row.accountClassification as (typeof PROFIT_AND_LOSS_SECTION_ORDER)[number]) ||
-        (left.row.accountNumber ?? "").localeCompare(right.row.accountNumber ?? "") ||
-        left.row.accountName.localeCompare(right.row.accountName) ||
-        left.row.accountId.localeCompare(right.row.accountId)
-    );
-  const lines: ReportSnapshotLine[] = lineRows.map((entry, index) => ({
-    tenantId: request.tenantId,
-    reportSnapshotId,
-    reportLineId: `profit_and_loss:line:${(index + 1).toString().padStart(3, "0")}:${entry.row.accountId}`,
-    section: entry.row.accountClassification,
-    label: accountPresentationLabel(entry.row),
+    .filter((entry) => entry.amountMinor !== 0n);
+  const directAmounts: AccountHierarchyRollupLineAmount[] = lineRows.map((entry) => ({
     accountId: entry.row.accountId,
     amount: formatMoney(entry.amountMinor),
-    sortOrder: (index + 1) * 10,
-    drilldownRef: createCompactDrilldownRef({
-      token: `${request.reportName}:${group.groupKey}:${entry.row.accountId}`,
-      postingIds: [],
-      accountIds: [entry.row.accountId],
-      query: {
-        kind: "ledger_postings",
-        tenantId: request.tenantId,
-        sourceId: request.sourceId,
-        accountingBasis: accountingMethod,
-        periodStart: request.periodStart,
-        periodEnd: request.periodEnd,
-        accountIds: [entry.row.accountId]
-      }
-    })
+    section: entry.row.accountClassification,
+    sourceRefs: [rollupPresentationSourceRef(request, group, entry.row)]
   }));
-  const totalIncome = sumSection(lines, "income");
-  const totalCostOfGoodsSold = sumSection(lines, "cost_of_goods_sold");
+  const lines = buildAccountHierarchyRollupLines({
+    tenantId: request.tenantId,
+    sourceId: request.sourceId,
+    reportSnapshotId,
+    reportName: request.reportName,
+    accounts,
+    accountAmounts: directAmounts,
+    sectionOrder: PROFIT_AND_LOSS_SECTION_ORDER,
+    drilldownQuery: {
+      sourceId: request.sourceId,
+      accountingBasis: accountingMethod,
+      periodStart: request.periodStart,
+      periodEnd: request.periodEnd
+    }
+  });
+  const totalIncome = sumDirectSection(lineRows, "income");
+  const totalCostOfGoodsSold = sumDirectSection(lineRows, "cost_of_goods_sold");
   const grossProfit = totalIncome - totalCostOfGoodsSold;
-  const totalExpenses = sumSection(lines, "expense");
+  const totalExpenses = sumDirectSection(lineRows, "expense");
   const netOperatingIncome = grossProfit - totalExpenses;
-  const totalOtherIncome = sumSection(lines, "other_income");
-  const totalOtherExpense = sumSection(lines, "other_expense");
+  const totalOtherIncome = sumDirectSection(lineRows, "other_income");
+  const totalOtherExpense = sumDirectSection(lineRows, "other_expense");
   const netIncome = netOperatingIncome + totalOtherIncome - totalOtherExpense;
+  const sectionDrilldowns = (section: string): readonly DrilldownRef[] =>
+    lines.filter((line) => line.section === section).map((line) => line.drilldownRef);
+  const totalIncomeRow = profitAndLossTotal(
+    request,
+    reportSnapshotId,
+    group.groupKey,
+    "total_income",
+    "Total Income",
+    totalIncome,
+    sectionDrilldowns("income")
+  );
+  const totalCostOfGoodsSoldRow = profitAndLossTotal(
+    request,
+    reportSnapshotId,
+    group.groupKey,
+    "total_cost_of_goods_sold",
+    "Total Cost of Goods Sold",
+    totalCostOfGoodsSold,
+    sectionDrilldowns("cost_of_goods_sold")
+  );
+  const grossProfitRow = profitAndLossTotal(
+    request,
+    reportSnapshotId,
+    group.groupKey,
+    "gross_profit",
+    "Gross Profit",
+    grossProfit,
+    [totalIncomeRow.drilldownRef, totalCostOfGoodsSoldRow.drilldownRef]
+  );
+  const totalExpensesRow = profitAndLossTotal(
+    request,
+    reportSnapshotId,
+    group.groupKey,
+    "total_expenses",
+    "Total Expenses",
+    totalExpenses,
+    sectionDrilldowns("expense")
+  );
+  const netOperatingIncomeRow = profitAndLossTotal(
+    request,
+    reportSnapshotId,
+    group.groupKey,
+    "net_operating_income",
+    "Net Operating Income",
+    netOperatingIncome,
+    [grossProfitRow.drilldownRef, totalExpensesRow.drilldownRef]
+  );
+  const totalOtherIncomeRow = profitAndLossTotal(
+    request,
+    reportSnapshotId,
+    group.groupKey,
+    "total_other_income",
+    "Total Other Income",
+    totalOtherIncome,
+    sectionDrilldowns("other_income")
+  );
+  const totalOtherExpenseRow = profitAndLossTotal(
+    request,
+    reportSnapshotId,
+    group.groupKey,
+    "total_other_expense",
+    "Total Other Expense",
+    totalOtherExpense,
+    sectionDrilldowns("other_expense")
+  );
+  const netIncomeRow = profitAndLossTotal(
+    request,
+    reportSnapshotId,
+    group.groupKey,
+    "net_income",
+    "Net Income",
+    netIncome,
+    [netOperatingIncomeRow.drilldownRef, totalOtherIncomeRow.drilldownRef, totalOtherExpenseRow.drilldownRef]
+  );
   const totals = [
-    profitAndLossTotal(request, reportSnapshotId, group.groupKey, "total_income", "Total Income", totalIncome),
-    profitAndLossTotal(request, reportSnapshotId, group.groupKey, "total_cost_of_goods_sold", "Total Cost of Goods Sold", totalCostOfGoodsSold),
-    profitAndLossTotal(request, reportSnapshotId, group.groupKey, "gross_profit", "Gross Profit", grossProfit),
-    profitAndLossTotal(request, reportSnapshotId, group.groupKey, "total_expenses", "Total Expenses", totalExpenses),
-    profitAndLossTotal(request, reportSnapshotId, group.groupKey, "net_operating_income", "Net Operating Income", netOperatingIncome),
-    profitAndLossTotal(request, reportSnapshotId, group.groupKey, "total_other_income", "Total Other Income", totalOtherIncome),
-    profitAndLossTotal(request, reportSnapshotId, group.groupKey, "total_other_expense", "Total Other Expense", totalOtherExpense),
-    profitAndLossTotal(request, reportSnapshotId, group.groupKey, "net_income", "Net Income", netIncome)
+    totalIncomeRow,
+    totalCostOfGoodsSoldRow,
+    grossProfitRow,
+    totalExpensesRow,
+    netOperatingIncomeRow,
+    totalOtherIncomeRow,
+    totalOtherExpenseRow,
+    netIncomeRow
   ];
   const generatedAt =
     rows
@@ -1264,6 +1449,34 @@ function profitAndLossReportFromRollupRows(
   };
 }
 
+function rollupPresentationSourceRef(
+  request: StandardReportPresentationReadModelRequest,
+  group: RollupPresentationGroup,
+  row: RollupPresentationAccountRow
+): SafeSourcePayloadRef {
+  return {
+    sourceObjectType: "RollupBucketAggregate",
+    sourceObjectId: [
+      request.reportName,
+      request.accountingMethod ?? "accrual",
+      request.periodStart,
+      request.periodEnd,
+      request.currencyCode,
+      group.groupKey,
+      row.accountId
+    ].join(":"),
+    ...(row.sourcePostingMaxUpdatedAt === undefined ? {} : { sourceUpdatedAt: row.sourcePostingMaxUpdatedAt }),
+    preview: {
+      groupKey: group.groupKey,
+      groupLabel: group.groupLabel,
+      accountId: row.accountId,
+      postingCount: row.postingCount,
+      generatedAt: row.generatedAt,
+      ...(row.importBatchId === undefined ? {} : { importBatchId: row.importBatchId })
+    }
+  };
+}
+
 function profitAndLossAmount(row: RollupPresentationAccountRow): bigint {
   const debitMinusCredit = parseMoney(row.debitAmount) - parseMoney(row.creditAmount);
 
@@ -1272,12 +1485,47 @@ function profitAndLossAmount(row: RollupPresentationAccountRow): bigint {
     : debitMinusCredit;
 }
 
-function accountPresentationLabel(row: RollupPresentationAccountRow): string {
-  return row.accountNumber === undefined ? row.accountName : `${row.accountNumber} ${row.accountName}`;
+function sumDirectSection(
+  lineRows: readonly { readonly row: RollupPresentationAccountRow; readonly amountMinor: bigint }[],
+  section: string
+): bigint {
+  return lineRows.filter((entry) => entry.row.accountClassification === section).reduce((sum, entry) => sum + entry.amountMinor, 0n);
 }
 
-function sumSection(lines: readonly ReportSnapshotLine[], section: string): bigint {
-  return lines.filter((line) => line.section === section).reduce((sum, line) => sum + parseMoney(line.amount), 0n);
+function uniqueStrings(values: readonly string[]): string[] {
+  return [...new Set(values)].sort();
+}
+
+function mergedDrilldownPostingIds(refs: readonly DrilldownRef[]): string[] {
+  return uniqueStrings(refs.flatMap((ref) => ref.postingIds ?? []));
+}
+
+function mergedDrilldownAccountIds(refs: readonly DrilldownRef[]): string[] {
+  return uniqueStrings(refs.flatMap((ref) => ref.accountIds ?? ref.query?.accountIds ?? []));
+}
+
+function mergedDrilldownSourceRefs(refs: readonly DrilldownRef[]): SafeSourcePayloadRef[] {
+  const byKey = new Map<string, SafeSourcePayloadRef>();
+
+  for (const sourceRef of refs.flatMap((ref) => ref.sourceRefs ?? [])) {
+    assertSafeSourcePayloadRef(sourceRef);
+    byKey.set(
+      [
+        sourceRef.sourceObjectType,
+        sourceRef.sourceObjectId,
+        sourceRef.storageRef ?? "",
+        sourceRef.checksum ?? "",
+        sourceRef.sourceUpdatedAt ?? ""
+      ].join(":"),
+      sourceRef
+    );
+  }
+
+  return [...byKey.values()].sort((left, right) =>
+    [left.sourceObjectType, left.sourceObjectId, left.storageRef ?? "", left.checksum ?? ""]
+      .join(":")
+      .localeCompare([right.sourceObjectType, right.sourceObjectId, right.storageRef ?? "", right.checksum ?? ""].join(":"))
+  );
 }
 
 function profitAndLossTotal(
@@ -1286,8 +1534,12 @@ function profitAndLossTotal(
   groupKey: string,
   totalKey: string,
   label: string,
-  amountMinor: bigint
+  amountMinor: bigint,
+  drilldownRefs: readonly DrilldownRef[]
 ): ReportSnapshotTotal {
+  const accountIds = mergedDrilldownAccountIds(drilldownRefs);
+  const sourceRefs = mergedDrilldownSourceRefs(drilldownRefs);
+
   return {
     tenantId: request.tenantId,
     reportSnapshotId,
@@ -1297,15 +1549,18 @@ function profitAndLossTotal(
     amount: formatMoney(amountMinor),
     drilldownRef: createCompactDrilldownRef({
       token: `${request.reportName}:${groupKey}:${totalKey}`,
-      postingIds: [],
+      postingIds: mergedDrilldownPostingIds(drilldownRefs),
+      ...(accountIds.length === 0 ? {} : { accountIds }),
       query: {
         kind: "ledger_postings",
         tenantId: request.tenantId,
         sourceId: request.sourceId,
         accountingBasis: request.accountingMethod ?? "accrual",
         periodStart: request.periodStart,
-        periodEnd: request.periodEnd
-      }
+        periodEnd: request.periodEnd,
+        ...(accountIds.length === 0 ? {} : { accountIds })
+      },
+      ...(sourceRefs.length === 0 ? {} : { sourceRefs })
     })
   };
 }
@@ -1479,11 +1734,15 @@ function synthesizePrimaryReportFromColumns(
         lineAggregates.set(key, {
           template: line,
           amountMinor: parseMoney(line.amount),
-          sortOrder: line.sortOrder
+          sortOrder: line.sortOrder,
+          postingIds: [...(line.drilldownRef.postingIds ?? [])],
+          sourceRefs: [...(line.drilldownRef.sourceRefs ?? [])]
         });
       } else {
         existing.amountMinor += parseMoney(line.amount);
         existing.sortOrder = Math.min(existing.sortOrder, line.sortOrder);
+        existing.postingIds.push(...(line.drilldownRef.postingIds ?? []));
+        existing.sourceRefs.push(...(line.drilldownRef.sourceRefs ?? []));
       }
     }
     for (const total of entry.report.totals) {
@@ -1491,10 +1750,16 @@ function synthesizePrimaryReportFromColumns(
       if (existing === undefined) {
         totalAggregates.set(total.totalKey, {
           template: total,
-          amountMinor: parseMoney(total.amount)
+          amountMinor: parseMoney(total.amount),
+          postingIds: [...(total.drilldownRef.postingIds ?? [])],
+          accountIds: [...(total.drilldownRef.accountIds ?? total.drilldownRef.query?.accountIds ?? [])],
+          sourceRefs: [...(total.drilldownRef.sourceRefs ?? [])]
         });
       } else {
         existing.amountMinor += parseMoney(total.amount);
+        existing.postingIds.push(...(total.drilldownRef.postingIds ?? []));
+        existing.accountIds.push(...(total.drilldownRef.accountIds ?? total.drilldownRef.query?.accountIds ?? []));
+        existing.sourceRefs.push(...(total.drilldownRef.sourceRefs ?? []));
       }
     }
   }
@@ -1549,8 +1814,8 @@ function synthesizePrimaryReportFromColumns(
         sortOrder: (index + 1) * 10,
         drilldownRef: createCompactDrilldownRef({
           token: `${request.reportName}:${key}`,
-          postingIds: [],
-          ...(aggregate.template.accountId === undefined ? {} : { accountIds: [aggregate.template.accountId] }),
+          postingIds: aggregate.postingIds,
+          ...(aggregate.template.accountId === undefined ? {} : { accountIds: accountIdsForLineAggregate(aggregate) }),
           query: {
             kind: "ledger_postings",
             tenantId: request.tenantId,
@@ -1558,29 +1823,36 @@ function synthesizePrimaryReportFromColumns(
             accountingBasis: accountingMethod,
             periodStart: request.periodStart,
             periodEnd: request.periodEnd,
-            ...(aggregate.template.accountId === undefined ? {} : { accountIds: [aggregate.template.accountId] })
-          }
+            ...(aggregate.template.accountId === undefined ? {} : { accountIds: accountIdsForLineAggregate(aggregate) })
+          },
+          sourceRefs: aggregate.sourceRefs
         })
       })),
-    totals: [...totalAggregates.entries()].map(([key, aggregate]) => ({
-      ...aggregate.template,
-      tenantId: request.tenantId,
-      reportSnapshotId,
-      reportTotalId: `presentation:${request.reportName}:total:${key}`,
-      amount: formatMoney(aggregate.amountMinor),
-      drilldownRef: createCompactDrilldownRef({
-        token: `${request.reportName}:${key}`,
-        postingIds: [],
-        query: {
-          kind: "ledger_postings",
-          tenantId: request.tenantId,
-          sourceId: request.sourceId,
-          accountingBasis: accountingMethod,
-          periodStart: request.periodStart,
-          periodEnd: request.periodEnd
-        }
-      })
-    })),
+    totals: [...totalAggregates.entries()].map(([key, aggregate]) => {
+      const accountIds = uniqueStrings(aggregate.accountIds);
+      return {
+        ...aggregate.template,
+        tenantId: request.tenantId,
+        reportSnapshotId,
+        reportTotalId: `presentation:${request.reportName}:total:${key}`,
+        amount: formatMoney(aggregate.amountMinor),
+        drilldownRef: createCompactDrilldownRef({
+          token: `${request.reportName}:${key}`,
+          postingIds: aggregate.postingIds,
+          ...(accountIds.length === 0 ? {} : { accountIds }),
+          query: {
+            kind: "ledger_postings",
+            tenantId: request.tenantId,
+            sourceId: request.sourceId,
+            accountingBasis: accountingMethod,
+            periodStart: request.periodStart,
+            periodEnd: request.periodEnd,
+            ...(accountIds.length === 0 ? {} : { accountIds })
+          },
+          sourceRefs: aggregate.sourceRefs
+        })
+      };
+    }),
     metadata: {
       reportName: request.reportName,
       generatedFrom: "rollup_buckets",
@@ -1596,11 +1868,20 @@ type ReportLineAggregate = {
   readonly template: ReportSnapshotLine;
   amountMinor: bigint;
   sortOrder: number;
+  readonly postingIds: string[];
+  readonly sourceRefs: SafeSourcePayloadRef[];
 };
+
+function accountIdsForLineAggregate(aggregate: ReportLineAggregate): readonly string[] {
+  return aggregate.template.drilldownRef.accountIds ?? (aggregate.template.accountId === undefined ? [] : [aggregate.template.accountId]);
+}
 
 type ReportTotalAggregate = {
   readonly template: ReportSnapshotTotal;
   amountMinor: bigint;
+  readonly postingIds: string[];
+  readonly accountIds: string[];
+  readonly sourceRefs: SafeSourcePayloadRef[];
 };
 
 function profitAndLossSectionIndex(section: string): number {

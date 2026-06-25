@@ -8,12 +8,15 @@ import {
 } from "../src/index.js";
 
 import type {
+  Account,
   BuiltReport,
   FutureErpSnapshotRefreshWorkerStorage,
+  LedgerPosting,
   LoadReportBuilderInput,
   LoadReportSnapshotInput,
   ReportBuilderInput,
   ReportFreshnessRow,
+  ReportSnapshotLine,
   ReportName,
   SnapshotRefreshResult,
   StoredReportSnapshot
@@ -170,6 +173,111 @@ describe("Future ERP snapshot refresh and freshness reconciliation worker bindin
     ]);
   });
 
+  it("preserves nested account snapshot lines when stale and missing snapshots are rebuilt", async () => {
+    const nestedInput = nestedAccountReportInput();
+    const staleProfitAndLoss = buildProfitAndLossReport({
+      ...nestedInput,
+      freshness: {
+        status: "stale",
+        sourceId: scope.sourceId,
+        staleReason: "late_arrival_overlap_reprocess"
+      }
+    });
+    const freshBalanceSheet = buildBalanceSheetReport({
+      ...nestedInput,
+      freshness: {
+        status: "fresh",
+        sourceId: scope.sourceId,
+        freshThrough: "2026-02-01T00:00:00.000Z"
+      }
+    });
+    const storage = new RecordingSnapshotStorage({
+      reportInput: nestedInput,
+      snapshots: {
+        profit_and_loss: {
+          snapshot: staleProfitAndLoss.snapshot,
+          lines: staleProfitAndLoss.lines,
+          totals: staleProfitAndLoss.totals
+        },
+        balance_sheet: freshStoredSnapshot(freshBalanceSheet)
+      }
+    });
+    const worker = createFutureErpSnapshotRefreshAndFreshnessWorker({ scope, storage });
+
+    const rebuiltProfitAndLoss = await worker.runStaleSnapshotRefresh(snapshotRequest("profit_and_loss"));
+    const rebuiltTrialBalance = await worker.runStaleSnapshotRefresh(snapshotRequest("trial_balance"));
+    const reusedBalanceSheet = await worker.runStaleSnapshotRefresh(snapshotRequest("balance_sheet"));
+
+    expect(rebuiltProfitAndLoss.action).toBe("rebuilt");
+    expect(rebuiltTrialBalance.action).toBe("rebuilt");
+    expect(reusedBalanceSheet.action).toBe("reused");
+    expect(storage.writtenReports.map((report) => report.snapshot.reportName)).toEqual(["profit_and_loss", "trial_balance"]);
+    expect(storage.writtenFreshnessRows.map((row) => [row.reportName, row.status])).toEqual([
+      ["profit_and_loss", "fresh"],
+      ["trial_balance", "fresh"]
+    ]);
+    expect(storage.writtenFreshnessRows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tenantId: scope.tenantId,
+          companyId: scope.companyId,
+          sourceId: scope.sourceId,
+          reportName: "profit_and_loss"
+        }),
+        expect.objectContaining({
+          tenantId: scope.tenantId,
+          companyId: scope.companyId,
+          sourceId: scope.sourceId,
+          reportName: "trial_balance"
+        })
+      ])
+    );
+
+    expectNestedRollupLines(rebuiltProfitAndLoss, storage.writtenReports[0], "profit_and_loss", {
+      parentAccountId: "acct_nested_income_parent",
+      childAccountId: "acct_nested_income_child",
+      grandchildAccountId: "acct_nested_income_grandchild",
+      parentAmount: "140.00",
+      childAmount: "40.00",
+      grandchildAmount: "40.00",
+      parentPostingIds: ["post_nested_income_parent", "post_nested_income_grandchild"],
+      childPostingIds: ["post_nested_income_grandchild"],
+      grandchildPostingIds: ["post_nested_income_grandchild"]
+    });
+    expectNestedRollupLines(rebuiltTrialBalance, storage.writtenReports[1], "trial_balance", {
+      parentAccountId: "acct_nested_asset_parent",
+      childAccountId: "acct_nested_asset_child",
+      grandchildAccountId: "acct_nested_asset_grandchild",
+      parentAmount: "690.00",
+      childAmount: "90.00",
+      grandchildAmount: "90.00",
+      parentPostingIds: ["post_nested_asset_parent", "post_nested_asset_grandchild"],
+      childPostingIds: ["post_nested_asset_grandchild"],
+      grandchildPostingIds: ["post_nested_asset_grandchild"]
+    });
+
+    const reusedParent = requiredLine(reusedBalanceSheet.snapshot.lines, "acct_nested_asset_parent");
+    const reusedChild = requiredLine(reusedBalanceSheet.snapshot.lines, "acct_nested_asset_child");
+    const reusedGrandchild = requiredLine(reusedBalanceSheet.snapshot.lines, "acct_nested_asset_grandchild");
+    expect(reusedChild.parentReportLineId).toBe(reusedParent.reportLineId);
+    expect(reusedGrandchild.parentReportLineId).toBe(reusedChild.reportLineId);
+    expect(reusedParent.amount).toBe("690.00");
+    expect(storage.calls.map((call) => call.method)).toEqual([
+      "loadLatestReportSnapshot",
+      "loadReportBuilderInput",
+      "writeReportSnapshot",
+      "writeFreshnessRows",
+      "loadLatestReportSnapshot",
+      "loadReportBuilderInput",
+      "writeReportSnapshot",
+      "writeFreshnessRows",
+      "loadLatestReportSnapshot"
+    ]);
+    expect(JSON.stringify([rebuiltProfitAndLoss, rebuiltTrialBalance, reusedBalanceSheet])).not.toMatch(
+      /access[_-]?token|refresh[_-]?token|client[_-]?secret|credential|rawPayload/i
+    );
+  });
+
   it("surfaces stale and partial freshness reconciliation states through package contracts", async () => {
     const storage = new RecordingSnapshotStorage();
     const worker = createFutureErpSnapshotRefreshAndFreshnessWorker({ scope, storage });
@@ -323,4 +431,207 @@ function reportTotals(report: BuiltReport | undefined): Readonly<Record<string, 
   }
 
   return Object.fromEntries(report.totals.map((total) => [total.totalKey, total.amount]));
+}
+
+type NestedRollupExpectation = {
+  readonly parentAccountId: string;
+  readonly childAccountId: string;
+  readonly grandchildAccountId: string;
+  readonly parentAmount: string;
+  readonly childAmount: string;
+  readonly grandchildAmount: string;
+  readonly parentPostingIds: readonly string[];
+  readonly childPostingIds: readonly string[];
+  readonly grandchildPostingIds: readonly string[];
+};
+
+function expectNestedRollupLines(
+  result: SnapshotRefreshResult,
+  writtenReport: BuiltReport | undefined,
+  reportName: ReportName,
+  expected: NestedRollupExpectation
+): void {
+  if (writtenReport === undefined) {
+    throw new Error(`expected ${reportName} to be written`);
+  }
+
+  expect(writtenReport.snapshot.reportName).toBe(reportName);
+  expect(result.snapshot.lines).toEqual(writtenReport.lines);
+  const parent = requiredLine(result.snapshot.lines, expected.parentAccountId);
+  const child = requiredLine(result.snapshot.lines, expected.childAccountId);
+  const grandchild = requiredLine(result.snapshot.lines, expected.grandchildAccountId);
+  const parentIndex = result.snapshot.lines.indexOf(parent);
+  const childIndex = result.snapshot.lines.indexOf(child);
+  const grandchildIndex = result.snapshot.lines.indexOf(grandchild);
+
+  expect(parentIndex).toBeLessThan(childIndex);
+  expect(childIndex).toBeLessThan(grandchildIndex);
+  expect(parent.reportLineId).toBe(`${reportName}:line:account:${expected.parentAccountId}`);
+  expect(child.reportLineId).toBe(`${reportName}:line:account:${expected.childAccountId}`);
+  expect(grandchild.reportLineId).toBe(`${reportName}:line:account:${expected.grandchildAccountId}`);
+  expect(child.parentReportLineId).toBe(parent.reportLineId);
+  expect(grandchild.parentReportLineId).toBe(child.reportLineId);
+  expect(parent.amount).toBe(expected.parentAmount);
+  expect(child.amount).toBe(expected.childAmount);
+  expect(grandchild.amount).toBe(expected.grandchildAmount);
+  expect(parent.sortOrder).toBeLessThan(child.sortOrder);
+  expect(child.sortOrder).toBeLessThan(grandchild.sortOrder);
+  expectLineDrilldown(parent, [expected.parentAccountId, expected.childAccountId, expected.grandchildAccountId], expected.parentPostingIds);
+  expectLineDrilldown(child, [expected.childAccountId, expected.grandchildAccountId], expected.childPostingIds);
+  expectLineDrilldown(grandchild, [expected.grandchildAccountId], expected.grandchildPostingIds);
+}
+
+function requiredLine(lines: readonly ReportSnapshotLine[], accountId: string): ReportSnapshotLine {
+  const line = lines.find((candidate) => candidate.accountId === accountId);
+  if (line === undefined) {
+    throw new Error(`expected line for account ${accountId}`);
+  }
+  return line;
+}
+
+function expectLineDrilldown(
+  line: ReportSnapshotLine,
+  expectedAccountIds: readonly string[],
+  expectedPostingIds: readonly string[]
+): void {
+  expect(new Set(line.drilldownRef.accountIds)).toEqual(new Set(expectedAccountIds));
+  expect(new Set(line.drilldownRef.query?.accountIds)).toEqual(new Set(expectedAccountIds));
+  expect(new Set(line.drilldownRef.postingIds)).toEqual(new Set(expectedPostingIds));
+  expect(line.drilldownRef.postingCount).toBe(expectedPostingIds.length);
+  expect(line.drilldownRef.sourceRefCount).toBe(expectedPostingIds.length);
+  expect(
+    (line.drilldownRef.sourceRefs ?? []).map((sourceRef) => [
+      sourceRef.sourceObjectType,
+      sourceRef.sourceObjectId,
+      sourceRef.checksum
+    ])
+  ).toEqual(
+    expect.arrayContaining(
+      expectedPostingIds.map((postingId) => ["LedgerPosting", postingId.replace("post_", ""), `sha256:${postingId}`])
+    )
+  );
+  expect(line.drilldownRef.query).toMatchObject({
+    kind: "ledger_postings",
+    tenantId: scope.tenantId,
+    sourceId: scope.sourceId,
+    accountingBasis: "accrual",
+    periodStart: "2026-01-01",
+    periodEnd: "2026-01-31"
+  });
+}
+
+function nestedAccountReportInput(): ReportBuilderInput {
+  return {
+    ...baseReportInput(),
+    accounts: [
+      nestedAccount("acct_nested_income_parent", "4000", "Revenue Group", "income"),
+      nestedAccount("acct_nested_income_child", "4010", "Services Revenue", "income", "acct_nested_income_parent"),
+      nestedAccount(
+        "acct_nested_income_grandchild",
+        "4011",
+        "Implementation Revenue",
+        "income",
+        "acct_nested_income_child"
+      ),
+      nestedAccount("acct_nested_asset_parent", "1000", "Cash Group", "asset"),
+      nestedAccount("acct_nested_asset_child", "1010", "Operating Cash", "asset", "acct_nested_asset_parent"),
+      nestedAccount("acct_nested_asset_grandchild", "1011", "Payroll Cash", "asset", "acct_nested_asset_child")
+    ],
+    postings: [
+      nestedPosting(
+        "post_nested_income_parent",
+        "txn_nested_income_parent",
+        "line_nested_income_parent",
+        "acct_nested_income_parent",
+        "0.00",
+        "100.00"
+      ),
+      nestedPosting(
+        "post_nested_income_grandchild",
+        "txn_nested_income_grandchild",
+        "line_nested_income_grandchild",
+        "acct_nested_income_grandchild",
+        "0.00",
+        "40.00"
+      ),
+      nestedPosting(
+        "post_nested_asset_parent",
+        "txn_nested_asset_parent",
+        "line_nested_asset_parent",
+        "acct_nested_asset_parent",
+        "600.00",
+        "0.00"
+      ),
+      nestedPosting(
+        "post_nested_asset_grandchild",
+        "txn_nested_asset_grandchild",
+        "line_nested_asset_grandchild",
+        "acct_nested_asset_grandchild",
+        "90.00",
+        "0.00"
+      )
+    ]
+  };
+}
+
+function nestedAccount(
+  accountId: string,
+  accountNumber: string,
+  name: string,
+  classification: Account["classification"],
+  parentAccountId?: string
+): Account {
+  return {
+    tenantId: scope.tenantId,
+    sourceId: scope.sourceId,
+    accountId,
+    sourceAccountId: accountId.replace("acct_nested_", ""),
+    accountNumber,
+    name,
+    type: classification,
+    subtype: classification,
+    classification,
+    ...(parentAccountId === undefined ? {} : { parentAccountId }),
+    currencyCode: "USD",
+    active: true
+  };
+}
+
+function nestedPosting(
+  postingId: string,
+  transactionId: string,
+  transactionLineId: string,
+  accountId: string,
+  debitAmount: string,
+  creditAmount: string
+): LedgerPosting {
+  return {
+    tenantId: scope.tenantId,
+    sourceId: scope.sourceId,
+    postingId,
+    sourcePostingId: postingId.replace("post_", ""),
+    transactionId,
+    transactionLineId,
+    accountId,
+    postingDate: "2026-01-15",
+    accountingBasis: "accrual",
+    debitAmount,
+    creditAmount,
+    netAmount: netAmount(debitAmount, creditAmount),
+    currencyCode: "USD",
+    dimensionHash: "nested_fixture_no_dimensions",
+    dimensionRefs: [],
+    sourcePayloadRef: {
+      sourceObjectType: "LedgerPosting",
+      sourceObjectId: postingId.replace("post_", ""),
+      sourceUpdatedAt: "2026-01-15T12:00:00.000Z",
+      checksum: `sha256:${postingId}`
+    },
+    importBatchId: fixture.importBatch.importBatchId,
+    checkpointId: fixture.checkpoint.checkpointId
+  };
+}
+
+function netAmount(debitAmount: string, creditAmount: string): string {
+  return (Number(debitAmount) - Number(creditAmount)).toFixed(2);
 }

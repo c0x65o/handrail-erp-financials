@@ -139,6 +139,8 @@ export type StandardReportPresentationRow = {
   readonly rowId: string;
   readonly kind: StandardReportPresentationRowKind;
   readonly label: string;
+  readonly parentRowId?: string;
+  readonly hierarchyDepth?: number;
   readonly section?: string;
   readonly totalKey?: string;
   readonly cells: readonly StandardReportPresentationCell[];
@@ -190,13 +192,85 @@ type RowSeed = {
   readonly rowId: string;
   readonly kind: StandardReportPresentationRowKind;
   readonly label: string;
+  readonly parentRowId?: string;
+  readonly hierarchyDepth?: number;
   readonly section?: string;
   readonly totalKey?: string;
+};
+
+type OrderedReportLine = {
+  readonly line: BuiltReport["lines"][number];
+  readonly rootSection: string;
+};
+
+type LineRowSeedEntry = {
+  readonly seed: RowSeed;
+  readonly rootSection: string;
+  readonly sortOrder: number;
+  readonly accountId?: string;
+  readonly sourceRank: number;
+};
+
+type ReportRowSeedEntries = {
+  readonly lineSeeds: readonly LineRowSeedEntry[];
+  readonly totalSeeds: readonly RowSeed[];
+};
+
+type StatementRowOrderEntry = {
+  readonly section?: string;
+  readonly totalKeys?: readonly string[];
 };
 
 const ZERO = "0.00";
 const ONE_HUNDRED = 10000n;
 const MONTHS_PER_YEAR = 12;
+
+const LINE_SECTION_ORDER_BY_REPORT_NAME: Readonly<Record<ReportName, readonly string[]>> = {
+  profit_and_loss: ["income", "cost_of_goods_sold", "expense", "other_income", "other_expense"],
+  balance_sheet: ["asset", "liability", "equity"],
+  trial_balance: ["debit", "credit"],
+  cash_flow: ["operating", "investing", "financing", "unclassified"]
+};
+
+const STATEMENT_ROW_ORDER_BY_REPORT_NAME: Readonly<Record<ReportName, readonly StatementRowOrderEntry[]>> = {
+  profit_and_loss: [
+    { section: "income" },
+    { totalKeys: ["total_income"] },
+    { section: "cost_of_goods_sold" },
+    { totalKeys: ["total_cost_of_goods_sold", "gross_profit"] },
+    { section: "expense" },
+    { totalKeys: ["total_expenses", "net_operating_income"] },
+    { section: "other_income" },
+    { totalKeys: ["total_other_income"] },
+    { section: "other_expense" },
+    { totalKeys: ["total_other_expense", "net_income"] }
+  ],
+  balance_sheet: [
+    { section: "asset" },
+    { totalKeys: ["total_assets"] },
+    { section: "liability" },
+    { totalKeys: ["total_liabilities"] },
+    { section: "equity" },
+    { totalKeys: ["total_equity", "total_liabilities_and_equity"] }
+  ],
+  trial_balance: [
+    { section: "debit" },
+    { totalKeys: ["total_debits"] },
+    { section: "credit" },
+    { totalKeys: ["total_credits"] }
+  ],
+  cash_flow: [
+    { totalKeys: ["cash_beginning"] },
+    { section: "operating" },
+    { totalKeys: ["net_operating_cash"] },
+    { section: "investing" },
+    { totalKeys: ["net_investing_cash"] },
+    { section: "financing" },
+    { totalKeys: ["net_financing_cash"] },
+    { section: "unclassified" },
+    { totalKeys: ["unclassified_cash_movement", "net_cash_flow", "cash_ending"] }
+  ]
+};
 
 export function assertStandardReportAccountingMethod(value: AccountingBasis): asserts value is StandardReportAccountingMethod {
   if (value !== "cash" && value !== "accrual") {
@@ -530,7 +604,7 @@ function presentationRows(
   amountColumns: readonly StandardReportPresentationColumn[],
   calculationColumns: readonly StandardReportPresentationColumn[]
 ): readonly StandardReportPresentationRow[] {
-  const rowSeeds = rowSeedsFromReport(primaryReport);
+  const rowSeeds = rowSeedsFromReports(primaryReport, amountReports);
   const lineAmounts = new Map([...amountReports.entries()].map(([columnId, report]) => [columnId, reportLineAmounts(report)]));
   const totalAmounts = new Map([...amountReports.entries()].map(([columnId, report]) => [columnId, reportTotalAmounts(report)]));
 
@@ -551,21 +625,307 @@ function presentationRows(
   });
 }
 
-function rowSeedsFromReport(report: BuiltReport): readonly RowSeed[] {
-  return [
-    ...report.lines.map((line): RowSeed => ({
-      rowId: rowIdForLine(line.accountId, line.reportLineId),
-      kind: "line",
-      label: line.label,
-      section: line.section
-    })),
-    ...report.totals.map((total): RowSeed => ({
-      rowId: rowIdForTotal(total.totalKey),
-      kind: "total",
-      label: total.label,
-      totalKey: total.totalKey
-    }))
-  ];
+function rowSeedsFromReports(primaryReport: BuiltReport, amountReports: ReadonlyMap<string, BuiltReport>): readonly RowSeed[] {
+  const lineSeedEntriesByRowId = new Map<string, LineRowSeedEntry>();
+  const totalSeedsByRowId = new Map<string, RowSeed>();
+
+  [primaryReport, ...amountReports.values()].forEach((report, sourceRank) => {
+    const entries = rowSeedEntriesFromReport(report, sourceRank);
+    for (const entry of entries.lineSeeds) {
+      lineSeedEntriesByRowId.set(
+        entry.seed.rowId,
+        mergeLineRowSeedEntry(lineSeedEntriesByRowId.get(entry.seed.rowId), entry)
+      );
+    }
+    for (const seed of entries.totalSeeds) {
+      if (!totalSeedsByRowId.has(seed.rowId)) {
+        totalSeedsByRowId.set(seed.rowId, seed);
+      }
+    }
+  });
+
+  return orderRowSeeds(
+    primaryReport.metadata.reportName,
+    [...lineSeedEntriesByRowId.values()],
+    [...totalSeedsByRowId.values()]
+  );
+}
+
+function rowSeedEntriesFromReport(report: BuiltReport, sourceRank: number): ReportRowSeedEntries {
+  const lineByReportLineId = new Map(report.lines.map((line) => [line.reportLineId, line]));
+  const childParentReportLineIds = new Set(
+    report.lines
+      .map((line) => line.parentReportLineId)
+      .filter((parentReportLineId): parentReportLineId is string => parentReportLineId !== undefined)
+  );
+  const hierarchyDepthByReportLineId = new Map<string, number>();
+  const hierarchyDepthForLine = (reportLineId: string, visited = new Set<string>()): number => {
+    const memoized = hierarchyDepthByReportLineId.get(reportLineId);
+    if (memoized !== undefined) {
+      return memoized;
+    }
+    const line = lineByReportLineId.get(reportLineId);
+    if (line === undefined || line.parentReportLineId === undefined || visited.has(reportLineId)) {
+      hierarchyDepthByReportLineId.set(reportLineId, 0);
+      return 0;
+    }
+
+    visited.add(reportLineId);
+    const depth = hierarchyDepthForLine(line.parentReportLineId, visited) + 1;
+    hierarchyDepthByReportLineId.set(reportLineId, depth);
+    return depth;
+  };
+
+  const lineSeeds = orderedReportLines(report).map(({ line, rootSection }) => {
+    const parentLine =
+      line.parentReportLineId === undefined ? undefined : lineByReportLineId.get(line.parentReportLineId);
+    const participatesInHierarchy =
+      line.parentReportLineId !== undefined || childParentReportLineIds.has(line.reportLineId);
+
+    return {
+      rootSection,
+      seed: {
+        rowId: rowIdForLine(line.accountId, line.reportLineId),
+        kind: "line",
+        label: line.label,
+        ...(parentLine === undefined ? {} : { parentRowId: rowIdForLine(parentLine.accountId, parentLine.reportLineId) }),
+        ...(participatesInHierarchy ? { hierarchyDepth: hierarchyDepthForLine(line.reportLineId) } : {}),
+        section: line.section
+      } satisfies RowSeed,
+      sortOrder: line.sortOrder,
+      ...(line.accountId === undefined ? {} : { accountId: line.accountId }),
+      sourceRank
+    };
+  });
+  const totalSeeds = report.totals.map((total): RowSeed => ({
+    rowId: rowIdForTotal(total.totalKey),
+    kind: "total",
+    label: total.label,
+    totalKey: total.totalKey
+  }));
+
+  return { lineSeeds, totalSeeds };
+}
+
+function mergeLineRowSeedEntry(
+  existing: LineRowSeedEntry | undefined,
+  candidate: LineRowSeedEntry
+): LineRowSeedEntry {
+  if (existing === undefined) {
+    return candidate;
+  }
+
+  const preferred = candidate.sourceRank < existing.sourceRank ? candidate : existing;
+  const fallback = preferred === candidate ? existing : candidate;
+
+  return {
+    ...preferred,
+    seed: {
+      ...preferred.seed,
+      ...(preferred.seed.parentRowId === undefined && fallback.seed.parentRowId !== undefined
+        ? { parentRowId: fallback.seed.parentRowId }
+        : {}),
+      ...(preferred.seed.hierarchyDepth === undefined && fallback.seed.hierarchyDepth !== undefined
+        ? { hierarchyDepth: fallback.seed.hierarchyDepth }
+        : {}),
+      ...(preferred.seed.section === undefined && fallback.seed.section !== undefined ? { section: fallback.seed.section } : {})
+    }
+  };
+}
+
+function orderRowSeeds(
+  reportName: ReportName,
+  lineSeedEntries: readonly LineRowSeedEntry[],
+  totalSeeds: readonly RowSeed[]
+): readonly RowSeed[] {
+  const lineSeeds = orderLineRowSeedEntries(reportName, lineSeedEntries);
+  const totalSeedsByKey = new Map<string, RowSeed>();
+  for (const seed of totalSeeds) {
+    if (seed.totalKey !== undefined) {
+      totalSeedsByKey.set(seed.totalKey, seed);
+    }
+  }
+  const orderedSeeds: RowSeed[] = [];
+  const emittedLineRowIds = new Set<string>();
+  const emittedTotalKeys = new Set<string>();
+
+  const emitLinesForSection = (section: string): void => {
+    for (const { rootSection, seed } of lineSeeds) {
+      if (rootSection === section && !emittedLineRowIds.has(seed.rowId)) {
+        orderedSeeds.push(seed);
+        emittedLineRowIds.add(seed.rowId);
+      }
+    }
+  };
+  const emitTotal = (totalKey: string): void => {
+    const seed = totalSeedsByKey.get(totalKey);
+    if (seed !== undefined && !emittedTotalKeys.has(totalKey)) {
+      orderedSeeds.push(seed);
+      emittedTotalKeys.add(totalKey);
+    }
+  };
+
+  for (const entry of STATEMENT_ROW_ORDER_BY_REPORT_NAME[reportName]) {
+    if (entry.section !== undefined) {
+      emitLinesForSection(entry.section);
+    }
+    for (const totalKey of entry.totalKeys ?? []) {
+      emitTotal(totalKey);
+    }
+  }
+
+  for (const { seed } of lineSeeds) {
+    if (!emittedLineRowIds.has(seed.rowId)) {
+      orderedSeeds.push(seed);
+      emittedLineRowIds.add(seed.rowId);
+    }
+  }
+  for (const seed of [...totalSeeds].sort(compareTotalSeeds)) {
+    if (seed.totalKey !== undefined && !emittedTotalKeys.has(seed.totalKey)) {
+      orderedSeeds.push(seed);
+      emittedTotalKeys.add(seed.totalKey);
+    }
+  }
+
+  return orderedSeeds;
+}
+
+function orderLineRowSeedEntries(
+  reportName: ReportName,
+  entries: readonly LineRowSeedEntry[]
+): readonly LineRowSeedEntry[] {
+  const compareEntries = compareLineRowSeedEntries(reportName);
+  const entryByRowId = new Map(entries.map((entry) => [entry.seed.rowId, entry]));
+  const childrenByParentRowId = new Map<string, LineRowSeedEntry[]>();
+  const roots: LineRowSeedEntry[] = [];
+
+  for (const entry of entries) {
+    if (entry.seed.parentRowId !== undefined && entryByRowId.has(entry.seed.parentRowId)) {
+      const siblings = childrenByParentRowId.get(entry.seed.parentRowId) ?? [];
+      siblings.push(entry);
+      childrenByParentRowId.set(entry.seed.parentRowId, siblings);
+    } else {
+      roots.push(entry);
+    }
+  }
+
+  for (const siblings of childrenByParentRowId.values()) {
+    siblings.sort(compareEntries);
+  }
+
+  const orderedEntries: LineRowSeedEntry[] = [];
+  const emittedRowIds = new Set<string>();
+  const visitingRowIds = new Set<string>();
+  const visit = (entry: LineRowSeedEntry, rootSection: string): void => {
+    if (emittedRowIds.has(entry.seed.rowId) || visitingRowIds.has(entry.seed.rowId)) {
+      return;
+    }
+
+    visitingRowIds.add(entry.seed.rowId);
+    orderedEntries.push({ ...entry, rootSection });
+    emittedRowIds.add(entry.seed.rowId);
+    for (const child of childrenByParentRowId.get(entry.seed.rowId) ?? []) {
+      visit(child, rootSection);
+    }
+    visitingRowIds.delete(entry.seed.rowId);
+  };
+
+  for (const root of [...roots].sort(compareEntries)) {
+    visit(root, root.seed.section ?? root.rootSection);
+  }
+  for (const entry of [...entries].sort(compareEntries)) {
+    if (!emittedRowIds.has(entry.seed.rowId)) {
+      visit(entry, entry.seed.section ?? entry.rootSection);
+    }
+  }
+
+  return orderedEntries;
+}
+
+function orderedReportLines(report: BuiltReport): readonly OrderedReportLine[] {
+  const compareLines = compareReportLines(report.metadata.reportName);
+  const lineByReportLineId = new Map(report.lines.map((line) => [line.reportLineId, line]));
+  const childrenByParentReportLineId = new Map<string, BuiltReport["lines"][number][]>();
+  const roots: BuiltReport["lines"][number][] = [];
+
+  for (const line of report.lines) {
+    if (line.parentReportLineId !== undefined && lineByReportLineId.has(line.parentReportLineId)) {
+      const siblings = childrenByParentReportLineId.get(line.parentReportLineId) ?? [];
+      siblings.push(line);
+      childrenByParentReportLineId.set(line.parentReportLineId, siblings);
+    } else {
+      roots.push(line);
+    }
+  }
+
+  for (const siblings of childrenByParentReportLineId.values()) {
+    siblings.sort(compareLines);
+  }
+
+  const orderedLines: OrderedReportLine[] = [];
+  const emittedLineIds = new Set<string>();
+  const visitingLineIds = new Set<string>();
+  const visit = (line: BuiltReport["lines"][number], rootSection: string): void => {
+    if (emittedLineIds.has(line.reportLineId) || visitingLineIds.has(line.reportLineId)) {
+      return;
+    }
+
+    visitingLineIds.add(line.reportLineId);
+    orderedLines.push({ line, rootSection });
+    emittedLineIds.add(line.reportLineId);
+    for (const child of childrenByParentReportLineId.get(line.reportLineId) ?? []) {
+      visit(child, rootSection);
+    }
+    visitingLineIds.delete(line.reportLineId);
+  };
+
+  for (const root of [...roots].sort(compareLines)) {
+    visit(root, root.section);
+  }
+  for (const line of [...report.lines].sort(compareLines)) {
+    if (!emittedLineIds.has(line.reportLineId)) {
+      visit(line, line.section);
+    }
+  }
+
+  return orderedLines;
+}
+
+function compareReportLines(reportName: ReportName): (left: BuiltReport["lines"][number], right: BuiltReport["lines"][number]) => number {
+  const sectionOrder = LINE_SECTION_ORDER_BY_REPORT_NAME[reportName];
+  return (left, right) =>
+    compareNumbers(left.sortOrder, right.sortOrder) ||
+    compareNumbers(sectionRank(sectionOrder, left.section), sectionRank(sectionOrder, right.section)) ||
+    left.label.localeCompare(right.label, "en", { sensitivity: "base" }) ||
+    (left.accountId ?? "").localeCompare(right.accountId ?? "") ||
+    rowIdForLine(left.accountId, left.reportLineId).localeCompare(rowIdForLine(right.accountId, right.reportLineId));
+}
+
+function compareLineRowSeedEntries(reportName: ReportName): (left: LineRowSeedEntry, right: LineRowSeedEntry) => number {
+  const sectionOrder = LINE_SECTION_ORDER_BY_REPORT_NAME[reportName];
+  return (left, right) =>
+    compareNumbers(left.sortOrder, right.sortOrder) ||
+    compareNumbers(sectionRank(sectionOrder, left.seed.section ?? ""), sectionRank(sectionOrder, right.seed.section ?? "")) ||
+    left.seed.label.localeCompare(right.seed.label, "en", { sensitivity: "base" }) ||
+    (left.accountId ?? "").localeCompare(right.accountId ?? "") ||
+    left.seed.rowId.localeCompare(right.seed.rowId);
+}
+
+function compareTotalSeeds(left: RowSeed, right: RowSeed): number {
+  return (
+    (left.totalKey ?? "").localeCompare(right.totalKey ?? "") ||
+    left.label.localeCompare(right.label, "en", { sensitivity: "base" }) ||
+    left.rowId.localeCompare(right.rowId)
+  );
+}
+
+function sectionRank(sectionOrder: readonly string[], section: string): number {
+  const index = sectionOrder.indexOf(section);
+  return index === -1 ? Number.MAX_SAFE_INTEGER : index;
+}
+
+function compareNumbers(left: number, right: number): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function reportLineAmounts(report: BuiltReport): ReadonlyMap<string, DecimalString> {

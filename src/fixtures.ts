@@ -273,7 +273,7 @@ export const ERP_FINANCIALS_STATEMENT_FIXTURE: StatementFixtureSet = {
     startedAt: "2026-02-01T00:00:00.000Z",
     completedAt: "2026-02-01T00:00:01.000Z",
     sourceObjectCounts: {
-      accounts: 11,
+      accounts: 13,
       transactions: 11,
       postings: 22
     }
@@ -300,7 +300,9 @@ export const ERP_FINANCIALS_STATEMENT_FIXTURE: StatementFixtureSet = {
     account("acct_draw", "3100", "Owner Draws", "equity", "OwnerDraw"),
     account("acct_sales", "4000", "Product Revenue", "income", "SalesOfProductIncome"),
     account("acct_cogs", "5000", "Cost of Goods Sold", "cost_of_goods_sold", "CostOfGoodsSold"),
-    account("acct_expense", "6100", "Operating Expense", "expense", "Expense")
+    account("acct_expense", "6100", "Operating Expense", "expense", "Expense"),
+    account("acct_expense_facilities", "6110", "Facilities Expense", "expense", "Expense", "acct_expense"),
+    account("acct_expense_utilities", "6111", "Utilities Expense", "expense", "Expense", "acct_expense_facilities")
   ],
   parties: [
     party("party_customer_acme", "customer", "Acme Stores"),
@@ -353,7 +355,16 @@ export const ERP_FINANCIALS_STATEMENT_FIXTURE: StatementFixtureSet = {
     line("line_unclassified_suspense", "txn_unclassified", 2, "acct_suspense", "-700.00", undefined, undefined, noDimensions),
     line("line_collection_cash", "txn_collection", 1, "acct_cash", "2000.00", "party_customer_acme", undefined, chicagoOps),
     line("line_collection_ar", "txn_collection", 2, "acct_ar", "-2000.00", "party_customer_acme", undefined, chicagoOps),
-    line("line_accrued_bill_expense", "txn_accrued_bill", 1, "acct_expense", "1200.00", "party_vendor_supply", undefined, chicagoAdmin),
+    line(
+      "line_accrued_bill_expense",
+      "txn_accrued_bill",
+      1,
+      "acct_expense_utilities",
+      "1200.00",
+      "party_vendor_supply",
+      undefined,
+      chicagoAdmin
+    ),
     line("line_accrued_bill_ap", "txn_accrued_bill", 2, "acct_ap", "-1200.00", "party_vendor_supply", undefined, chicagoAdmin)
   ],
   postings: [
@@ -377,7 +388,16 @@ export const ERP_FINANCIALS_STATEMENT_FIXTURE: StatementFixtureSet = {
     posting("post_unclassified_suspense", "txn_unclassified", "line_unclassified_suspense", "acct_suspense", "2026-01-25", "0.00", "700.00", noDimensions),
     posting("post_collection_cash", "txn_collection", "line_collection_cash", "acct_cash", "2026-01-28", "2000.00", "0.00", chicagoOps),
     posting("post_collection_ar", "txn_collection", "line_collection_ar", "acct_ar", "2026-01-28", "0.00", "2000.00", chicagoOps),
-    posting("post_accrued_bill_expense", "txn_accrued_bill", "line_accrued_bill_expense", "acct_expense", "2026-01-30", "1200.00", "0.00", chicagoAdmin),
+    posting(
+      "post_accrued_bill_expense",
+      "txn_accrued_bill",
+      "line_accrued_bill_expense",
+      "acct_expense_utilities",
+      "2026-01-30",
+      "1200.00",
+      "0.00",
+      chicagoAdmin
+    ),
     posting("post_accrued_bill_ap", "txn_accrued_bill", "line_accrued_bill_ap", "acct_ap", "2026-01-30", "0.00", "1200.00", chicagoAdmin)
   ],
   reportRequest: {
@@ -396,6 +416,8 @@ export const ERP_FINANCIALS_STATEMENT_FIXTURE: StatementFixtureSet = {
       acct_sales: "operating",
       acct_cogs: "operating",
       acct_expense: "operating",
+      acct_expense_facilities: "operating",
+      acct_expense_utilities: "operating",
       acct_equipment: "investing",
       acct_loan: "financing",
       acct_draw: "financing"
@@ -1347,7 +1369,14 @@ function normalizedQboReconciliationEvidence(
   });
 }
 
-function account(accountId: string, accountNumber: string, name: string, classification: Account["classification"], subtype: string): Account {
+function account(
+  accountId: string,
+  accountNumber: string,
+  name: string,
+  classification: Account["classification"],
+  subtype: string,
+  parentAccountId?: string
+): Account {
   return {
     tenantId,
     sourceId,
@@ -1358,6 +1387,7 @@ function account(accountId: string, accountNumber: string, name: string, classif
     type: classification,
     subtype,
     classification,
+    ...(parentAccountId === undefined ? {} : { parentAccountId }),
     currencyCode,
     active: true
   };

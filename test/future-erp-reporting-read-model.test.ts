@@ -216,6 +216,7 @@ describe("Future ERP canonical reporting read model", () => {
         query: {
           kind: "ledger_postings",
           tenantId: fixture.company.tenantId,
+          sourceId: fixture.source.sourceId,
           accountingBasis: "accrual",
           periodStart: "2026-01-01",
           periodEnd: "2026-01-31"
@@ -1316,7 +1317,6 @@ function expectEveryMaterialOutputHasDrilldown(report: BuiltReport): void {
     expect(line.drilldownRef.query).toMatchObject({
       kind: "ledger_postings",
       tenantId: fixture.company.tenantId,
-      sourceId: fixture.source.sourceId,
       accountingBasis: "accrual",
       periodStart: "2026-01-01",
       periodEnd: "2026-01-31"
@@ -1336,7 +1336,6 @@ function expectEveryMaterialOutputHasDrilldown(report: BuiltReport): void {
     expect(total.drilldownRef.query).toMatchObject({
       kind: "ledger_postings",
       tenantId: fixture.company.tenantId,
-      sourceId: fixture.source.sourceId,
       accountingBasis: "accrual",
       periodStart: "2026-01-01",
       periodEnd: "2026-01-31"

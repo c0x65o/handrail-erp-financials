@@ -57,6 +57,12 @@ covers companies, sources, accounts, parties, items, dimensions, transactions,
 transaction lines, ledger postings, import batches, sync checkpoints, and report
 snapshot tables. It intentionally stores safe source references and bounded JSON
 refs, not provider OAuth tokens or raw unbounded provider payloads.
+Canonical account hierarchy behavior is provider-neutral and defined in
+[docs/account-hierarchy-rules.md](docs/account-hierarchy-rules.md), including
+parent postings, descendant totals, inactive parents, invalid parent
+references, cycles, cross-source references, nested report line shape,
+presentation row hierarchy metadata, drilldown scope, and QuickBooks
+source-adapter boundaries.
 
 The first deterministic fixture set exports representative companies, sources,
 accounts, parties, items, dimensions, transactions, transaction lines, and

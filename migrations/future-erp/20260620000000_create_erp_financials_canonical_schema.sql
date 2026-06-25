@@ -51,6 +51,8 @@ create unique index if not exists "accounts_source_account_uidx" on "erp_financi
 
 create index if not exists "accounts_classification_idx" on "erp_financials"."accounts" ("tenant_id", "classification");
 
+create index if not exists "accounts_parent_account_idx" on "erp_financials"."accounts" ("tenant_id", "source_id", "parent_account_id");
+
 create table if not exists "erp_financials"."parties" (
   "party_id" text not null,
   "tenant_id" text not null,

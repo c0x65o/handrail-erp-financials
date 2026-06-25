@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { mapHandrailQuickBooksSdkResourcesToCanonicalFacts, mapHandrailQuickBooksSdkResourcesToJournalEntryInput } from "../src/index.js";
+import {
+  assertReportBuilderInputComplete,
+  mapHandrailQuickBooksSdkResourcesToCanonicalFacts,
+  mapHandrailQuickBooksSdkResourcesToJournalEntryInput
+} from "../src/index.js";
 
 import type {
+  CanonicalAccountingFactSet,
   HandrailQuickBooksAccountResource,
   HandrailQuickBooksCompanyInfoResource,
   HandrailQuickBooksJournalEntryResource,
@@ -17,6 +22,7 @@ import type {
   QuickBooksSdkAccount,
   QuickBooksSdkCompanyInfo,
   QuickBooksSdkJournalEntryLine,
+  ReportBuilderInput,
   SafeSourcePayloadRef
 } from "../src/index.js";
 
@@ -33,6 +39,7 @@ describe("normalized QuickBooks contract compatibility", () => {
       FiscalYearStartMonth: 1
     });
     expect(journalEntryInput.accounts.map((account) => account.Id)).toEqual(["35", "79"]);
+    expect(journalEntryInput.accounts.find((account) => account.Id === "79")?.ParentRef?.value).toBe("35");
     expect(journalEntryInput.journalEntries[0]?.Id).toBe("100");
     expect(journalEntryInput.journalEntries[0]?.Line[0]?.JournalEntryLineDetail.AccountRef.value).toBe("35");
     expect(journalEntryInput.journalEntries[0]?.Line[0]?.sourcePayloadRef?.storageRef).toBe(
@@ -48,6 +55,19 @@ describe("normalized QuickBooks contract compatibility", () => {
       "checkpoint_normalized_qbo_1",
       "checkpoint_normalized_qbo_1"
     ]);
+    const parentAccount = facts.accounts.find((account) => account.sourceAccountId === "35");
+    const childAccount = facts.accounts.find((account) => account.sourceAccountId === "79");
+    expect(parentAccount).toBeDefined();
+    expect(childAccount).toBeDefined();
+    expect(parentAccount?.parentAccountId).toBeUndefined();
+    expect(childAccount?.parentAccountId).toBe(parentAccount?.accountId);
+
+    const reportBuilderInput = reportBuilderInputFromFacts(facts);
+    assertReportBuilderInputComplete(reportBuilderInput);
+    expect(reportBuilderInput.accounts).toEqual(facts.accounts);
+    const reportBuilderChildAccount = reportBuilderInput.accounts.find((account) => account.accountId === childAccount?.accountId);
+    expect(reportBuilderChildAccount?.parentAccountId).toBe(parentAccount?.accountId);
+    expect(JSON.stringify(reportBuilderInput)).not.toMatch(/parentAccountRef|ParentRef/);
     expect(JSON.stringify([normalizedResources, adapterInput, journalEntryInput, facts])).not.toMatch(
       /access[_-]?token|refresh[_-]?token|client[_-]?secret|clientSecret|rawPayload/i
     );
@@ -149,6 +169,14 @@ function normalizedAccountToSdkResource(resource: NormalizedQuickBooksResourceSe
     Id: resource.resource.sourceAccountId,
     Name: resource.resource.name,
     AccountType: resource.resource.accountType,
+    ...(resource.resource.parentAccountRef === undefined
+      ? {}
+      : {
+          ParentRef: {
+            value: resource.resource.parentAccountRef.sourceObjectId,
+            ...(resource.resource.parentAccountRef.displayName === undefined ? {} : { name: resource.resource.parentAccountRef.displayName })
+          }
+        }),
     ...(resource.resource.accountNumber === undefined ? {} : { AcctNum: resource.resource.accountNumber }),
     ...(resource.resource.accountSubType === undefined ? {} : { AccountSubType: resource.resource.accountSubType }),
     ...(resource.resource.active === undefined ? {} : { Active: resource.resource.active }),
@@ -231,6 +259,28 @@ function requireFirstPosting(line: NormalizedQuickBooksLedgerLine): NormalizedQu
 
 function absoluteDecimal(value: string): string {
   return value.startsWith("-") ? value.slice(1) : value;
+}
+
+function reportBuilderInputFromFacts(facts: CanonicalAccountingFactSet): ReportBuilderInput {
+  return {
+    tenantId: facts.company.tenantId,
+    sourceId: facts.source.sourceId,
+    accounts: facts.accounts,
+    postings: facts.postings,
+    accountingBasis: "accrual",
+    currencyCode: facts.company.baseCurrencyCode,
+    periodStart: "2026-01-01",
+    periodEnd: "2026-01-31",
+    asOfDate: "2026-01-31",
+    generatedAt: "2026-02-01T11:00:00.000Z",
+    freshness: {
+      status: "fresh",
+      sourceId: facts.source.sourceId,
+      importBatchId: facts.importBatch.importBatchId,
+      checkpointId: facts.checkpoint.checkpointId,
+      ...(facts.checkpoint.freshThrough === undefined ? {} : { freshThrough: facts.checkpoint.freshThrough })
+    }
+  };
 }
 
 function normalizedQuickBooksContractFixture(): NormalizedQuickBooksResourceSet {
@@ -331,6 +381,10 @@ function normalizedQuickBooksContractFixture(): NormalizedQuickBooksResourceSet 
         checkpointId: "checkpoint_normalized_qbo_1",
         resource: {
           sourceAccountId: "79",
+          parentAccountRef: {
+            sourceObjectId: "35",
+            displayName: "Checking"
+          },
           name: "Services",
           accountNumber: "4000",
           accountType: "Income",

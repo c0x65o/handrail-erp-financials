@@ -57,6 +57,9 @@ describe("canonical schema manifest", () => {
       'create unique index if not exists "ledger_postings_source_posting_uidx" on "erp_financials"."ledger_postings" ("tenant_id", "source_id", "accounting_basis", "source_posting_id");'
     );
     expect(firstRender).toContain(
+      'create index if not exists "accounts_parent_account_idx" on "erp_financials"."accounts" ("tenant_id", "source_id", "parent_account_id");'
+    );
+    expect(firstRender).toContain(
       'create unique index if not exists "rollup_buckets_identity_uidx" on "erp_financials"."rollup_buckets" ("tenant_id", "company_id", "source_id", "accounting_basis", "bucket_grain", "bucket_start", "bucket_end", "account_id", "currency_code", "dimension_hash", "party_id", "party_type", "item_id");'
     );
     expect(firstRender).toContain(
@@ -67,6 +70,31 @@ describe("canonical schema manifest", () => {
     );
     expect(firstRender).toContain(
       "constraint \"transactions_source_payload_ref_bounded_json_check\" check (octet_length(coalesce(\"source_payload_ref\"::text, '')) <= 4096)"
+    );
+  });
+
+  it("preserves provider-neutral account hierarchy storage and lookup coverage", () => {
+    const accountsTable = POSTGRES_CANONICAL_SCHEMA_MANIFEST.tables.find((table) => table.name === "accounts");
+
+    expect(accountsTable?.columns).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "parent_account_id",
+          type: "text",
+          nullable: true
+        })
+      ])
+    );
+    expect(accountsTable?.indexes).toEqual(
+      expect.arrayContaining([
+        {
+          name: "accounts_parent_account_idx",
+          columns: ["tenant_id", "source_id", "parent_account_id"]
+        }
+      ])
+    );
+    expect(FUTURE_ERP_CANONICAL_SCHEMA_MIGRATION_SQL).toContain(
+      'create index if not exists "accounts_parent_account_idx" on "erp_financials"."accounts" ("tenant_id", "source_id", "parent_account_id");'
     );
   });
 
