@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@handrail/erp-financials": ["./src/index.ts"]
+    },
+    "types": ["node"]
+  },
+  "include": ["test/core-erp-consumer-type-imports.ts"]
+}

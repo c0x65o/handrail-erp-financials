@@ -134,12 +134,17 @@ The supported adoption surfaces are:
   `createFutureErpCanonicalFactPersistenceWorker`, and
   `persistFutureErpCanonicalFacts`. Host apps should write canonical financial
   facts through the adapter/worker contract and should not bypass it except for
-  explicit package-compatible migrations or audited backfills.
+  explicit package-compatible migrations or audited backfills. Core ERP hosts
+  can call `buildCoreErpPersistenceEvidence` after persistence, or read the
+  `evidence` field returned by the host-neutral QuickBooks workers, to expose
+  import batch, checkpoint, canonical row/write counts, freshness, resume
+  metadata, and bounded safe source refs through app read APIs.
 - QuickBooks normalized mapping: `HandrailQuickBooksSdkResourcesAdapterInput`,
   `mapHandrailQuickBooksSdkResourcesToCanonicalFacts`,
   `mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts`, and
   `mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts`.
 - QuickBooks sync worker contracts:
+  `createQuickBooksFullSyncWorker`, `createQuickBooksIncrementalSyncWorker`,
   `createFutureErpQuickBooksFullSyncWorker`,
   `createFutureErpQuickBooksIncrementalSyncWorker`, the normalized
   full/incremental QuickBooks sync envelope types, and the package-root
@@ -157,9 +162,15 @@ The supported adoption surfaces are:
   presentation. Production standard-report presentation should use
   `buildStandardReportPresentationFromReadModel` backed by snapshots, rollups,
   or SQL aggregates. Persisted reporting flows use
-  `buildFutureErpReportFromCanonicalReadModel`, `createSnapshotRefreshContract`,
+  `buildCoreErpReportFromCanonicalReadModel`,
+  `buildFutureErpReportFromCanonicalReadModel`,
+  `CORE_ERP_CANONICAL_REPORT_NAMES`, `createSnapshotRefreshContract`,
   `reconcileReportFreshness`, `createFutureErpRollupAndLateArrivalWorker`, and
-  `createFutureErpSnapshotRefreshAndFreshnessWorker`.
+  `createFutureErpSnapshotRefreshAndFreshnessWorker`. Core ERP hosts should use
+  the Core ERP report helper/types for P&L, balance sheet, trial balance, cash
+  flow, freshness, rollup bucket, and bounded drilldown read models while the
+  Future ERP helper remains as a compatibility alias over the same canonical
+  builder path.
 
 The QuickBooks service owns OAuth, token custody, raw provider calls, provider
 resource normalization, and tenant/provider access. ERP Financials owns the

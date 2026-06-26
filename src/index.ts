@@ -42,23 +42,40 @@ export {
   validateFutureErpCanonicalSchemaPreflight
 } from "./future-erp-preflight.js";
 export {
+  createCanonicalFactPersistenceWorker,
+  persistCanonicalFacts
+} from "./canonical-fact-persistence.js";
+export {
+  CORE_ERP_PERSISTENCE_EVIDENCE_DEFAULT_CHANGED_RESOURCE_LIMIT,
+  CORE_ERP_PERSISTENCE_EVIDENCE_DEFAULT_DRILLDOWN_POSTING_LIMIT,
+  CORE_ERP_PERSISTENCE_EVIDENCE_DEFAULT_FRESHNESS_ROW_LIMIT,
+  CORE_ERP_PERSISTENCE_EVIDENCE_DEFAULT_SOURCE_REF_LIMIT,
+  buildCoreErpPersistenceEvidence
+} from "./core-erp-persistence-evidence.js";
+export {
   createFutureErpCanonicalFactPersistenceWorker,
   persistFutureErpCanonicalFacts
 } from "./future-erp-persistence.js";
 export { createFutureErpRollupAndLateArrivalWorker } from "./future-erp-rollup-workers.js";
 export { createFutureErpSnapshotRefreshAndFreshnessWorker } from "./future-erp-snapshot-workers.js";
 export {
+  CORE_ERP_CANONICAL_REPORT_NAMES,
+  buildCoreErpReportFromCanonicalReadModel
+} from "./core-erp-reporting.js";
+export {
   buildFutureErpReportFromCanonicalReadModel,
   fetchFutureErpQuickBooksProviderReportParitySnapshot
 } from "./future-erp-reporting.js";
 export {
-  createFutureErpQuickBooksFullSyncWorker,
+  createQuickBooksFullSyncWorker,
   mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts
-} from "./future-erp-quickbooks-full-sync.js";
+} from "./quickbooks-full-sync.js";
+export { createFutureErpQuickBooksFullSyncWorker } from "./future-erp-quickbooks-full-sync.js";
 export {
-  createFutureErpQuickBooksIncrementalSyncWorker,
+  createQuickBooksIncrementalSyncWorker,
   mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts
-} from "./future-erp-quickbooks-incremental-sync.js";
+} from "./quickbooks-incremental-sync.js";
+export { createFutureErpQuickBooksIncrementalSyncWorker } from "./future-erp-quickbooks-incremental-sync.js";
 export {
   generateFutureErpCanonicalReportSnapshotsFromImport,
   runFutureErpQuickBooksSandboxReplay
@@ -102,6 +119,7 @@ export {
   assertStandardReportAccountingMethod,
   assertStandardReportControlsSupported,
   buildReferenceStandardReportPresentationFromFacts,
+  // eslint-disable-next-line @typescript-eslint/no-deprecated -- keep the deprecated compatibility export available.
   buildStandardReportPresentationFromFacts,
   buildStandardReportPresentationFromReadModel,
   buildStandardReportPresentationFromReports
@@ -311,6 +329,23 @@ export type {
   FutureErpCanonicalSchemaPreflightResult
 } from "./future-erp-preflight.js";
 export type {
+  CanonicalFactPersistenceResult,
+  CanonicalFactPersistenceStorage,
+  CanonicalFactPersistenceWorker
+} from "./canonical-fact-persistence.js";
+export type {
+  BuildCoreErpPersistenceEvidenceInput,
+  CoreErpPersistenceEvidence,
+  CoreErpPersistenceEvidenceCanonicalRowCounts,
+  CoreErpPersistenceEvidenceChangedResourceAction,
+  CoreErpPersistenceEvidenceChangedResourcesSummary,
+  CoreErpPersistenceEvidenceCheckpointSummary,
+  CoreErpPersistenceEvidenceFreshnessRow,
+  CoreErpPersistenceEvidenceFreshnessSummary,
+  CoreErpPersistenceEvidenceImportBatchSummary,
+  CoreErpPersistenceEvidenceSourceReferences
+} from "./core-erp-persistence-evidence.js";
+export type {
   FutureErpCanonicalFactPersistenceResult,
   FutureErpCanonicalFactPersistenceStorage,
   FutureErpCanonicalFactPersistenceWorker
@@ -335,6 +370,21 @@ export type {
   FutureErpStaleSnapshotRefreshWorkerRequest
 } from "./future-erp-snapshot-workers.js";
 export type {
+  CoreErpCanonicalReportGenerationRequest,
+  CoreErpCanonicalReportGenerationResult,
+  CoreErpCanonicalReportReadModelStorage,
+  CoreErpCanonicalReportSnapshotStorage,
+  CoreErpReport,
+  CoreErpReportDrilldownSurface,
+  CoreErpReportDrilldownSurfaceEntry,
+  CoreErpReportFreshness,
+  CoreErpReportFreshnessRow,
+  CoreErpReportName,
+  CoreErpReportReconciliationDrilldownSurface,
+  CoreErpReportRollupBucket,
+  CoreErpTenantReadAccess
+} from "./core-erp-reporting.js";
+export type {
   FutureErpCanonicalReportGenerationRequest,
   FutureErpCanonicalReportGenerationResult,
   FutureErpCanonicalReportReadModelStorage,
@@ -351,6 +401,16 @@ export type {
   FutureErpQuickBooksProviderReportParityStatus
 } from "./future-erp-reporting.js";
 export type {
+  QuickBooksFullSyncClient,
+  QuickBooksFullSyncContextOptions,
+  QuickBooksFullSyncMapOptions,
+  QuickBooksFullSyncMapResult,
+  QuickBooksFullSyncPersistence,
+  QuickBooksFullSyncRunResult,
+  QuickBooksFullSyncWorker,
+  QuickBooksFullSyncWorkerOptions
+} from "./quickbooks-full-sync.js";
+export type {
   FutureErpQuickBooksFullSyncClient,
   FutureErpQuickBooksFullSyncContextOptions,
   FutureErpQuickBooksFullSyncMapOptions,
@@ -360,6 +420,17 @@ export type {
   FutureErpQuickBooksFullSyncWorker,
   FutureErpQuickBooksFullSyncWorkerOptions
 } from "./future-erp-quickbooks-full-sync.js";
+export type {
+  QuickBooksChangedResourceAction,
+  QuickBooksIncrementalSyncClient,
+  QuickBooksIncrementalSyncContextOptions,
+  QuickBooksIncrementalSyncMapOptions,
+  QuickBooksIncrementalSyncMapResult,
+  QuickBooksIncrementalSyncPersistence,
+  QuickBooksIncrementalSyncRunResult,
+  QuickBooksIncrementalSyncWorker,
+  QuickBooksIncrementalSyncWorkerOptions
+} from "./quickbooks-incremental-sync.js";
 export type {
   FutureErpQuickBooksChangedResourceAction,
   FutureErpQuickBooksIncrementalSyncClient,

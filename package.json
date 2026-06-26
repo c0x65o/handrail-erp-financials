@@ -1,6 +1,6 @@
 {
   "name": "@handrail/erp-financials",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Provider-neutral ERP financial reporting kernel for canonical accounting facts, rollups, snapshots, and report APIs.",
   "type": "module",
   "license": "UNLICENSED",
@@ -30,6 +30,7 @@
     "contract:smoke": "vitest run test/normalized-quickbooks-contract-smoke.test.ts",
     "health:smoke": "vitest run test/health-contract.test.ts test/install-health.test.ts test/fixture-smoke-health.test.ts test/freshness-drilldown-health.test.ts test/future-erp-install-health-preflight.test.ts",
     "sandbox:quickbooks:replay": "vitest run test/future-erp-sandbox-replay.test.ts",
+    "typecheck:core-erp-imports": "tsc --noEmit -p tsconfig.core-erp-consumer.json",
     "typecheck:future-erp-imports": "tsc --noEmit -p tsconfig.future-erp-consumer.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "validate": "npm run lint && npm run typecheck && npm run test && npm run build"
