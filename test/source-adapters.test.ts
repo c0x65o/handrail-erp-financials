@@ -59,6 +59,81 @@ describe("source adapter contracts", () => {
     expect(JSON.stringify(facts)).not.toMatch(/access[_-]?token|refresh[_-]?token|client_secret/i);
   });
 
+  it("keeps QuickBooks COGS account subtypes in the P&L COGS section", () => {
+    const input = quickBooksFixtureInput();
+    const facts = mapQuickBooksJournalEntriesToCanonicalFacts({
+      ...input,
+      accounts: [
+        input.accounts[0],
+        {
+          Id: "79",
+          Name: "Product Sales",
+          AcctNum: "4000",
+          AccountType: "Income",
+          AccountSubType: "SalesOfProductIncome",
+          Active: true,
+          CurrencyRef: {
+            value: "USD"
+          }
+        },
+        {
+          Id: "80",
+          Name: "Materials COGS",
+          AcctNum: "5000",
+          AccountType: "Expense",
+          AccountSubType: "SuppliesMaterialsCogs",
+          Active: true,
+          CurrencyRef: {
+            value: "USD"
+          }
+        },
+        {
+          Id: "81",
+          Name: "Rent Expense",
+          AcctNum: "6100",
+          AccountType: "Expense",
+          AccountSubType: "RentOrLeaseOfBuildings",
+          Active: true,
+          CurrencyRef: {
+            value: "USD"
+          }
+        }
+      ],
+      journalEntries: [
+        {
+          Id: "101",
+          TxnDate: "2026-01-16",
+          DocNumber: "JE-101",
+          PrivateNote: "QuickBooks P&L fixture with COGS",
+          CurrencyRef: {
+            value: "USD"
+          },
+          Line: [
+            qboJournalLine("1", 1, "Cash from product sale", "1000.00", "Debit", "35", "Checking"),
+            qboJournalLine("2", 2, "Product sales", "1000.00", "Credit", "79", "Product Sales"),
+            qboJournalLine("3", 3, "Materials COGS", "300.00", "Debit", "80", "Materials COGS"),
+            qboJournalLine("4", 4, "Cash paid for materials", "300.00", "Credit", "35", "Checking"),
+            qboJournalLine("5", 5, "Rent expense", "200.00", "Debit", "81", "Rent Expense"),
+            qboJournalLine("6", 6, "Cash paid for rent", "200.00", "Credit", "35", "Checking")
+          ]
+        }
+      ]
+    });
+    const profitAndLoss = buildProfitAndLossReport(reportInput(facts));
+
+    expect(accountByName(facts, "Materials COGS").classification).toBe("cost_of_goods_sold");
+    expect(profitAndLoss.lines.map((line) => [line.section, line.label, line.amount])).toEqual([
+      ["income", "4000 Product Sales", "1000.00"],
+      ["cost_of_goods_sold", "5000 Materials COGS", "300.00"],
+      ["expense", "6100 Rent Expense", "200.00"]
+    ]);
+    expect(totalAmount(profitAndLoss, "total_income")).toBe("1000.00");
+    expect(totalAmount(profitAndLoss, "total_cost_of_goods_sold")).toBe("300.00");
+    expect(totalAmount(profitAndLoss, "gross_profit")).toBe("700.00");
+    expect(totalAmount(profitAndLoss, "total_expenses")).toBe("200.00");
+    expect(totalAmount(profitAndLoss, "net_income")).toBe("500.00");
+  });
+
   it("maps normalized Handrail QuickBooks SDK resources into the canonical QuickBooks adapter input", () => {
     const adapterInput = mapHandrailQuickBooksSdkResourcesToJournalEntryInput(quickBooksSdkResourcesFixtureInput());
 
@@ -976,6 +1051,30 @@ function nativeFixtureInput(): NativeLedgerAdapterInput {
         ]
       }
     ]
+  };
+}
+
+function qboJournalLine(
+  id: string,
+  lineNumber: number,
+  description: string,
+  amount: string,
+  postingType: "Debit" | "Credit",
+  accountId: string,
+  accountName: string
+) {
+  return {
+    Id: id,
+    LineNum: lineNumber,
+    Description: description,
+    Amount: amount,
+    JournalEntryLineDetail: {
+      PostingType: postingType,
+      AccountRef: {
+        value: accountId,
+        name: accountName
+      }
+    }
   };
 }
 
