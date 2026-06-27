@@ -168,6 +168,8 @@ export type QuickBooksSdkAccount = {
   readonly AcctNum?: string;
   readonly AccountType: string;
   readonly AccountSubType?: string;
+  readonly Classification?: AccountClassification;
+  readonly classification?: AccountClassification;
   readonly Active?: boolean;
   readonly CurrencyRef?: QuickBooksSdkRef;
 };
@@ -729,7 +731,7 @@ function quickBooksAccountToNativeAccount(account: QuickBooksSdkAccount): Native
     sourceAccountId: account.Id,
     ...(account.ParentRef?.value === undefined ? {} : { parentAccountSourceId: account.ParentRef.value }),
     name: account.Name,
-    classification: quickBooksAccountClassification(account.AccountType),
+    classification: quickBooksAccountClassification(account.AccountType, account.AccountSubType, account.Classification ?? account.classification),
     ...(account.AcctNum === undefined ? {} : { accountNumber: account.AcctNum }),
     type: account.AccountType,
     ...(account.AccountSubType === undefined ? {} : { subtype: account.AccountSubType }),
@@ -837,8 +839,36 @@ function normalizedQuickBooksDimensionsToCanonicalDimensions(
   return dimensions;
 }
 
-function quickBooksAccountClassification(accountType: string): AccountClassification {
-  const normalized = accountType.toLowerCase().replaceAll(" ", "");
+const QUICKBOOKS_COGS_ACCOUNT_SUBTYPES = new Set([
+  "costofgoodssold",
+  "equipmentrentalcos",
+  "othercostsofservicecos",
+  "shippingfreightdeliverycos",
+  "suppliesmaterialscogs"
+]);
+
+const QUICKBOOKS_ACCOUNT_CLASSIFICATIONS: ReadonlySet<AccountClassification> = new Set([
+  "asset",
+  "cost_of_goods_sold",
+  "equity",
+  "expense",
+  "income",
+  "liability",
+  "other_expense",
+  "other_income"
+]);
+
+function quickBooksAccountClassification(
+  accountType: string,
+  accountSubType: string | undefined,
+  classification: AccountClassification | undefined
+): AccountClassification {
+  if (classification !== undefined && QUICKBOOKS_ACCOUNT_CLASSIFICATIONS.has(classification)) {
+    return classification;
+  }
+
+  const normalized = normalizeQuickBooksAccountKind(accountType);
+  const normalizedSubType = accountSubType === undefined ? undefined : normalizeQuickBooksAccountKind(accountSubType);
   if (["bank", "accountsreceivable", "othercurrentasset", "fixedasset", "otherasset"].includes(normalized)) {
     return "asset";
   }
@@ -851,7 +881,7 @@ function quickBooksAccountClassification(accountType: string): AccountClassifica
   if (normalized === "income") {
     return "income";
   }
-  if (normalized === "costofgoodssold") {
+  if (normalized === "costofgoodssold" || normalizedSubType !== undefined && QUICKBOOKS_COGS_ACCOUNT_SUBTYPES.has(normalizedSubType)) {
     return "cost_of_goods_sold";
   }
   if (normalized === "otherincome") {
@@ -861,6 +891,10 @@ function quickBooksAccountClassification(accountType: string): AccountClassifica
     return "other_expense";
   }
   return "expense";
+}
+
+function normalizeQuickBooksAccountKind(value: string): string {
+  return value.toLowerCase().replaceAll(/[^a-z0-9]/g, "");
 }
 
 function normalizedQuickBooksDimensionRefs(refs: readonly NormalizedQuickBooksDimensionRef[] | undefined): DimensionRef[] {

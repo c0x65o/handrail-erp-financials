@@ -22,6 +22,30 @@ If the Future ERP checkout is not mounted in the worker, update only this repo's
 handoff docs and package-side validation harness. Do not invent Future ERP
 runtime config or provider credentials.
 
+## Durable GitHub Package Ref
+
+The QuickBooks COGS account classification fix is prepared for the next
+tag-based ERP Financials release:
+
+```json
+{
+  "dependencies": {
+    "@handrail/erp-financials": "git+https://github.com/c0x65o/handrail-erp-financials.git#v0.1.11"
+  }
+}
+```
+
+This repo's normal package-source workflow aligns `package.json`,
+`package-lock.json`, and Git tags; the current published/pinned tag is
+`v0.1.10` at commit `058ca3bbea1d48b2f502640c77d9c0458da3f7c6`. The package
+also runs `npm run build` from `prepare`, so npm can consume the tagged GitHub
+source without a copied package, local shim, or checked-in `dist` directory.
+
+Future ERP should pin `v0.1.11` only after the COGS fix commit is pushed to
+GitHub and the `v0.1.11` tag is created on that commit. Until then, `v0.1.11`
+is the exact intended dependency string, but the durable GitHub ref is blocked
+by the unavailable commit/tag/push step in this worker.
+
 ## Package Link Setup
 
 Build ERP Financials first so the local file dependency exposes `dist` and type
