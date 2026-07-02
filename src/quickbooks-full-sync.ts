@@ -6,6 +6,10 @@ import type {
   CanonicalFactPersistenceStorage,
   CanonicalFactPersistenceWorker
 } from "./canonical-fact-persistence.js";
+import type {
+  DeleteLedgerFactsOutsideImportBatchResult,
+  PostgresStorageAdapter
+} from "./postgres-storage.js";
 import { buildCoreErpPersistenceEvidence } from "./core-erp-persistence-evidence.js";
 import type { CoreErpPersistenceEvidence } from "./core-erp-persistence-evidence.js";
 import { adaptNormalizedQuickBooksResourceSetToAdapterInput } from "./quickbooks-contract-smoke.js";
@@ -33,6 +37,16 @@ export type QuickBooksFullSyncContextOptions = {
 export type QuickBooksFullSyncWorkerOptions = QuickBooksFullSyncContextOptions & {
   readonly quickBooksClient: QuickBooksFullSyncClient;
   readonly persistence: QuickBooksFullSyncPersistence;
+  /**
+   * When true, a successful full sync deletes ledger facts (postings and
+   * orphaned transactions/lines) for the tenant/source that were not written
+   * by this import batch, making the full sync authoritative for the ledger.
+   * This removes postings from provider transactions deleted since the last
+   * sync and leftovers from a previous posting source (for example, locally
+   * derived postings after switching to provider general ledger ingestion).
+   * Requires persistence storage with deleteLedgerFactsOutsideImportBatch.
+   */
+  readonly replaceLedgerFactsOnFullSync?: boolean;
 };
 
 export type QuickBooksFullSyncMapOptions = QuickBooksFullSyncContextOptions;
@@ -46,6 +60,7 @@ export type QuickBooksFullSyncRunResult = QuickBooksFullSyncMapResult & {
   readonly response: NormalizedQuickBooksFullSyncResponseEnvelope;
   readonly persistence: CanonicalFactPersistenceResult;
   readonly evidence: CoreErpPersistenceEvidence;
+  readonly removedLedgerFacts?: DeleteLedgerFactsOutsideImportBatchResult;
 };
 
 export type QuickBooksFullSyncWorker = {
@@ -59,6 +74,10 @@ export function createQuickBooksFullSyncWorker(options: QuickBooksFullSyncWorker
       const response = await options.quickBooksClient.fullSync(request);
       const mapped = mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(response, options);
       const persistence = await persistQuickBooksFullSyncFacts(options.persistence, mapped.facts);
+      const removedLedgerFacts =
+        options.replaceLedgerFactsOnFullSync === true
+          ? await replaceLedgerFactsOutsideImportBatch(options.persistence, persistence)
+          : undefined;
 
       return {
         response,
@@ -68,10 +87,32 @@ export function createQuickBooksFullSyncWorker(options: QuickBooksFullSyncWorker
           facts: mapped.facts,
           persistence,
           generatedAt: mapped.adapterInput.context.importedAt
-        })
+        }),
+        ...(removedLedgerFacts === undefined ? {} : { removedLedgerFacts })
       };
     }
   };
+}
+
+function replaceLedgerFactsOutsideImportBatch(
+  persistence: QuickBooksFullSyncPersistence,
+  persisted: CanonicalFactPersistenceResult
+): Promise<DeleteLedgerFactsOutsideImportBatchResult> {
+  const candidate = persistence as Partial<
+    Pick<PostgresStorageAdapter, "deleteLedgerFactsOutsideImportBatch">
+  >;
+
+  if (typeof candidate.deleteLedgerFactsOutsideImportBatch !== "function") {
+    throw new Error(
+      "replaceLedgerFactsOnFullSync requires persistence storage that implements deleteLedgerFactsOutsideImportBatch"
+    );
+  }
+
+  return candidate.deleteLedgerFactsOutsideImportBatch({
+    tenantId: persisted.tenantId,
+    sourceId: persisted.sourceId,
+    importBatchId: persisted.importBatchId
+  });
 }
 
 export function mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(

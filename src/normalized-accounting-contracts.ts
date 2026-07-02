@@ -476,6 +476,18 @@ export type NormalizedQuickBooksProviderReportTotal = {
   readonly drilldownRef?: NormalizedAccountingSafeSourceRef;
 };
 
+/**
+ * Per-account amount reported by the provider (QuickBooks) for account-level
+ * reconciliation. `amount` is the signed net balance (debits positive,
+ * credits negative) as presented by the provider report.
+ */
+export type NormalizedQuickBooksProviderReportAccountTotal = {
+  readonly accountSourceId: string;
+  readonly label?: string;
+  readonly amount: DecimalString;
+  readonly currencyCode?: IsoCurrencyCode;
+};
+
 export type NormalizedQuickBooksCanonicalReportTotal = {
   readonly totalKey: string;
   readonly amount: DecimalString;
@@ -536,6 +548,7 @@ export type NormalizedQuickBooksProviderReportResult = {
   readonly sourceUpdatedAt?: IsoDateTime;
   readonly generatedAt?: IsoDateTime;
   readonly totals: readonly NormalizedQuickBooksProviderReportTotal[];
+  readonly accountTotals?: readonly NormalizedQuickBooksProviderReportAccountTotal[];
 };
 
 export type NormalizedQuickBooksProviderReportResponseEnvelope = {
@@ -559,6 +572,7 @@ export type NormalizedQuickBooksProviderReportResponseEnvelope = {
   readonly sourceUpdatedAt?: IsoDateTime;
   readonly generatedAt?: IsoDateTime;
   readonly totals: readonly NormalizedQuickBooksProviderReportTotal[];
+  readonly accountTotals?: readonly NormalizedQuickBooksProviderReportAccountTotal[];
 };
 
 export type NormalizedQuickBooksProfitAndLossReportResponseEnvelope =

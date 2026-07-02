@@ -7,6 +7,7 @@ import type {
   AccountingTransaction,
   DecimalString,
   ImportBatch,
+  ImportBatchId,
   IsoCurrencyCode,
   IsoDate,
   IsoDateTime,
@@ -247,6 +248,9 @@ export type PostgresStorageAdapter = StandardReportPresentationReadModelStorage 
   upsertTransactions(transactions: readonly AccountingTransaction[]): Promise<number>;
   upsertTransactionLines(lines: readonly TransactionLine[]): Promise<number>;
   upsertLedgerPostings(postings: readonly LedgerPosting[]): Promise<number>;
+  deleteLedgerFactsOutsideImportBatch(
+    input: DeleteLedgerFactsOutsideImportBatchInput
+  ): Promise<DeleteLedgerFactsOutsideImportBatchResult>;
   loadStatementFixture(fixture: StatementFixtureSet): Promise<FixtureLoadResult>;
   writeReportSnapshot(report: BuiltReport): Promise<number>;
   writeRollupBuckets(buckets: readonly RollupBucket[]): Promise<number>;
@@ -264,6 +268,27 @@ export type MarkReportSnapshotsStaleInput = {
   readonly tenantId: TenantId;
   readonly reportSnapshotIds: readonly string[];
   readonly staleReason: string;
+};
+
+/**
+ * Deletes ledger facts (postings, then orphaned transaction lines and
+ * transactions) for a tenant/source that were NOT written by the given import
+ * batch. Used after a successful FULL sync so the canonical ledger exactly
+ * mirrors the latest complete provider state — removing postings from
+ * deleted/voided provider transactions and leftovers from a previous posting
+ * source (for example, locally derived postings after switching to
+ * provider-general-ledger ingestion).
+ */
+export type DeleteLedgerFactsOutsideImportBatchInput = {
+  readonly tenantId: TenantId;
+  readonly sourceId: SourceId;
+  readonly importBatchId: ImportBatchId;
+};
+
+export type DeleteLedgerFactsOutsideImportBatchResult = {
+  readonly postings: number;
+  readonly transactionLines: number;
+  readonly transactions: number;
 };
 
 export type MarkReportSnapshotsStaleForPostingChangesInput = {
@@ -415,6 +440,9 @@ export function createPostgresStorageAdapter(
         "accounting_basis",
         "source_posting_id"
       ]);
+    },
+    async deleteLedgerFactsOutsideImportBatch(input) {
+      return deleteLedgerFactsOutsideImportBatch(client, manifest, input);
     },
     async loadStatementFixture(fixture) {
       return loadStatementFixture(client, manifest, fixture);
@@ -760,6 +788,53 @@ where ${filters.join(" and ")}`,
   );
 
   return result.rowCount ?? 0;
+}
+
+async function deleteLedgerFactsOutsideImportBatch(
+  client: PostgresQueryClient,
+  manifest: PostgresSchemaManifest,
+  input: DeleteLedgerFactsOutsideImportBatchInput
+): Promise<DeleteLedgerFactsOutsideImportBatchResult> {
+  if (input.tenantId.length === 0 || input.sourceId.length === 0 || input.importBatchId.length === 0) {
+    throw new Error("deleteLedgerFactsOutsideImportBatch requires tenantId, sourceId, and importBatchId");
+  }
+
+  const postingsResult = await client.query(
+    `delete from ${qualifiedTable(manifest, "ledger_postings")}
+where "tenant_id" = $1 and "source_id" = $2 and "import_batch_id" <> $3`,
+    [input.tenantId, input.sourceId, input.importBatchId]
+  );
+  const transactionLinesResult = await client.query(
+    `delete from ${qualifiedTable(manifest, "transaction_lines")} lines
+using ${qualifiedTable(manifest, "transactions")} transactions
+where transactions."transaction_id" = lines."transaction_id"
+  and transactions."tenant_id" = lines."tenant_id"
+  and transactions."tenant_id" = $1
+  and transactions."source_id" = $2
+  and not exists (
+    select 1 from ${qualifiedTable(manifest, "ledger_postings")} postings
+    where postings."tenant_id" = transactions."tenant_id"
+      and postings."transaction_id" = transactions."transaction_id"
+  )`,
+    [input.tenantId, input.sourceId]
+  );
+  const transactionsResult = await client.query(
+    `delete from ${qualifiedTable(manifest, "transactions")} transactions
+where transactions."tenant_id" = $1
+  and transactions."source_id" = $2
+  and not exists (
+    select 1 from ${qualifiedTable(manifest, "ledger_postings")} postings
+    where postings."tenant_id" = transactions."tenant_id"
+      and postings."transaction_id" = transactions."transaction_id"
+  )`,
+    [input.tenantId, input.sourceId]
+  );
+
+  return {
+    postings: postingsResult.rowCount ?? 0,
+    transactionLines: transactionLinesResult.rowCount ?? 0,
+    transactions: transactionsResult.rowCount ?? 0
+  };
 }
 
 async function loadReportBuilderInput(

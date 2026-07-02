@@ -156,6 +156,18 @@ export {
   adaptNormalizedQuickBooksResourceSetToAdapterInput,
   createQuickBooksContractSmokeHarness
 } from "./quickbooks-contract-smoke.js";
+export {
+  MAX_PROVIDER_REPORT_ACCOUNT_TOTALS,
+  buildQuickBooksCanonicalReportTotalsFromBuiltReport,
+  buildQuickBooksTrialBalanceAccountParity,
+  sanitizeQuickBooksProviderReportAccountTotals
+} from "./quickbooks-provider-report-parity.js";
+export type {
+  QuickBooksAccountParityStatus,
+  QuickBooksTrialBalanceAccountParityInput,
+  QuickBooksTrialBalanceAccountParityLine,
+  QuickBooksTrialBalanceAccountParityReport
+} from "./quickbooks-provider-report-parity.js";
 
 export type {
   AccountHierarchyDiagnostic,
@@ -267,6 +279,8 @@ export type {
   FixtureLoadResult,
   InstallPostgresSchemaOptions,
   InstallPostgresSchemaResult,
+  DeleteLedgerFactsOutsideImportBatchInput,
+  DeleteLedgerFactsOutsideImportBatchResult,
   LoadReportBuilderInput,
   LoadReportSnapshotInput,
   LoadRollupBucketsInput,
@@ -586,6 +600,7 @@ export type {
   NormalizedQuickBooksProviderEnvironment,
   NormalizedQuickBooksProfitAndLossReportRequestEnvelope,
   NormalizedQuickBooksProfitAndLossReportResponseEnvelope,
+  NormalizedQuickBooksProviderReportAccountTotal,
   NormalizedQuickBooksProviderReportName,
   NormalizedQuickBooksProviderReportRef,
   NormalizedQuickBooksProviderReportRequestEnvelope,

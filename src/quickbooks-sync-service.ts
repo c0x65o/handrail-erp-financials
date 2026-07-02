@@ -2,6 +2,7 @@ import {
   assertNoCredentialKeys,
   assertSafeSourcePayloadRef
 } from "./canonical-model.js";
+import { sanitizeQuickBooksProviderReportAccountTotals } from "./quickbooks-provider-report-parity.js";
 import type {
   DecimalString,
   ImportBatchStatus,
@@ -384,6 +385,10 @@ export function buildNormalizedQuickBooksProviderReportResponse(
   const providerReportRef = sanitizeProviderReportRef(providerReport.providerReportRef);
   validateProviderReportRef(request, providerReportRef);
   const totals = sanitizeProviderReportTotals(providerReport.totals);
+  const accountTotals =
+    providerReport.accountTotals === undefined
+      ? undefined
+      : sanitizeQuickBooksProviderReportAccountTotals(providerReport.accountTotals);
   const latestSourceUpdatedAt =
     providerReport.latestSourceUpdatedAt ??
     providerReport.sourceUpdatedAt ??
@@ -413,7 +418,8 @@ export function buildNormalizedQuickBooksProviderReportResponse(
     providerReportRef,
     ...(latestSourceUpdatedAt === undefined ? {} : { sourceUpdatedAt: latestSourceUpdatedAt }),
     ...(providerReport.generatedAt === undefined ? {} : { generatedAt: providerReport.generatedAt }),
-    totals
+    totals,
+    ...(accountTotals === undefined ? {} : { accountTotals })
   };
 }
 
