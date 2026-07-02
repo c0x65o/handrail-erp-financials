@@ -863,12 +863,16 @@ function quickBooksAccountClassification(
   accountSubType: string | undefined,
   classification: AccountClassification | undefined
 ): AccountClassification {
+  const normalized = normalizeQuickBooksAccountKind(accountType);
+  const normalizedSubType = accountSubType === undefined ? undefined : normalizeQuickBooksAccountKind(accountSubType);
+  if (normalized === "costofgoodssold" || normalizedSubType !== undefined && QUICKBOOKS_COGS_ACCOUNT_SUBTYPES.has(normalizedSubType)) {
+    return "cost_of_goods_sold";
+  }
+
   if (classification !== undefined && QUICKBOOKS_ACCOUNT_CLASSIFICATIONS.has(classification)) {
     return classification;
   }
 
-  const normalized = normalizeQuickBooksAccountKind(accountType);
-  const normalizedSubType = accountSubType === undefined ? undefined : normalizeQuickBooksAccountKind(accountSubType);
   if (["bank", "accountsreceivable", "othercurrentasset", "fixedasset", "otherasset"].includes(normalized)) {
     return "asset";
   }
@@ -880,9 +884,6 @@ function quickBooksAccountClassification(
   }
   if (normalized === "income") {
     return "income";
-  }
-  if (normalized === "costofgoodssold" || normalizedSubType !== undefined && QUICKBOOKS_COGS_ACCOUNT_SUBTYPES.has(normalizedSubType)) {
-    return "cost_of_goods_sold";
   }
   if (normalized === "otherincome") {
     return "other_income";

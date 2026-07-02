@@ -82,6 +82,7 @@ describe("source adapter contracts", () => {
           AcctNum: "5000",
           AccountType: "Expense",
           AccountSubType: "SuppliesMaterialsCogs",
+          Classification: "expense",
           Active: true,
           CurrencyRef: {
             value: "USD"
