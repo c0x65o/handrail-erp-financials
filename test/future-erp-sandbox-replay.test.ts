@@ -230,6 +230,7 @@ describe("Future ERP QuickBooks sandbox replay orchestration", () => {
     const firstCalls = recorded.calls.slice();
     const firstQueryTables = writeQueryTables(client.calls);
     const firstQueryCount = client.calls.length;
+    const firstQueryCalls = client.calls.slice(0, firstQueryCount);
 
     const second = await runFutureErpQuickBooksSandboxReplay({ postgresStorage: recorded.storage });
     const secondCalls = recorded.calls.slice(firstCalls.length);
@@ -260,6 +261,66 @@ describe("Future ERP QuickBooks sandbox replay orchestration", () => {
         "report_freshness"
       ])
     ]);
+    expect(insertedRowsForTable(firstQueryCalls, "import_batches")).toEqual([
+      expect.objectContaining({
+        import_batch_id: first.importBatchId,
+        status: "completed",
+        source_object_counts: expect.objectContaining({
+          accounts: 2,
+          journalEntries: 1,
+          ledgerPostings: 2
+        })
+      })
+    ]);
+    expect(insertedRowsForTable(firstQueryCalls, "sync_checkpoints")).toEqual([
+      expect.objectContaining({
+        checkpoint_id: first.checkpointId,
+        cursor_kind: "full_scan",
+        cursor_value: "full:realm_qbo_sync_fixture:2026-02-01T10:00:00.000Z",
+        fresh_through: "2026-02-01T10:00:00.000Z",
+        latest_source_updated_at: "2026-02-01T09:59:59.000Z",
+        status: "current"
+      })
+    ]);
+    expect(insertedRowsForTable(firstQueryCalls, "ledger_postings")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          import_batch_id: first.importBatchId,
+          checkpoint_id: first.checkpointId,
+          source_payload_ref: expect.objectContaining({
+            storageRef: expect.stringMatching(/^quickbooks-sdk:\/\/sandbox\/realm\/realm_qbo_sync_fixture\//)
+          })
+        })
+      ])
+    );
+    expect(insertedRowsForTable(firstQueryCalls, "report_freshness")).toEqual(
+      expect.arrayContaining(
+        REPORT_NAMES.map((reportName) =>
+          expect.objectContaining({
+            freshness_id: first.freshnessIds[reportName],
+            report_name: reportName,
+            status: "fresh",
+            import_batch_id: first.importBatchId,
+            checkpoint_id: first.checkpointId
+          })
+        )
+      )
+    );
+    expect(insertedRowsForTable(firstQueryCalls, "report_snapshots")).toEqual(
+      expect.arrayContaining(
+        REPORT_NAMES.map((reportName) =>
+          expect.objectContaining({
+            report_snapshot_id: first.snapshotIds[reportName],
+            report_name: reportName,
+            freshness: expect.objectContaining({
+              status: "fresh",
+              importBatchId: first.importBatchId,
+              checkpointId: first.checkpointId
+            })
+          })
+        )
+      )
+    );
     expect(insertQueries(client.calls).every((call) => call.sql.includes("on conflict"))).toBe(true);
     expect(first.snapshotIds).toEqual(second.snapshotIds);
     expect(first.freshnessIds).toEqual(second.freshnessIds);
@@ -814,7 +875,11 @@ function expectReplayLineDrilldown(
 }
 
 function reportSnapshotLineRows(calls: readonly QueryCall[]): readonly Record<string, unknown>[] {
-  return calls.filter((call) => call.sql.includes('"report_snapshot_lines"')).flatMap(insertedRowsFromCall);
+  return insertedRowsForTable(calls, "report_snapshot_lines");
+}
+
+function insertedRowsForTable(calls: readonly QueryCall[], tableName: string): readonly Record<string, unknown>[] {
+  return calls.filter((call) => call.sql.includes(`"${tableName}"`)).flatMap(insertedRowsFromCall);
 }
 
 function insertedRowsFromCall(call: QueryCall): readonly Record<string, unknown>[] {
