@@ -1,10 +1,6 @@
 {
   "name": "@handrail/erp-financials",
-<<<<<<< HEAD
-  "version": "0.1.12",
-=======
-  "version": "0.1.11",
->>>>>>> origin/main
+  "version": "0.1.13",
   "description": "Provider-neutral ERP financial reporting kernel for canonical accounting facts, rollups, snapshots, and report APIs.",
   "type": "module",
   "license": "UNLICENSED",
