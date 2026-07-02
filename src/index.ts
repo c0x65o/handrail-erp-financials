@@ -108,8 +108,10 @@ export {
   assertReportBuilderInputComplete,
   buildBalanceSheetReport,
   buildCashFlowReport,
+  buildIndirectCashFlowReport,
   buildProfitAndLossReport,
-  buildTrialBalanceReport
+  buildTrialBalanceReport,
+  defaultCashFlowActivityForAccount
 } from "./report-builders.js";
 export {
   STANDARD_REPORT_ACCOUNTING_METHODS,
@@ -639,7 +641,9 @@ export type {
   BuiltReport,
   CashFlowActivity,
   CashFlowBuilderInput,
+  CashFlowDerivationMethod,
   CashFlowMetadata,
+  CashFlowMethod,
   CashFlowSupportStatus,
   ReportBuilderInput,
   ReportBuilderMetadata,

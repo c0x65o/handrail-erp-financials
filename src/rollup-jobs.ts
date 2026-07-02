@@ -21,6 +21,7 @@ import type {
 import {
   buildBalanceSheetReport,
   buildCashFlowReport,
+  buildIndirectCashFlowReport,
   buildProfitAndLossReport,
   buildTrialBalanceReport
 } from "./report-builders.js";
@@ -37,7 +38,14 @@ import type {
   RollupReprocessWindow,
   StoredReportSnapshot
 } from "./postgres-storage.js";
-import type { BuiltReport, CashFlowBuilderInput, CashFlowMetadata, ReportBuilderInput, ReportName } from "./report-builders.js";
+import type {
+  BuiltReport,
+  CashFlowBuilderInput,
+  CashFlowMetadata,
+  CashFlowMethod,
+  ReportBuilderInput,
+  ReportName
+} from "./report-builders.js";
 
 export type RollupBuildInput = {
   readonly companyId: string;
@@ -295,7 +303,9 @@ export type SnapshotRefreshContract = {
 
 export type SnapshotRefreshJobName = "erp-financials-snapshot-refresh";
 
-export type SnapshotRefreshCashFlowOptions = Pick<CashFlowBuilderInput, "cashAccountIds" | "activityByAccountId">;
+export type SnapshotRefreshCashFlowOptions = Pick<CashFlowBuilderInput, "cashAccountIds" | "activityByAccountId"> & {
+  readonly method?: CashFlowMethod;
+};
 
 export type SnapshotRefreshStorage = Pick<
   PostgresStorageAdapter,
@@ -851,12 +861,16 @@ function buildSnapshotRefreshReport(
       return buildBalanceSheetReport(input);
     case "trial_balance":
       return buildTrialBalanceReport(input);
-    case "cash_flow":
-      return buildCashFlowReport({
+    case "cash_flow": {
+      const cashFlowInput = {
         ...input,
         cashAccountIds: cashFlow?.cashAccountIds ?? [],
         activityByAccountId: cashFlow?.activityByAccountId ?? {}
-      });
+      };
+      return cashFlow?.method === "indirect"
+        ? buildIndirectCashFlowReport(cashFlowInput)
+        : buildCashFlowReport(cashFlowInput);
+    }
   }
 }
 

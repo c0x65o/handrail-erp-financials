@@ -5,8 +5,10 @@ import {
   ERP_FINANCIALS_STATEMENT_FIXTURE,
   buildBalanceSheetReport,
   buildCashFlowReport,
+  buildIndirectCashFlowReport,
   buildProfitAndLossReport,
   buildTrialBalanceReport,
+  defaultCashFlowActivityForAccount,
   validateAccountHierarchy
 } from "../src/index.js";
 
@@ -46,14 +48,36 @@ describe("deterministic fixture/reference report builders from canonical posting
     expectEveryMaterialOutputHasDrilldown(report);
   });
 
-  it("builds a balanced balance sheet and includes current period earnings", () => {
+  it("builds a balanced balance sheet and includes in-period net income in equity", () => {
     const report = buildBalanceSheetReport(reportRequest);
 
     expectTotals(report, fixture.expectedTotals.balanceSheet);
     expect(report.snapshot.reconciliationStatus).toBe("balanced");
     expect(report.snapshot.reconciliationDifference).toBe("0.00");
-    expect(report.lines.find((line) => line.label === "Current Period Earnings")?.amount).toBe("13800.00");
+    expect(report.lines.find((line) => line.label === "Net Income")?.amount).toBe("13800.00");
+    expect(report.lines.find((line) => line.label === "Retained Earnings")).toBeUndefined();
     expectEveryMaterialOutputHasDrilldown(report);
+  });
+
+  it("rolls prior-period earnings into a retained earnings equity line so any period balances", () => {
+    const priorPeriodPostings = reportRequest.postings.map((posting) => ({
+      ...posting,
+      postingId: `${posting.postingId}_prior`,
+      sourcePostingId: `${posting.sourcePostingId}_prior`,
+      transactionId: `${posting.transactionId}_prior`,
+      postingDate: "2025-11-15"
+    }));
+    const report = buildBalanceSheetReport({
+      ...reportRequest,
+      postings: [...priorPeriodPostings, ...reportRequest.postings]
+    });
+
+    const retainedEarnings = report.lines.find((line) => line.label === "Retained Earnings");
+    const netIncome = report.lines.find((line) => line.label === "Net Income");
+    expect(retainedEarnings?.amount).toBe("13800.00");
+    expect(netIncome?.amount).toBe("13800.00");
+    expect(report.snapshot.reconciliationStatus).toBe("balanced");
+    expect(report.snapshot.reconciliationDifference).toBe("0.00");
   });
 
   it("rolls up nested balance sheet accounts without double-counting visible child rows", () => {
@@ -105,7 +129,7 @@ describe("deterministic fixture/reference report builders from canonical posting
     const liabilityChild = requiredLine(report, "acct_nested_liability_child");
     const equityParent = requiredLine(report, "acct_nested_equity_parent");
     const equityChild = requiredLine(report, "acct_nested_equity_child");
-    const currentEarningsLine = report.lines.find((line) => line.label === "Current Period Earnings");
+    const currentEarningsLine = report.lines.find((line) => line.label === "Net Income");
 
     expect(assetParent.reportLineId).toBe("balance_sheet:line:account:acct_nested_asset_parent");
     expect(assetParent.amount).toBe("600.00");
@@ -272,6 +296,137 @@ describe("deterministic fixture/reference report builders from canonical posting
     expect(report.metadata.cashFlow?.unsupportedReasons).toEqual(["cash_flow_has_unclassified_cash_movement"]);
     expect(report.metadata.cashFlow?.unclassifiedCashMovementPostingIds).toEqual(["post_unclassified_cash"]);
     expectEveryMaterialOutputHasDrilldown(report);
+  });
+
+  it("builds an indirect cash flow statement from net income and balance sheet movements", () => {
+    const accounts = [
+      accountLike("acct_icf_cash", "1000", "Checking", "asset"),
+      accountLike("acct_icf_ar", "1200", "Accounts Receivable", "asset"),
+      { ...accountLike("acct_icf_equipment", "1500", "Equipment", "asset"), type: "Fixed Asset", subtype: "MachineryAndEquipment" },
+      { ...accountLike("acct_icf_note", "2500", "Note Payable", "liability"), type: "Long Term Liability", subtype: "NotesPayable" },
+      accountLike("acct_icf_opening_equity", "3000", "Opening Balance Equity", "equity"),
+      accountLike("acct_icf_income", "4000", "Service Revenue", "income")
+    ];
+    const prior = (postingId: string, accountId: string, debit: string, credit: string) => ({
+      ...postingLike(postingId, accountId, debit, credit),
+      postingDate: "2025-12-15"
+    });
+    const postings = [
+      // Prior period: opening cash funded by equity (beginning cash 200).
+      prior("post_icf_opening_cash", "acct_icf_cash", "200.00", "0.00"),
+      prior("post_icf_opening_equity", "acct_icf_opening_equity", "0.00", "200.00"),
+      // Invoice: revenue earned on credit.
+      postingLike("post_icf_invoice_ar", "acct_icf_ar", "1500.00", "0.00"),
+      postingLike("post_icf_invoice_income", "acct_icf_income", "0.00", "1500.00"),
+      // Customer payment: collects part of the receivable.
+      postingLike("post_icf_payment_cash", "acct_icf_cash", "1000.00", "0.00"),
+      postingLike("post_icf_payment_ar", "acct_icf_ar", "0.00", "1000.00"),
+      // Equipment purchase paid from cash.
+      postingLike("post_icf_equipment", "acct_icf_equipment", "300.00", "0.00"),
+      postingLike("post_icf_equipment_cash", "acct_icf_cash", "0.00", "300.00"),
+      // Loan proceeds.
+      postingLike("post_icf_loan_cash", "acct_icf_cash", "400.00", "0.00"),
+      postingLike("post_icf_loan_note", "acct_icf_note", "0.00", "400.00")
+    ];
+
+    const report = buildIndirectCashFlowReport({
+      ...reportRequest,
+      accounts,
+      postings,
+      cashAccountIds: ["acct_icf_cash"],
+      activityByAccountId: {}
+    });
+
+    expectTotals(report, {
+      net_income: "1500.00",
+      net_operating_cash: "1000.00",
+      net_investing_cash: "-300.00",
+      net_financing_cash: "400.00",
+      net_cash_flow: "1100.00",
+      cash_beginning: "200.00",
+      cash_ending: "1300.00"
+    });
+    expect(report.snapshot.reconciliationStatus).toBe("balanced");
+    expect(report.snapshot.reconciliationDifference).toBe("0.00");
+    expect(report.metadata.cashFlow?.derivationMethod).toBe("indirect_net_income_adjustments");
+    expect(report.metadata.cashFlow?.supportStatus).toBe("supported");
+    expect(report.metadata.cashFlow?.unclassifiedCashMovementPostingIds).toEqual([]);
+    expect(report.lines.map((line) => [line.section, line.label, line.amount])).toEqual([
+      ["operating", "Net Income", "1500.00"],
+      // AR grew 500, consuming cash (default operating classification).
+      ["operating", "1200 Accounts Receivable", "-500.00"],
+      // Fixed asset purchase classified investing by default.
+      ["investing", "1500 Equipment", "-300.00"],
+      // Long-term note proceeds classified financing by default.
+      ["financing", "2500 Note Payable", "400.00"]
+    ]);
+    expectEveryMaterialOutputHasDrilldown(report);
+  });
+
+  it("flags indirect cash flow drift when ledger postings do not balance", () => {
+    const accounts = [
+      accountLike("acct_icf_drift_cash", "1000", "Checking", "asset"),
+      accountLike("acct_icf_drift_income", "4000", "Service Revenue", "income")
+    ];
+    const postings = [
+      // One-sided cash receipt: cash moved without any income or balance
+      // sheet counterpart, so net income + adjustments cannot explain it.
+      postingLike("post_icf_drift_cash", "acct_icf_drift_cash", "250.00", "0.00")
+    ];
+
+    const report = buildIndirectCashFlowReport({
+      ...reportRequest,
+      accounts,
+      postings,
+      cashAccountIds: ["acct_icf_drift_cash"],
+      activityByAccountId: {}
+    });
+
+    expect(report.snapshot.reconciliationStatus).toBe("out_of_balance");
+    expect(report.snapshot.reconciliationDifference).toBe("250.00");
+  });
+
+  it("lets explicit activity overrides beat default indirect classifications", () => {
+    const accounts = [
+      accountLike("acct_icf_override_cash", "1000", "Checking", "asset"),
+      accountLike("acct_icf_override_ar", "1200", "Accounts Receivable", "asset"),
+      accountLike("acct_icf_override_income", "4000", "Service Revenue", "income")
+    ];
+    const postings = [
+      postingLike("post_icf_override_invoice_ar", "acct_icf_override_ar", "500.00", "0.00"),
+      postingLike("post_icf_override_invoice_income", "acct_icf_override_income", "0.00", "500.00")
+    ];
+
+    const report = buildIndirectCashFlowReport({
+      ...reportRequest,
+      accounts,
+      postings,
+      cashAccountIds: ["acct_icf_override_cash"],
+      activityByAccountId: { acct_icf_override_ar: "investing" }
+    });
+
+    const arLine = report.lines.find((line) => line.label === "1200 Accounts Receivable");
+    expect(arLine?.section).toBe("investing");
+    expect(report.totals.find((total) => total.totalKey === "net_investing_cash")?.amount).toBe("-500.00");
+  });
+
+  it("classifies balance sheet accounts with GAAP defaults", () => {
+    const classify = (type: string, classification: Account["classification"], subtype?: string) =>
+      defaultCashFlowActivityForAccount({
+        ...accountLike("acct_classify", "9999", "Classify", classification),
+        type,
+        ...(subtype === undefined ? {} : { subtype })
+      });
+
+    expect(classify("Accounts Receivable", "asset")).toBe("operating");
+    expect(classify("Other Current Asset", "asset", "Inventory")).toBe("operating");
+    expect(classify("Fixed Asset", "asset")).toBe("investing");
+    expect(classify("Other Asset", "asset")).toBe("investing");
+    expect(classify("Accounts Payable", "liability")).toBe("operating");
+    expect(classify("Credit Card", "liability")).toBe("operating");
+    expect(classify("Long Term Liability", "liability", "NotesPayable")).toBe("financing");
+    expect(classify("Equity", "equity")).toBe("financing");
+    expect(classify("Income", "income")).toBeUndefined();
   });
 
   it("includes descendant cash accounts when a cashAccountId points to a parent account", () => {

@@ -1,6 +1,7 @@
 import {
   buildBalanceSheetReport,
   buildCashFlowReport,
+  buildIndirectCashFlowReport,
   buildProfitAndLossReport,
   buildTrialBalanceReport
 } from "./report-builders.js";
@@ -36,7 +37,14 @@ import type {
   NormalizedQuickBooksSourceIdentity
 } from "./normalized-accounting-contracts.js";
 import type { HandrailQuickBooksFullSyncServiceHandler } from "./quickbooks-sync-service.js";
-import type { BuiltReport, CashFlowBuilderInput, CashFlowMetadata, ReportBuilderInput, ReportName } from "./report-builders.js";
+import type {
+  BuiltReport,
+  CashFlowBuilderInput,
+  CashFlowMetadata,
+  CashFlowMethod,
+  ReportBuilderInput,
+  ReportName
+} from "./report-builders.js";
 import type {
   LoadReportBuilderInput,
   LoadReportSnapshotInput,
@@ -60,7 +68,9 @@ export type FutureErpCanonicalReportGenerationRequest = LoadReportBuilderInput &
   readonly preferStoredSnapshot?: boolean;
   readonly persistGeneratedSnapshot?: boolean;
   readonly rollupBucketRequest?: LoadRollupBucketsInput;
-  readonly cashFlow?: Pick<CashFlowBuilderInput, "cashAccountIds" | "activityByAccountId">;
+  readonly cashFlow?: Pick<CashFlowBuilderInput, "cashAccountIds" | "activityByAccountId"> & {
+    readonly method?: CashFlowMethod;
+  };
   readonly sourceFreshThrough?: IsoDateTime;
   readonly importedThrough?: IsoDateTime;
   readonly staleReasons?: readonly string[];
@@ -246,12 +256,16 @@ function buildReportFromCanonicalFacts(
       return buildBalanceSheetReport(input);
     case "trial_balance":
       return buildTrialBalanceReport(input);
-    case "cash_flow":
-      return buildCashFlowReport({
+    case "cash_flow": {
+      const cashFlowInput = {
         ...input,
         cashAccountIds: cashFlowOptions?.cashAccountIds ?? [],
         activityByAccountId: cashFlowOptions?.activityByAccountId ?? {}
-      });
+      };
+      return cashFlowOptions?.method === "indirect"
+        ? buildIndirectCashFlowReport(cashFlowInput)
+        : buildCashFlowReport(cashFlowInput);
+    }
   }
 }
 
@@ -302,7 +316,8 @@ function cashFlowMetadataFromStoredSnapshot(
 
   return {
     supportStatus,
-    derivationMethod: "cash_account_ledger_movement",
+    derivationMethod:
+      cashFlowOptions.method === "indirect" ? "indirect_net_income_adjustments" : "cash_account_ledger_movement",
     cashAccountIds: cashFlowOptions.cashAccountIds,
     unsupportedReasons,
     unclassifiedCashMovementPostingIds: unclassifiedPostingIds

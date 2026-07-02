@@ -1,6 +1,7 @@
 import {
   buildBalanceSheetReport,
   buildCashFlowReport,
+  buildIndirectCashFlowReport,
   buildProfitAndLossReport,
   buildTrialBalanceReport
 } from "./report-builders.js";
@@ -12,7 +13,13 @@ import type {
   LedgerPosting,
   Party
 } from "./canonical-model.js";
-import type { BuiltReport, CashFlowBuilderInput, ReportBuilderInput, ReportName } from "./report-builders.js";
+import type {
+  BuiltReport,
+  CashFlowBuilderInput,
+  CashFlowMethod,
+  ReportBuilderInput,
+  ReportName
+} from "./report-builders.js";
 
 export type StandardReportAccountingMethod = Extract<AccountingBasis, "cash" | "accrual">;
 
@@ -92,7 +99,9 @@ export type StandardReportCompareToRequest = {
 export type StandardReportPresentationRequest = {
   readonly reportName: ReportName;
   readonly reportInput: ReportBuilderInput;
-  readonly cashFlow?: Pick<CashFlowBuilderInput, "cashAccountIds" | "activityByAccountId">;
+  readonly cashFlow?: Pick<CashFlowBuilderInput, "cashAccountIds" | "activityByAccountId"> & {
+    readonly method?: CashFlowMethod;
+  };
   readonly accountingMethod?: StandardReportAccountingMethod;
   readonly displayColumnsBy?: StandardReportDisplayColumnsBy;
   readonly compareTo?: StandardReportCompareToRequest;
@@ -412,12 +421,16 @@ function buildReport(
       return buildBalanceSheetReport(input);
     case "trial_balance":
       return buildTrialBalanceReport(input);
-    case "cash_flow":
-      return buildCashFlowReport({
+    case "cash_flow": {
+      const cashFlowInput = {
         ...input,
         cashAccountIds: cashFlow?.cashAccountIds ?? [],
         activityByAccountId: cashFlow?.activityByAccountId ?? {}
-      });
+      };
+      return cashFlow?.method === "indirect"
+        ? buildIndirectCashFlowReport(cashFlowInput)
+        : buildCashFlowReport(cashFlowInput);
+    }
   }
 }
 

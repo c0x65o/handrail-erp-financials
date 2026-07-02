@@ -115,7 +115,7 @@ const EXPECTED_REPLAY_WRITE_ENTITIES: readonly ReplayWriteEntity[] = [
 ];
 
 const REPORT_NAMES: readonly ReportName[] = ["profit_and_loss", "balance_sheet", "trial_balance", "cash_flow"];
-const EXPECTED_REPLAY_EVIDENCE_HASH = "ebc535c32d5647fdba554331bfea4f31cc3bed990959c3a0262a7a15f6b04413";
+const EXPECTED_REPLAY_EVIDENCE_HASH = "c55a6930164dd00e32e51303cf33a61c9b67c5c7a4cb93a18632e0f19b7babf7";
 
 describe("Future ERP QuickBooks sandbox replay orchestration", () => {
   it("returns a bounded deterministic replay result without credentials or raw provider payloads", async () => {

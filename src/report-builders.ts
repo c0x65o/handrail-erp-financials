@@ -29,6 +29,10 @@ export type ReportName = "profit_and_loss" | "balance_sheet" | "trial_balance" |
 export type ReportSourceKind = "ledger_postings" | "rollup_buckets" | "report_snapshot";
 export type CashFlowActivity = "operating" | "investing" | "financing" | "unclassified";
 export type CashFlowSupportStatus = "supported" | "partial" | "unsupported";
+export type CashFlowMethod = "direct" | "indirect";
+export type CashFlowDerivationMethod =
+  | "cash_account_ledger_movement"
+  | "indirect_net_income_adjustments";
 
 /**
  * Raw-posting formula input for fixture/reference report builders.
@@ -60,7 +64,7 @@ export type CashFlowBuilderInput = ReportBuilderInput & {
 
 export type CashFlowMetadata = {
   readonly supportStatus: CashFlowSupportStatus;
-  readonly derivationMethod: "cash_account_ledger_movement";
+  readonly derivationMethod: CashFlowDerivationMethod;
   readonly cashAccountIds: readonly AccountId[];
   readonly unsupportedReasons: readonly string[];
   readonly unclassifiedCashMovementPostingIds: readonly LedgerPostingId[];
@@ -209,27 +213,46 @@ export function buildBalanceSheetReport(input: ReportBuilderInput): BuiltReport 
       periodEnd: input.periodEnd
     }
   });
-  const currentEarnings = currentEarningsAccumulator(input, accountMap);
+  // GAAP equity roll-forward matching provider (QuickBooks) presentation:
+  // income-statement activity before the report period accumulates into
+  // "Retained Earnings"; in-period activity is presented as "Net Income".
+  // Together they close all P&L postings through the as-of date into equity,
+  // so the balance sheet ties for any reporting period.
+  const balanceSheetAsOfDate = input.asOfDate ?? input.periodEnd;
+  const retainedEarnings = earningsAccumulator(input, accountMap, {
+    before: input.periodStart,
+    key: "retained_earnings",
+    label: "Retained Earnings"
+  });
+  const netIncomeEarnings = earningsAccumulator(input, accountMap, {
+    from: input.periodStart,
+    through: balanceSheetAsOfDate,
+    key: "net_income",
+    label: "Net Income"
+  });
   const lines = [...accountLines];
   const equityAccumulators = [...accumulatorsForSection(directAccumulators, "equity")];
 
-  if (currentEarnings.amountMinor !== 0n) {
-    equityAccumulators.push(currentEarnings);
+  for (const earnings of [retainedEarnings, netIncomeEarnings]) {
+    if (earnings.amountMinor === 0n) {
+      continue;
+    }
+    equityAccumulators.push(earnings);
     lines.push({
       tenantId: input.tenantId,
       reportSnapshotId: snapshot,
-      reportLineId: lineId("balance_sheet", lines.length + 1, "current_earnings"),
+      reportLineId: lineId("balance_sheet", lines.length + 1, earnings.key),
       section: "equity",
-      label: "Current Period Earnings",
-      amount: formatMoney(currentEarnings.amountMinor),
+      label: earnings.label,
+      amount: formatMoney(earnings.amountMinor),
       sortOrder: (lines.length + 1) * 10,
       drilldownRef: drilldownRef(
         input,
         "balance_sheet",
-        currentEarnings.key,
-        currentEarnings.postingIds,
-        currentEarnings.accountIds,
-        currentEarnings.sourceRefs
+        earnings.key,
+        earnings.postingIds,
+        earnings.accountIds,
+        earnings.sourceRefs
       )
     });
   }
@@ -414,6 +437,195 @@ export function buildCashFlowReport(input: CashFlowBuilderInput): BuiltReport {
   });
 }
 
+const INVESTING_ASSET_PATTERN =
+  /fixed|property|plant|equipment|land|building|vehicle|machinery|furniture|leasehold|accumulated[ _-]?depreciation|depletable|intangible|goodwill|long[ _-]?term|investment|security[ _-]?deposit|other[ _-]?asset/i;
+const FINANCING_LIABILITY_PATTERN =
+  /long[ _-]?term|note|loan|mortgage|debt|bond|shareholder|director|line[ _-]?of[ _-]?credit/i;
+
+/**
+ * GAAP-standard default operating/investing/financing classification for
+ * balance-sheet accounts on the indirect cash flow statement:
+ * working-capital assets and current liabilities adjust operating cash,
+ * long-lived assets are investing, debt and equity are financing.
+ * Host-supplied activity maps override these defaults per account.
+ */
+export function defaultCashFlowActivityForAccount(
+  account: Account
+): Exclude<CashFlowActivity, "unclassified"> | undefined {
+  const typeText = `${account.type} ${account.subtype ?? ""}`;
+
+  switch (account.classification) {
+    case "asset":
+      return INVESTING_ASSET_PATTERN.test(typeText) ? "investing" : "operating";
+    case "liability":
+      return FINANCING_LIABILITY_PATTERN.test(typeText) ? "financing" : "operating";
+    case "equity":
+      return "financing";
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Builds the indirect-method cash flow statement (net income plus balance
+ * sheet movements) from canonical postings. This matches the presentation of
+ * provider statements of cash flows (for example QuickBooks): operating cash
+ * starts from net income and adjusts for working-capital changes; investing
+ * and financing sections carry long-lived asset, debt, and equity movements.
+ * The statement reconciles its computed net cash change against the actual
+ * movement in the designated cash accounts.
+ */
+export function buildIndirectCashFlowReport(input: CashFlowBuilderInput): BuiltReport {
+  assertReportBuilderInputComplete(input);
+  const accountMap = createAccountMap(input);
+  const cashAccountIds = expandAccountIdsToDescendants(input.cashAccountIds, accountMap);
+  const snapshot = snapshotId("cash_flow", input);
+  const periodPostings = filterPeriodPostings(input);
+  const beginningCash = filterBeforeDatePostings(input)
+    .filter((posting) => cashAccountIds.has(posting.accountId))
+    .reduce((sum, posting) => sum + signedDebitMinusCredit(posting), 0n);
+  const actualCashMovement = periodPostings
+    .filter((posting) => cashAccountIds.has(posting.accountId))
+    .reduce((sum, posting) => sum + signedDebitMinusCredit(posting), 0n);
+  const netIncome = earningsAccumulator(input, accountMap, {
+    from: input.periodStart,
+    through: input.periodEnd,
+    key: "net_income",
+    label: "Net Income"
+  });
+  const nonCashBalanceSheetPostings = periodPostings.filter((posting) => {
+    if (cashAccountIds.has(posting.accountId)) {
+      return false;
+    }
+    const account = accountMap.get(posting.accountId);
+    return account !== undefined && BALANCE_SHEET_SECTIONS.includes(account.classification);
+  });
+  const balanceChanges = aggregateByAccount(nonCashBalanceSheetPostings, accountMap, signedDebitMinusCredit);
+  const adjustmentsByActivity: Record<Exclude<CashFlowActivity, "unclassified">, LineAccumulator[]> = {
+    operating: [],
+    investing: [],
+    financing: []
+  };
+
+  for (const balance of [...balanceChanges.values()].sort((left, right) =>
+    compareStatementAccountBalances(left, right, BALANCE_SHEET_SECTIONS)
+  )) {
+    if (balance.amountMinor === 0n) {
+      continue;
+    }
+    const activity =
+      cashFlowActivityForAccount(balance.account.accountId, accountMap, input.activityByAccountId) ??
+      defaultCashFlowActivityForAccount(balance.account) ??
+      "operating";
+
+    // Cash impact is the inverse of the account's debit-based movement:
+    // an asset increase consumes cash; a liability or equity increase
+    // (credit movement) provides cash.
+    adjustmentsByActivity[activity].push({
+      key: balance.account.accountId,
+      label: accountLabel(balance.account),
+      section: activity,
+      amountMinor: -balance.amountMinor,
+      postingIds: unique(balance.postingIds),
+      accountIds: [balance.account.accountId],
+      sourceRefs: uniqueSourceRefs(balance.sourceRefs)
+    });
+  }
+
+  const lines: ReportSnapshotLine[] = [];
+  const appendLine = (section: string, key: string, label: string, accumulator: LineAccumulator): void => {
+    lines.push({
+      tenantId: input.tenantId,
+      reportSnapshotId: snapshot,
+      reportLineId: lineId("cash_flow", lines.length + 1, key),
+      section,
+      label,
+      amount: formatMoney(accumulator.amountMinor),
+      sortOrder: (lines.length + 1) * 10,
+      drilldownRef: drilldownRef(
+        input,
+        "cash_flow",
+        key,
+        accumulator.postingIds,
+        accumulator.accountIds,
+        accumulator.sourceRefs
+      )
+    });
+  };
+
+  appendLine("operating", "net_income", "Net Income", netIncome);
+  for (const adjustment of adjustmentsByActivity.operating) {
+    appendLine("operating", `operating:${adjustment.key}`, adjustment.label, adjustment);
+  }
+  for (const adjustment of adjustmentsByActivity.investing) {
+    appendLine("investing", `investing:${adjustment.key}`, adjustment.label, adjustment);
+  }
+  for (const adjustment of adjustmentsByActivity.financing) {
+    appendLine("financing", `financing:${adjustment.key}`, adjustment.label, adjustment);
+  }
+
+  const operatingCash = netIncome.amountMinor + sumLineAmounts(adjustmentsByActivity.operating);
+  const investingCash = sumLineAmounts(adjustmentsByActivity.investing);
+  const financingCash = sumLineAmounts(adjustmentsByActivity.financing);
+  const netCashFlow = operatingCash + investingCash + financingCash;
+  const endingCash = beginningCash + netCashFlow;
+  const operatingAccumulators = [netIncome, ...adjustmentsByActivity.operating];
+  const beginningCashPostingIds = filterBeforeDatePostings(input)
+    .filter((posting) => cashAccountIds.has(posting.accountId))
+    .map((posting) => posting.postingId);
+  const cashPostingIds = periodPostings
+    .filter((posting) => cashAccountIds.has(posting.accountId))
+    .map((posting) => posting.postingId);
+  const totals = [
+    totalFromLines(input, "cash_flow", "net_income", "Net Income", [netIncome]),
+    totalFromLines(
+      input,
+      "cash_flow",
+      "net_operating_cash",
+      "Net Cash from Operating Activities",
+      operatingAccumulators
+    ),
+    totalFromLines(
+      input,
+      "cash_flow",
+      "net_investing_cash",
+      "Net Cash from Investing Activities",
+      adjustmentsByActivity.investing
+    ),
+    totalFromLines(
+      input,
+      "cash_flow",
+      "net_financing_cash",
+      "Net Cash from Financing Activities",
+      adjustmentsByActivity.financing
+    ),
+    cashTotal(
+      input,
+      "net_cash_flow",
+      "Net Change in Cash",
+      netCashFlow,
+      mergeAccountIds(operatingAccumulators, [...adjustmentsByActivity.investing, ...adjustmentsByActivity.financing]),
+      mergePostingIds(operatingAccumulators, [...adjustmentsByActivity.investing, ...adjustmentsByActivity.financing])
+    ),
+    cashTotal(input, "cash_beginning", "Cash at Beginning of Period", beginningCash, [...cashAccountIds], beginningCashPostingIds),
+    cashTotal(input, "cash_ending", "Cash at End of Period", endingCash, [...cashAccountIds], cashPostingIds)
+  ];
+  const reconciliationDifference = actualCashMovement - netCashFlow;
+  const unsupportedReasons = input.cashAccountIds.length === 0 ? ["cash_flow_requires_cash_account_ids"] : [];
+
+  return buildReportResult(input, "cash_flow", lines, totals, {
+    reconciliationStatus: reconciliationDifference === 0n ? "balanced" : "out_of_balance",
+    reconciliationDifference: formatMoney(reconciliationDifference),
+    cashFlow: {
+      supportStatus: input.cashAccountIds.length === 0 ? "unsupported" : "supported",
+      derivationMethod: "indirect_net_income_adjustments",
+      cashAccountIds: input.cashAccountIds,
+      unsupportedReasons,
+      unclassifiedCashMovementPostingIds: []
+    }
+  });
+}
+
 export function assertReportBuilderInputComplete(input: ReportBuilderInput): void {
   const accountMap = createAccountMap(input);
   assertValidAccountHierarchy(input.accounts, { accountsToValidate: [...accountMap.values()] });
@@ -539,12 +751,32 @@ function aggregateByAccount(
   return balances;
 }
 
-function currentEarningsAccumulator(input: ReportBuilderInput, accountMap: ReadonlyMap<AccountId, Account>): LineAccumulator {
-  const postings = filterPeriodPostings(input);
-  const relevant = postings.filter((posting) => {
-    const account = accountMap.get(posting.accountId);
-    return account !== undefined && PROFIT_AND_LOSS_SECTIONS.includes(account.classification);
-  });
+type EarningsWindow = {
+  readonly key: string;
+  readonly label: string;
+  readonly before?: IsoDate;
+  readonly from?: IsoDate;
+  readonly through?: IsoDate;
+};
+
+function earningsAccumulator(
+  input: ReportBuilderInput,
+  accountMap: ReadonlyMap<AccountId, Account>,
+  window: EarningsWindow
+): LineAccumulator & { readonly key: string; readonly label: string } {
+  const relevant = input.postings
+    .filter(
+      (posting) =>
+        postingMatchesReportScope(input, posting) &&
+        (window.before === undefined || posting.postingDate < window.before) &&
+        (window.from === undefined || posting.postingDate >= window.from) &&
+        (window.through === undefined || posting.postingDate <= window.through)
+    )
+    .filter((posting) => {
+      const account = accountMap.get(posting.accountId);
+      return account !== undefined && PROFIT_AND_LOSS_SECTIONS.includes(account.classification);
+    })
+    .sort(comparePostings);
   const amountMinor = relevant.reduce((sum, posting) => {
     const account = accountMap.get(posting.accountId);
     if (account === undefined) {
@@ -557,8 +789,8 @@ function currentEarningsAccumulator(input: ReportBuilderInput, accountMap: Reado
   }, 0n);
 
   return {
-    key: "current_period_earnings",
-    label: "Current Period Earnings",
+    key: window.key,
+    label: window.label,
     amountMinor,
     postingIds: relevant.map((posting) => posting.postingId),
     accountIds: unique(relevant.map((posting) => posting.accountId)),

@@ -115,9 +115,9 @@ describe("Future ERP rollup and late-arrival worker bindings", () => {
       companyId: scope.companyId,
       sourceId: scope.sourceId,
       postingCount: 20,
-      bucketCount: 12
+      bucketCount: 13
     });
-    expect(result.rollupBucketsWritten).toBe(12);
+    expect(result.rollupBucketsWritten).toBe(13);
     expect(result.freshnessRowsWritten).toBe(1);
     expect(result.freshnessRows).toEqual([
       expect.objectContaining({
