@@ -111,7 +111,9 @@ export {
   buildIndirectCashFlowReport,
   buildProfitAndLossReport,
   buildTrialBalanceReport,
-  defaultCashFlowActivityForAccount
+  cashAndCashEquivalentAccountIds,
+  defaultCashFlowActivityForAccount,
+  isCashOrCashEquivalentAccount
 } from "./report-builders.js";
 export {
   STANDARD_REPORT_ACCOUNTING_METHODS,

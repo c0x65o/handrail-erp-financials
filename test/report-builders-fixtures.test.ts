@@ -8,7 +8,9 @@ import {
   buildIndirectCashFlowReport,
   buildProfitAndLossReport,
   buildTrialBalanceReport,
+  cashAndCashEquivalentAccountIds,
   defaultCashFlowActivityForAccount,
+  isCashOrCashEquivalentAccount,
   validateAccountHierarchy
 } from "../src/index.js";
 
@@ -408,6 +410,29 @@ describe("deterministic fixture/reference report builders from canonical posting
     const arLine = report.lines.find((line) => line.label === "1200 Accounts Receivable");
     expect(arLine?.section).toBe("investing");
     expect(report.totals.find((total) => total.totalKey === "net_investing_cash")?.amount).toBe("-500.00");
+  });
+
+  it("treats undeposited funds as cash and cash equivalents for the statement of cash flows", () => {
+    const accounts = [
+      { ...accountLike("acct_cce_checking", "1000", "Checking", "asset"), type: "Bank", subtype: "Checking" },
+      { ...accountLike("acct_cce_savings", "1010", "Savings", "asset"), type: "Bank", subtype: "Savings" },
+      {
+        ...accountLike("acct_cce_undeposited", "1050", "Undeposited Funds", "asset"),
+        type: "Other Current Asset",
+        subtype: "UndepositedFunds"
+      },
+      { ...accountLike("acct_cce_ar", "1200", "Accounts Receivable", "asset"), type: "Accounts Receivable" },
+      { ...accountLike("acct_cce_inventory", "1300", "Inventory Asset", "asset"), type: "Other Current Asset", subtype: "Inventory" },
+      accountLike("acct_cce_income", "4000", "Service Revenue", "income")
+    ];
+
+    expect(cashAndCashEquivalentAccountIds(accounts)).toEqual([
+      "acct_cce_checking",
+      "acct_cce_savings",
+      "acct_cce_undeposited"
+    ]);
+    expect(isCashOrCashEquivalentAccount(accounts[3] as Account)).toBe(false);
+    expect(isCashOrCashEquivalentAccount(accounts[4] as Account)).toBe(false);
   });
 
   it("classifies balance sheet accounts with GAAP defaults", () => {

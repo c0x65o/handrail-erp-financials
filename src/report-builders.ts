@@ -437,6 +437,28 @@ export function buildCashFlowReport(input: CashFlowBuilderInput): BuiltReport {
   });
 }
 
+const CASH_AND_CASH_EQUIVALENT_PATTERN =
+  /bank|checking|savings|money[ _-]?market|cash[ _-]?on[ _-]?hand|petty[ _-]?cash|\bcash\b|undeposited|payments[ _-]?to[ _-]?deposit/i;
+
+/**
+ * Cash and cash equivalents for statement-of-cash-flows purposes, matching
+ * provider (QuickBooks) presentation: bank accounts plus undeposited funds /
+ * payments-to-deposit clearing accounts. Undeposited funds is money already
+ * received and awaiting bank deposit, so it belongs in beginning/ending cash
+ * rather than in operating working-capital adjustments.
+ */
+export function isCashOrCashEquivalentAccount(account: Account): boolean {
+  if (account.classification !== "asset") {
+    return false;
+  }
+
+  return CASH_AND_CASH_EQUIVALENT_PATTERN.test(`${account.type} ${account.subtype ?? ""} ${account.name}`);
+}
+
+export function cashAndCashEquivalentAccountIds(accounts: readonly Account[]): AccountId[] {
+  return accounts.filter(isCashOrCashEquivalentAccount).map((account) => account.accountId);
+}
+
 const INVESTING_ASSET_PATTERN =
   /fixed|property|plant|equipment|land|building|vehicle|machinery|furniture|leasehold|accumulated[ _-]?depreciation|depletable|intangible|goodwill|long[ _-]?term|investment|security[ _-]?deposit|other[ _-]?asset/i;
 const FINANCING_LIABILITY_PATTERN =
