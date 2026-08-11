@@ -54,9 +54,24 @@ const profitAndLoss = buildProfitAndLossReport({
 The initial schema foundation exports provider-neutral canonical accounting
 types plus a versioned Postgres manifest for host-app installs. The manifest
 covers companies, sources, accounts, parties, items, dimensions, transactions,
-transaction lines, ledger postings, import batches, sync checkpoints, and report
+transaction lines, ledger postings, posting rules, transaction match audit
+records, payment applications, import batches, sync checkpoints, and report
 snapshot tables. It intentionally stores safe source references and bounded JSON
 refs, not provider OAuth tokens or raw unbounded provider payloads.
+
+Posting rules and transaction matching are provider-neutral package contracts.
+Host ERP apps supply tenant-specific rule configuration, permissions, and
+approval UI. Provider postings that are already authoritative can continue to
+bypass local rule evaluation and enter through the source adapter unchanged.
+
+`evaluatePostingRules(...)` evaluates active rules within the transaction's
+tenant/source and inclusive effective-date window. Lower numeric priority wins.
+If multiple rules match at the winning priority, evaluation returns
+`ambiguous` without creating a proposal. Successful proposals use exact integer
+cent arithmetic, deterministic half-up percentage rounding, and must balance
+debits to credits before they can be returned. Every proposed account is also
+required to exist and be active in the canonical chart of accounts supplied to
+the evaluator.
 Canonical account hierarchy behavior is provider-neutral and defined in
 [docs/account-hierarchy-rules.md](docs/account-hierarchy-rules.md), including
 parent postings, descendant totals, inactive parents, invalid parent

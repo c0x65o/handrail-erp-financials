@@ -22,6 +22,13 @@ export {
   createDimensionHash
 } from "./canonical-model.js";
 export {
+  assertPaymentApplication,
+  assertPostingRule,
+  assertTransactionMatchCandidate,
+  assertTransactionMatchDecision
+} from "./transaction-matching.js";
+export { evaluatePostingRules } from "./posting-rule-engine.js";
+export {
   DISALLOWED_CREDENTIAL_COLUMN_PATTERNS,
   POSTGRES_CANONICAL_SCHEMA_MANIFEST,
   assertManifestHasNoCredentialColumns,
@@ -246,6 +253,42 @@ export type {
   TransactionStatus,
   CompactDrilldownRefInput
 } from "./canonical-model.js";
+export type {
+  PaymentApplication,
+  PaymentApplicationId,
+  PaymentApplicationStatus,
+  PostingRule,
+  PostingRuleAction,
+  PostingRuleAmountCondition,
+  PostingRuleAmountOperator,
+  PostingRuleAmountSource,
+  PostingRuleCondition,
+  PostingRuleConditionMode,
+  PostingRuleId,
+  PostingRuleStatus,
+  PostingRuleStringCondition,
+  PostingRuleStringField,
+  PostingRuleStringOperator,
+  TransactionMatchCandidate,
+  TransactionMatchCandidateId,
+  TransactionMatchCandidateStatus,
+  TransactionMatchCriterion,
+  TransactionMatchDecision,
+  TransactionMatchDecisionId,
+  TransactionMatchDecisionMethod,
+  TransactionMatchDecisionValue,
+  TransactionMatchEvidence,
+  TransactionMatchKind
+} from "./transaction-matching.js";
+export type {
+  PostingRuleAccount,
+  PostingRuleEvaluationInput,
+  PostingRuleEvaluationIssue,
+  PostingRuleEvaluationIssueCode,
+  PostingRuleEvaluationResult,
+  PostingRulePostingProposal,
+  PostingRuleProposalLine
+} from "./posting-rule-engine.js";
 export type {
   StandardReportAccountingMethod,
   StandardReportColumnKind,

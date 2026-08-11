@@ -42,8 +42,8 @@ export type PostgresTableManifest = {
 };
 
 export type PostgresSchemaManifest = {
-  readonly manifestVersion: "2026-06-19.storage-v1";
-  readonly schemaVersion: 5;
+  readonly manifestVersion: "2026-08-11.transaction-matching-v1";
+  readonly schemaVersion: 6;
   readonly dialect: "postgres";
   readonly namespace: "erp_financials";
   readonly tables: readonly PostgresTableManifest[];
@@ -118,8 +118,8 @@ const table = (
 });
 
 export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
-  manifestVersion: "2026-06-19.storage-v1",
-  schemaVersion: 5,
+  manifestVersion: "2026-08-11.transaction-matching-v1",
+  schemaVersion: 6,
   dialect: "postgres",
   namespace: "erp_financials",
   tables: [
@@ -394,6 +394,220 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         {
           name: "ledger_postings_import_batch_idx",
           columns: ["tenant_id", "import_batch_id"]
+        }
+      ]
+    ),
+    table(
+      "posting_rules",
+      "Provider-neutral transaction conditions and deterministic posting actions.",
+      [
+        id("posting_rule_id"),
+        text("tenant_id"),
+        text("source_id"),
+        text("rule_code"),
+        text("name"),
+        text("description", true),
+        integer("priority"),
+        text("status"),
+        text("condition_mode"),
+        jsonb("conditions", 4096, false),
+        jsonb("actions", 4096, false),
+        date("effective_from", true),
+        date("effective_through", true),
+        timestamp("created_at"),
+        timestamp("updated_at")
+      ],
+      [
+        {
+          name: "posting_rules_priority_check",
+          sql: "priority >= 0"
+        },
+        {
+          name: "posting_rules_effective_period_check",
+          sql: "effective_from is null or effective_through is null or effective_from <= effective_through"
+        },
+        {
+          name: "posting_rules_status_check",
+          sql: "status in ('draft', 'active', 'inactive', 'archived')"
+        },
+        {
+          name: "posting_rules_condition_mode_check",
+          sql: "condition_mode in ('all', 'any')"
+        },
+        {
+          name: "posting_rules_json_shape_check",
+          sql: "jsonb_typeof(conditions) = 'array' and jsonb_array_length(conditions) > 0 and jsonb_typeof(actions) = 'array' and jsonb_array_length(actions) > 0"
+        },
+        {
+          name: "posting_rules_updated_at_check",
+          sql: "updated_at >= created_at"
+        }
+      ],
+      [
+        {
+          name: "posting_rules_code_uidx",
+          columns: ["tenant_id", "source_id", "rule_code"],
+          unique: true
+        },
+        {
+          name: "posting_rules_active_priority_idx",
+          columns: ["tenant_id", "source_id", "status", "priority", "rule_code"]
+        }
+      ]
+    ),
+    table(
+      "transaction_match_candidates",
+      "Versioned candidate links between payments and receivable or payable transactions.",
+      [
+        id("match_candidate_id"),
+        text("tenant_id"),
+        text("source_id"),
+        text("match_kind"),
+        text("origin_transaction_id"),
+        text("target_transaction_id"),
+        text("matcher_version"),
+        numeric("score"),
+        numeric("suggested_application_amount"),
+        text("currency_code"),
+        text("status"),
+        jsonb("evidence", 4096, false),
+        timestamp("created_at"),
+        timestamp("expires_at", true)
+      ],
+      [
+        {
+          name: "transaction_match_candidates_score_check",
+          sql: "score >= 0 and score <= 1"
+        },
+        {
+          name: "transaction_match_candidates_amount_check",
+          sql: "suggested_application_amount > 0"
+        },
+        {
+          name: "transaction_match_candidates_expiry_check",
+          sql: "expires_at is null or expires_at > created_at"
+        },
+        {
+          name: "transaction_match_candidates_kind_check",
+          sql: "match_kind in ('customer_payment_to_invoice', 'vendor_payment_to_bill')"
+        },
+        {
+          name: "transaction_match_candidates_status_check",
+          sql: "status in ('suggested', 'accepted', 'rejected', 'expired', 'superseded')"
+        },
+        {
+          name: "transaction_match_candidates_distinct_transactions_check",
+          sql: "origin_transaction_id <> target_transaction_id"
+        },
+        {
+          name: "transaction_match_candidates_evidence_shape_check",
+          sql: "jsonb_typeof(evidence) = 'array' and jsonb_array_length(evidence) > 0"
+        }
+      ],
+      [
+        {
+          name: "transaction_match_candidates_identity_uidx",
+          columns: [
+            "tenant_id",
+            "source_id",
+            "match_kind",
+            "origin_transaction_id",
+            "target_transaction_id",
+            "matcher_version"
+          ],
+          unique: true
+        },
+        {
+          name: "transaction_match_candidates_origin_status_idx",
+          columns: ["tenant_id", "source_id", "origin_transaction_id", "status", "score"]
+        }
+      ]
+    ),
+    table(
+      "transaction_match_decisions",
+      "Append-only audit decisions for proposed transaction matches.",
+      [
+        id("match_decision_id"),
+        text("tenant_id"),
+        text("source_id"),
+        text("match_candidate_id"),
+        text("decision"),
+        text("method"),
+        timestamp("decided_at"),
+        text("decided_by_ref", true),
+        text("reason", true),
+        jsonb("evidence")
+      ],
+      [
+        {
+          name: "transaction_match_decisions_value_check",
+          sql: "decision in ('accepted', 'rejected', 'superseded')"
+        },
+        {
+          name: "transaction_match_decisions_method_check",
+          sql: "method in ('automatic', 'manual')"
+        },
+        {
+          name: "transaction_match_decisions_manual_actor_check",
+          sql: "method <> 'manual' or (decided_by_ref is not null and btrim(decided_by_ref) <> '')"
+        }
+      ],
+      [
+        {
+          name: "transaction_match_decisions_identity_uidx",
+          columns: ["tenant_id", "source_id", "match_decision_id"],
+          unique: true
+        },
+        {
+          name: "transaction_match_decisions_candidate_idx",
+          columns: ["tenant_id", "source_id", "match_candidate_id", "decided_at"]
+        }
+      ]
+    ),
+    table(
+      "payment_applications",
+      "Auditable allocations of customer payments to invoices.",
+      [
+        id("payment_application_id"),
+        text("tenant_id"),
+        text("source_id"),
+        text("payment_transaction_id"),
+        text("invoice_transaction_id"),
+        text("match_decision_id", true),
+        numeric("applied_amount"),
+        text("currency_code"),
+        date("application_date"),
+        text("status"),
+        timestamp("created_at"),
+        timestamp("updated_at")
+      ],
+      [
+        {
+          name: "payment_applications_amount_check",
+          sql: "applied_amount > 0"
+        },
+        {
+          name: "payment_applications_status_check",
+          sql: "status in ('proposed', 'posted', 'voided')"
+        },
+        {
+          name: "payment_applications_distinct_transactions_check",
+          sql: "payment_transaction_id <> invoice_transaction_id"
+        },
+        {
+          name: "payment_applications_updated_at_check",
+          sql: "updated_at >= created_at"
+        }
+      ],
+      [
+        {
+          name: "payment_applications_identity_uidx",
+          columns: ["tenant_id", "source_id", "payment_transaction_id", "invoice_transaction_id"],
+          unique: true
+        },
+        {
+          name: "payment_applications_invoice_status_idx",
+          columns: ["tenant_id", "source_id", "invoice_transaction_id", "status", "application_date"]
         }
       ]
     ),

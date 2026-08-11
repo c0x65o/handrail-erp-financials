@@ -50,7 +50,7 @@ describe("serialized evidence credential and raw payload boundary", () => {
     );
 
     expect(forbiddenColumns).toEqual([]);
-    expect(jsonColumns).toHaveLength(10);
+    expect(jsonColumns).toHaveLength(14);
     expect(jsonColumns.every((column) => column.maxBytes === DEFAULT_JSON_REF_MAX_BYTES)).toBe(true);
     expect(FUTURE_ERP_CANONICAL_SCHEMA_MIGRATION_SQL).toBe(renderPostgresSchemaSql());
     expect(FUTURE_ERP_CANONICAL_SCHEMA_MIGRATION_SQL).not.toMatch(PROVIDER_CREDENTIAL_OR_RAW_PAYLOAD_KEY_PATTERN);

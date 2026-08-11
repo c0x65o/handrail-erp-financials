@@ -36,6 +36,18 @@ import {
   assertSafeSourcePayloadRef,
   createCompactDrilldownRef
 } from "./canonical-model.js";
+import {
+  assertPaymentApplication,
+  assertPostingRule,
+  assertTransactionMatchCandidate,
+  assertTransactionMatchDecision
+} from "./transaction-matching.js";
+import type {
+  PaymentApplication,
+  PostingRule,
+  TransactionMatchCandidate,
+  TransactionMatchDecision
+} from "./transaction-matching.js";
 import { buildAccountHierarchyRollupLines } from "./account-hierarchy-rollup-lines.js";
 import type { BuiltReport, ReportBuilderInput, ReportName } from "./report-builders.js";
 import type { AccountHierarchyRollupLineAmount } from "./account-hierarchy-rollup-lines.js";
@@ -248,6 +260,10 @@ export type PostgresStorageAdapter = StandardReportPresentationReadModelStorage 
   upsertTransactions(transactions: readonly AccountingTransaction[]): Promise<number>;
   upsertTransactionLines(lines: readonly TransactionLine[]): Promise<number>;
   upsertLedgerPostings(postings: readonly LedgerPosting[]): Promise<number>;
+  upsertPostingRules(rules: readonly PostingRule[]): Promise<number>;
+  upsertTransactionMatchCandidates(candidates: readonly TransactionMatchCandidate[]): Promise<number>;
+  recordTransactionMatchDecisions(decisions: readonly TransactionMatchDecision[]): Promise<number>;
+  upsertPaymentApplications(applications: readonly PaymentApplication[]): Promise<number>;
   deleteLedgerFactsOutsideImportBatch(
     input: DeleteLedgerFactsOutsideImportBatchInput
   ): Promise<DeleteLedgerFactsOutsideImportBatchResult>;
@@ -439,6 +455,45 @@ export function createPostgresStorageAdapter(
         "source_id",
         "accounting_basis",
         "source_posting_id"
+      ]);
+    },
+    async upsertPostingRules(rules) {
+      rules.forEach(assertPostingRule);
+      return upsertRows(client, manifest, "posting_rules", rules.map(postingRuleRow), [
+        "tenant_id",
+        "source_id",
+        "rule_code"
+      ]);
+    },
+    async upsertTransactionMatchCandidates(candidates) {
+      candidates.forEach(assertTransactionMatchCandidate);
+      return upsertRows(client, manifest, "transaction_match_candidates", candidates.map(transactionMatchCandidateRow), [
+        "tenant_id",
+        "source_id",
+        "match_kind",
+        "origin_transaction_id",
+        "target_transaction_id",
+        "matcher_version"
+      ]);
+    },
+    async recordTransactionMatchDecisions(decisions) {
+      decisions.forEach(assertTransactionMatchDecision);
+      return upsertRows(
+        client,
+        manifest,
+        "transaction_match_decisions",
+        decisions.map(transactionMatchDecisionRow),
+        ["tenant_id", "source_id", "match_decision_id"],
+        "nothing"
+      );
+    },
+    async upsertPaymentApplications(applications) {
+      applications.forEach(assertPaymentApplication);
+      return upsertRows(client, manifest, "payment_applications", applications.map(paymentApplicationRow), [
+        "tenant_id",
+        "source_id",
+        "payment_transaction_id",
+        "invoice_transaction_id"
       ]);
     },
     async deleteLedgerFactsOutsideImportBatch(input) {
@@ -2162,7 +2217,8 @@ async function upsertRows(
   manifest: PostgresSchemaManifest,
   tableName: string,
   rows: readonly Row[],
-  conflictColumns: readonly string[]
+  conflictColumns: readonly string[],
+  conflictAction: "update" | "nothing" = "update"
 ): Promise<number> {
   if (rows.length === 0) {
     return 0;
@@ -2184,7 +2240,7 @@ async function upsertRows(
     .join(",\n  ");
   const nonConflictColumns = columns.filter((column) => !conflictColumns.includes(column));
   const updateSql =
-    nonConflictColumns.length === 0
+    conflictAction === "nothing" || nonConflictColumns.length === 0
       ? "do nothing"
       : `do update set ${nonConflictColumns
           .map((column) => `${quoteIdentifier(column)} = excluded.${quoteIdentifier(column)}`)
@@ -2391,6 +2447,77 @@ function ledgerPostingRow(posting: LedgerPosting): Row {
     source_payload_ref: posting.sourcePayloadRef,
     import_batch_id: posting.importBatchId,
     checkpoint_id: posting.checkpointId
+  };
+}
+
+function postingRuleRow(rule: PostingRule): Row {
+  return {
+    posting_rule_id: rule.postingRuleId,
+    tenant_id: rule.tenantId,
+    source_id: rule.sourceId,
+    rule_code: rule.ruleCode,
+    name: rule.name,
+    description: rule.description,
+    priority: rule.priority,
+    status: rule.status,
+    condition_mode: rule.conditionMode,
+    conditions: rule.conditions,
+    actions: rule.actions,
+    effective_from: rule.effectiveFrom,
+    effective_through: rule.effectiveThrough,
+    created_at: rule.createdAt,
+    updated_at: rule.updatedAt
+  };
+}
+
+function transactionMatchCandidateRow(candidate: TransactionMatchCandidate): Row {
+  return {
+    match_candidate_id: candidate.matchCandidateId,
+    tenant_id: candidate.tenantId,
+    source_id: candidate.sourceId,
+    match_kind: candidate.matchKind,
+    origin_transaction_id: candidate.originTransactionId,
+    target_transaction_id: candidate.targetTransactionId,
+    matcher_version: candidate.matcherVersion,
+    score: candidate.score,
+    suggested_application_amount: candidate.suggestedApplicationAmount,
+    currency_code: candidate.currencyCode,
+    status: candidate.status,
+    evidence: candidate.evidence,
+    created_at: candidate.createdAt,
+    expires_at: candidate.expiresAt
+  };
+}
+
+function transactionMatchDecisionRow(decision: TransactionMatchDecision): Row {
+  return {
+    match_decision_id: decision.matchDecisionId,
+    tenant_id: decision.tenantId,
+    source_id: decision.sourceId,
+    match_candidate_id: decision.matchCandidateId,
+    decision: decision.decision,
+    method: decision.method,
+    decided_at: decision.decidedAt,
+    decided_by_ref: decision.decidedByRef,
+    reason: decision.reason,
+    evidence: decision.evidence
+  };
+}
+
+function paymentApplicationRow(application: PaymentApplication): Row {
+  return {
+    payment_application_id: application.paymentApplicationId,
+    tenant_id: application.tenantId,
+    source_id: application.sourceId,
+    payment_transaction_id: application.paymentTransactionId,
+    invoice_transaction_id: application.invoiceTransactionId,
+    match_decision_id: application.matchDecisionId,
+    applied_amount: application.appliedAmount,
+    currency_code: application.currencyCode,
+    application_date: application.applicationDate,
+    status: application.status,
+    created_at: application.createdAt,
+    updated_at: application.updatedAt
   };
 }
 

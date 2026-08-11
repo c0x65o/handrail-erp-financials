@@ -87,7 +87,7 @@ describe("Future ERP app-owned storage and reporting boundary audit", () => {
     expect(migrationTables.map((table) => table.name)).toEqual(manifestTableNames);
     expect(forbiddenNames).toEqual([]);
     expect(FUTURE_ERP_CANONICAL_SCHEMA_MIGRATION_SQL).not.toMatch(PROVIDER_CREDENTIAL_OR_RAW_PAYLOAD_KEY_PATTERN);
-    expect(jsonColumns).toHaveLength(10);
+    expect(jsonColumns).toHaveLength(14);
     expect(jsonColumns.every((column) => column.maxBytes === DEFAULT_JSON_REF_MAX_BYTES)).toBe(true);
     for (const column of jsonColumns) {
       expect(FUTURE_ERP_CANONICAL_SCHEMA_MIGRATION_SQL).toContain(

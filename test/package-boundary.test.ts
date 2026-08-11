@@ -53,6 +53,7 @@ describe("package boundary", () => {
     expect(ERP_FINANCIALS_PACKAGE.name).toBe("@handrail/erp-financials");
     expect(PACKAGE_BOUNDARY.purpose).toContain("provider-neutral");
     expect(PACKAGE_BOUNDARY.owns).toContain("canonical accounting facts");
+    expect(PACKAGE_BOUNDARY.owns).toContain("transaction matching and posting rule evaluation");
     expect(PACKAGE_BOUNDARY.owns).toContain("rollup and snapshot jobs");
     expect(PACKAGE_BOUNDARY.owns).toContain("deterministic fixture/reference report formulas");
     expect(publicAccountId("acct_cash")).toBe("acct_cash");

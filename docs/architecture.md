@@ -9,6 +9,7 @@ native ERP data.
 The package should standardize:
 
 - canonical accounting facts
+- provider-neutral transaction matching and posting rule contracts
 - database migration manifests
 - report read models
 - rollup and snapshot jobs

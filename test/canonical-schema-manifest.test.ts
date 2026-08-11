@@ -20,8 +20,8 @@ const FUTURE_ERP_CANONICAL_SCHEMA_MIGRATION_SQL = readFileSync(
 
 describe("canonical schema manifest", () => {
   it("is versioned and covers the documented canonical entities", () => {
-    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.manifestVersion).toBe("2026-06-19.storage-v1");
-    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion).toBe(5);
+    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.manifestVersion).toBe("2026-08-11.transaction-matching-v1");
+    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion).toBe(6);
 
     const tableNames = POSTGRES_CANONICAL_SCHEMA_MANIFEST.tables.map((table) => table.name);
 
@@ -35,6 +35,10 @@ describe("canonical schema manifest", () => {
       "transactions",
       "transaction_lines",
       "ledger_postings",
+      "posting_rules",
+      "transaction_match_candidates",
+      "transaction_match_decisions",
+      "payment_applications",
       "rollup_buckets",
       "import_batches",
       "sync_checkpoints",
@@ -58,6 +62,27 @@ describe("canonical schema manifest", () => {
     );
     expect(firstRender).toContain(
       'create index if not exists "accounts_parent_account_idx" on "erp_financials"."accounts" ("tenant_id", "source_id", "parent_account_id");'
+    );
+    expect(firstRender).toContain(
+      'create unique index if not exists "posting_rules_code_uidx" on "erp_financials"."posting_rules" ("tenant_id", "source_id", "rule_code");'
+    );
+    expect(firstRender).toContain(
+      'create unique index if not exists "transaction_match_candidates_identity_uidx" on "erp_financials"."transaction_match_candidates" ("tenant_id", "source_id", "match_kind", "origin_transaction_id", "target_transaction_id", "matcher_version");'
+    );
+    expect(firstRender).toContain(
+      "constraint \"payment_applications_amount_check\" check (applied_amount > 0)"
+    );
+    expect(firstRender).toContain(
+      "constraint \"posting_rules_json_shape_check\" check (jsonb_typeof(conditions) = 'array' and jsonb_array_length(conditions) > 0 and jsonb_typeof(actions) = 'array' and jsonb_array_length(actions) > 0)"
+    );
+    expect(firstRender).toContain(
+      "constraint \"transaction_match_candidates_distinct_transactions_check\" check (origin_transaction_id <> target_transaction_id)"
+    );
+    expect(firstRender).toContain(
+      "constraint \"transaction_match_decisions_manual_actor_check\" check (method <> 'manual' or (decided_by_ref is not null and btrim(decided_by_ref) <> ''))"
+    );
+    expect(firstRender).toContain(
+      "constraint \"payment_applications_updated_at_check\" check (updated_at >= created_at)"
     );
     expect(firstRender).toContain(
       'create unique index if not exists "rollup_buckets_identity_uidx" on "erp_financials"."rollup_buckets" ("tenant_id", "company_id", "source_id", "accounting_basis", "bucket_grain", "bucket_start", "bucket_end", "account_id", "currency_code", "dimension_hash", "party_id", "party_type", "item_id");'

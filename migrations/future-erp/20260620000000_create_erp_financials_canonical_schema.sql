@@ -175,6 +175,113 @@ create index if not exists "ledger_postings_report_idx" on "erp_financials"."led
 
 create index if not exists "ledger_postings_import_batch_idx" on "erp_financials"."ledger_postings" ("tenant_id", "import_batch_id");
 
+create table if not exists "erp_financials"."posting_rules" (
+  "posting_rule_id" text not null,
+  "tenant_id" text not null,
+  "source_id" text not null,
+  "rule_code" text not null,
+  "name" text not null,
+  "description" text,
+  "priority" integer not null,
+  "status" text not null,
+  "condition_mode" text not null,
+  "conditions" jsonb not null,
+  "actions" jsonb not null,
+  "effective_from" date,
+  "effective_through" date,
+  "created_at" timestamptz not null,
+  "updated_at" timestamptz not null,
+  constraint "posting_rules_pkey" primary key ("posting_rule_id"),
+  constraint "posting_rules_priority_check" check (priority >= 0),
+  constraint "posting_rules_effective_period_check" check (effective_from is null or effective_through is null or effective_from <= effective_through),
+  constraint "posting_rules_status_check" check (status in ('draft', 'active', 'inactive', 'archived')),
+  constraint "posting_rules_condition_mode_check" check (condition_mode in ('all', 'any')),
+  constraint "posting_rules_json_shape_check" check (jsonb_typeof(conditions) = 'array' and jsonb_array_length(conditions) > 0 and jsonb_typeof(actions) = 'array' and jsonb_array_length(actions) > 0),
+  constraint "posting_rules_updated_at_check" check (updated_at >= created_at),
+  constraint "posting_rules_conditions_bounded_json_check" check (octet_length(coalesce("conditions"::text, '')) <= 4096),
+  constraint "posting_rules_actions_bounded_json_check" check (octet_length(coalesce("actions"::text, '')) <= 4096)
+);
+
+create unique index if not exists "posting_rules_code_uidx" on "erp_financials"."posting_rules" ("tenant_id", "source_id", "rule_code");
+
+create index if not exists "posting_rules_active_priority_idx" on "erp_financials"."posting_rules" ("tenant_id", "source_id", "status", "priority", "rule_code");
+
+create table if not exists "erp_financials"."transaction_match_candidates" (
+  "match_candidate_id" text not null,
+  "tenant_id" text not null,
+  "source_id" text not null,
+  "match_kind" text not null,
+  "origin_transaction_id" text not null,
+  "target_transaction_id" text not null,
+  "matcher_version" text not null,
+  "score" numeric not null,
+  "suggested_application_amount" numeric not null,
+  "currency_code" text not null,
+  "status" text not null,
+  "evidence" jsonb not null,
+  "created_at" timestamptz not null,
+  "expires_at" timestamptz,
+  constraint "transaction_match_candidates_pkey" primary key ("match_candidate_id"),
+  constraint "transaction_match_candidates_score_check" check (score >= 0 and score <= 1),
+  constraint "transaction_match_candidates_amount_check" check (suggested_application_amount > 0),
+  constraint "transaction_match_candidates_expiry_check" check (expires_at is null or expires_at > created_at),
+  constraint "transaction_match_candidates_kind_check" check (match_kind in ('customer_payment_to_invoice', 'vendor_payment_to_bill')),
+  constraint "transaction_match_candidates_status_check" check (status in ('suggested', 'accepted', 'rejected', 'expired', 'superseded')),
+  constraint "transaction_match_candidates_distinct_transactions_check" check (origin_transaction_id <> target_transaction_id),
+  constraint "transaction_match_candidates_evidence_shape_check" check (jsonb_typeof(evidence) = 'array' and jsonb_array_length(evidence) > 0),
+  constraint "transaction_match_candidates_evidence_bounded_json_check" check (octet_length(coalesce("evidence"::text, '')) <= 4096)
+);
+
+create unique index if not exists "transaction_match_candidates_identity_uidx" on "erp_financials"."transaction_match_candidates" ("tenant_id", "source_id", "match_kind", "origin_transaction_id", "target_transaction_id", "matcher_version");
+
+create index if not exists "transaction_match_candidates_origin_status_idx" on "erp_financials"."transaction_match_candidates" ("tenant_id", "source_id", "origin_transaction_id", "status", "score");
+
+create table if not exists "erp_financials"."transaction_match_decisions" (
+  "match_decision_id" text not null,
+  "tenant_id" text not null,
+  "source_id" text not null,
+  "match_candidate_id" text not null,
+  "decision" text not null,
+  "method" text not null,
+  "decided_at" timestamptz not null,
+  "decided_by_ref" text,
+  "reason" text,
+  "evidence" jsonb,
+  constraint "transaction_match_decisions_pkey" primary key ("match_decision_id"),
+  constraint "transaction_match_decisions_value_check" check (decision in ('accepted', 'rejected', 'superseded')),
+  constraint "transaction_match_decisions_method_check" check (method in ('automatic', 'manual')),
+  constraint "transaction_match_decisions_manual_actor_check" check (method <> 'manual' or (decided_by_ref is not null and btrim(decided_by_ref) <> '')),
+  constraint "transaction_match_decisions_evidence_bounded_json_check" check (octet_length(coalesce("evidence"::text, '')) <= 4096)
+);
+
+create unique index if not exists "transaction_match_decisions_identity_uidx" on "erp_financials"."transaction_match_decisions" ("tenant_id", "source_id", "match_decision_id");
+
+create index if not exists "transaction_match_decisions_candidate_idx" on "erp_financials"."transaction_match_decisions" ("tenant_id", "source_id", "match_candidate_id", "decided_at");
+
+create table if not exists "erp_financials"."payment_applications" (
+  "payment_application_id" text not null,
+  "tenant_id" text not null,
+  "source_id" text not null,
+  "payment_transaction_id" text not null,
+  "invoice_transaction_id" text not null,
+  "match_decision_id" text,
+  "applied_amount" numeric not null,
+  "currency_code" text not null,
+  "application_date" date not null,
+  "status" text not null,
+  "created_at" timestamptz not null,
+  "updated_at" timestamptz not null,
+  constraint "payment_applications_pkey" primary key ("payment_application_id"),
+  constraint "payment_applications_amount_check" check (applied_amount > 0),
+  constraint "payment_applications_status_check" check (status in ('proposed', 'posted', 'voided')),
+  constraint "payment_applications_distinct_transactions_check" check (payment_transaction_id <> invoice_transaction_id),
+  constraint "payment_applications_updated_at_check" check (updated_at >= created_at)
+);
+
+create unique index if not exists "payment_applications_identity_uidx" on "erp_financials"."payment_applications" ("tenant_id", "source_id", "payment_transaction_id", "invoice_transaction_id");
+
+create index if not exists "payment_applications_invoice_status_idx" on "erp_financials"."payment_applications" ("tenant_id", "source_id", "invoice_transaction_id", "status", "application_date");
+
 create table if not exists "erp_financials"."rollup_buckets" (
   "rollup_bucket_id" text not null,
   "tenant_id" text not null,

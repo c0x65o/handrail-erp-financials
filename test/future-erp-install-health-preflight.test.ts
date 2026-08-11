@@ -41,8 +41,8 @@ describe("Future ERP install health preflight", () => {
       install: {
         packageName: "@handrail/erp-financials",
         packageVersion: ERP_FINANCIALS_PACKAGE.version,
-        manifestVersion: "2026-06-19.storage-v1",
-        schemaVersion: 5,
+        manifestVersion: "2026-08-11.transaction-matching-v1",
+        schemaVersion: 6,
         namespace: "erp_financials",
         dialect: "postgres",
         compatible: true,

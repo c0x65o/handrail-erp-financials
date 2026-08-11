@@ -31,8 +31,8 @@ describe("ERP Financials install health", () => {
     expect(health).toMatchObject({
       packageName: "@handrail/erp-financials",
       packageVersion: ERP_FINANCIALS_PACKAGE.version,
-      manifestVersion: "2026-06-19.storage-v1",
-      schemaVersion: 5,
+      manifestVersion: "2026-08-11.transaction-matching-v1",
+      schemaVersion: 6,
       status: "healthy",
       schema: {
         namespace: "erp_financials",

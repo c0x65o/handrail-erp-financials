@@ -11,6 +11,7 @@ export const PACKAGE_BOUNDARY = {
   purpose: "provider-neutral ERP financial reporting kernel",
   owns: [
     "canonical accounting facts",
+    "transaction matching and posting rule evaluation",
     "schema and migration manifests",
     "deterministic fixture/reference report formulas",
     "rollup and snapshot jobs",

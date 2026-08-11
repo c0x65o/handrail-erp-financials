@@ -198,6 +198,53 @@ Important rules:
 - Posting rows should retain enough refs for drilldown without storing raw
   provider payloads.
 
+## Transaction Matching and Posting Rules
+
+### posting_rules
+
+Tenant/source-scoped rules describe provider-neutral conditions and proposed
+double-entry posting actions. Rules have stable codes, deterministic priority,
+effective dates, and bounded condition/action JSON. Host applications own the
+configured account choices, permissions, and approval workflow.
+
+Rule evaluation is deterministic:
+
+- Only active rules in the same tenant/source and effective-date window run.
+- Lower numeric priority wins.
+- Multiple matches at the winning priority are ambiguous and emit no posting
+  proposal.
+- String comparisons are exact and case-sensitive.
+- Percentage actions use integer cents with half-up rounding.
+- Every action account must exist, be active, and belong to the evaluated
+  tenant/source chart of accounts.
+- A proposal is rejected unless total debits equal total credits.
+- Actions that require a missing party or unapplied amount fail explicitly.
+
+### transaction_match_candidates
+
+Versioned suggestions link an origin transaction, such as a customer payment,
+to a target transaction, such as an invoice. Candidates retain a bounded set of
+scoring evidence and an explicit matcher version so recomputation is auditable
+and idempotent.
+
+### transaction_match_decisions
+
+Append-only automatic or manual decisions preserve who or what accepted or
+rejected a candidate, when the decision occurred, and bounded supporting
+evidence. The storage API ignores duplicate decision identities instead of
+rewriting prior audit records.
+
+### payment_applications
+
+Payment applications allocate a positive amount from one customer payment to
+one invoice. They may reference the match decision that authorized the
+allocation and progress through proposed, posted, or voided states.
+
+QuickBooks or another provider may already supply authoritative ledger
+postings. Those postings should be preserved through the source-adapter path;
+local posting rules are primarily for native ERP and unposted transaction
+inputs.
+
 ## Import and Freshness Tables
 
 ### import_batches

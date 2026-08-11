@@ -19,13 +19,17 @@ import type {
   Account,
   AccountHierarchyRollupLineAmount,
   BuiltReport,
+  PaymentApplication,
   PostgresQueryClient,
   PostgresQueryResult,
+  PostingRule,
   ReportSnapshotLine,
   ReportSnapshotTotal,
   PostgresSchemaManifest,
   StandardReportPresentation,
-  StandardReportPresentationReadModelRequest
+  StandardReportPresentationReadModelRequest,
+  TransactionMatchCandidate,
+  TransactionMatchDecision
 } from "../src/index.js";
 
 type QueryCall = {
@@ -45,8 +49,8 @@ describe("Postgres storage adapter", () => {
     const result = await installPostgresSchema(client, POSTGRES_CANONICAL_SCHEMA_MANIFEST, { dryRun: true });
 
     expect(result.executed).toBe(false);
-    expect(result.manifestVersion).toBe("2026-06-19.storage-v1");
-    expect(result.schemaVersion).toBe(5);
+    expect(result.manifestVersion).toBe("2026-08-11.transaction-matching-v1");
+    expect(result.schemaVersion).toBe(6);
     expect(result.statements[0]).toBe('create schema if not exists "erp_financials";');
     expect(result.statements.some((statement) => statement.includes('"rollup_buckets"'))).toBe(true);
     expect(result.statements.some((statement) => statement.includes('"report_freshness"'))).toBe(true);
@@ -116,6 +120,98 @@ describe("Postgres storage adapter", () => {
     expect(client.calls).toHaveLength(2);
     expect(client.calls[1]?.sql).toBe(client.calls[0]?.sql);
     expect(client.calls[1]?.params).toEqual(expect.arrayContaining(["50001.00"]));
+  });
+
+  it("persists posting rules, match audit records, and payment applications with stable conflicts", async () => {
+    const client = new RecordingClient();
+    const adapter = createPostgresStorageAdapter(client);
+    const rule: PostingRule = {
+      postingRuleId: "rule_customer_payment",
+      tenantId: "tenant_1",
+      sourceId: "source_native_erp",
+      ruleCode: "customer-payment-default",
+      name: "Customer payment",
+      priority: 100,
+      status: "active",
+      conditionMode: "all",
+      conditions: [{ field: "source_transaction_type", operator: "equals", value: "Payment" }],
+      actions: [
+        {
+          kind: "create_posting",
+          side: "debit",
+          accountId: "acct_cash",
+          amount: { kind: "transaction_amount" }
+        },
+        {
+          kind: "create_posting",
+          side: "credit",
+          accountId: "acct_ar",
+          amount: { kind: "transaction_amount" }
+        }
+      ],
+      createdAt: "2026-01-15T12:00:00.000Z",
+      updatedAt: "2026-01-15T12:00:00.000Z"
+    };
+    const candidate: TransactionMatchCandidate = {
+      matchCandidateId: "candidate_payment_invoice",
+      tenantId: rule.tenantId,
+      sourceId: rule.sourceId,
+      matchKind: "customer_payment_to_invoice",
+      originTransactionId: "txn_payment_1",
+      targetTransactionId: "txn_invoice_1",
+      matcherVersion: "customer-payment-v1",
+      score: "1.00",
+      suggestedApplicationAmount: "1250.00",
+      currencyCode: "USD",
+      status: "suggested",
+      evidence: [{ criterion: "reference", matched: true, weight: "1.00", score: "1.00" }],
+      createdAt: "2026-01-15T12:00:00.000Z"
+    };
+    const decision: TransactionMatchDecision = {
+      matchDecisionId: "decision_payment_invoice",
+      matchCandidateId: candidate.matchCandidateId,
+      tenantId: rule.tenantId,
+      sourceId: rule.sourceId,
+      decision: "accepted",
+      method: "manual",
+      decidedAt: "2026-01-15T13:00:00.000Z",
+      decidedByRef: "user_42"
+    };
+    const application: PaymentApplication = {
+      paymentApplicationId: "application_payment_invoice",
+      tenantId: rule.tenantId,
+      sourceId: rule.sourceId,
+      paymentTransactionId: candidate.originTransactionId,
+      invoiceTransactionId: candidate.targetTransactionId,
+      matchDecisionId: decision.matchDecisionId,
+      appliedAmount: candidate.suggestedApplicationAmount,
+      currencyCode: candidate.currencyCode,
+      applicationDate: "2026-01-15",
+      status: "proposed",
+      createdAt: decision.decidedAt,
+      updatedAt: decision.decidedAt
+    };
+
+    await adapter.upsertPostingRules([rule]);
+    await adapter.upsertTransactionMatchCandidates([candidate]);
+    await adapter.recordTransactionMatchDecisions([decision]);
+    await adapter.upsertPaymentApplications([application]);
+
+    expect(client.calls).toHaveLength(4);
+    expect(client.calls[0]?.sql).toContain('insert into "erp_financials"."posting_rules"');
+    expect(client.calls[0]?.sql).toContain('on conflict ("tenant_id", "source_id", "rule_code") do update');
+    expect(client.calls[1]?.sql).toContain('insert into "erp_financials"."transaction_match_candidates"');
+    expect(client.calls[1]?.sql).toContain(
+      'on conflict ("tenant_id", "source_id", "match_kind", "origin_transaction_id", "target_transaction_id", "matcher_version") do update'
+    );
+    expect(client.calls[2]?.sql).toContain('insert into "erp_financials"."transaction_match_decisions"');
+    expect(client.calls[2]?.sql).toContain(
+      'on conflict ("tenant_id", "source_id", "match_decision_id") do nothing'
+    );
+    expect(client.calls[3]?.sql).toContain('insert into "erp_financials"."payment_applications"');
+    expect(client.calls[3]?.sql).toContain(
+      'on conflict ("tenant_id", "source_id", "payment_transaction_id", "invoice_transaction_id") do update'
+    );
   });
 
   it("rejects credential-like provider payload refs before writing", async () => {
