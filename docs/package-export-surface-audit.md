@@ -9,6 +9,7 @@ dependency link work.
 Checked surfaces:
 
 - Canonical schema and canonical model helpers.
+- High-level native account-tree and atomic journal-posting service.
 - Postgres storage adapter, install, and validation contracts.
 - Report builders for profit and loss, balance sheet, trial balance, and cash
   flow.
@@ -63,6 +64,8 @@ these required supported adoption surfaces from the package root:
 - Storage adapter and persistence: `createPostgresStorageAdapter`,
   `createFutureErpCanonicalFactPersistenceWorker`, and
   `persistFutureErpCanonicalFacts`.
+- Native accounting operations: `createErpFinancials`, including reusable
+  account hierarchy updates and balanced, idempotent journal posting.
 - QuickBooks mapping and SDK/service contracts:
   `HandrailQuickBooksSdkResourcesAdapterInput`,
   `mapHandrailQuickBooksSdkResourcesToCanonicalFacts`,

@@ -327,6 +327,8 @@ function cashFlowMetadataFromStoredSnapshot(
 function reportSnapshotRequest(request: FutureErpCanonicalReportGenerationRequest): LoadReportSnapshotInput {
   return {
     tenantId: request.tenantId,
+    companyId: request.companyId,
+    sourceId: request.sourceId,
     reportName: request.reportName,
     accountingBasis: request.accountingBasis,
     periodStart: request.periodStart,

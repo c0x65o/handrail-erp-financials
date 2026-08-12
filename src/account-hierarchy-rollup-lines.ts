@@ -224,7 +224,7 @@ function collectRollupLines(
       continue;
     }
 
-    const reportLineId = reportLineIdForAccount(input.reportName, node.account.accountId);
+    const reportLineId = reportLineIdForAccount(input.reportSnapshotId, node.account.accountId);
     lines.push({
       tenantId: input.tenantId,
       reportSnapshotId: input.reportSnapshotId,
@@ -273,8 +273,8 @@ function labelForAccount(input: BuildAccountHierarchyRollupLinesInput, account: 
   return input.labelForAccount?.(account) ?? (account.accountNumber === undefined ? account.name : `${account.accountNumber} ${account.name}`);
 }
 
-function reportLineIdForAccount(reportName: string, accountId: AccountId): ReportLineId {
-  return `${reportName}:line:account:${accountId}`;
+function reportLineIdForAccount(reportSnapshotId: ReportSnapshotId, accountId: AccountId): ReportLineId {
+  return `${reportSnapshotId}:line:account:${accountId}`;
 }
 
 function compareAccountNodes(

@@ -1,4 +1,4 @@
-import { assertNoCredentialKeys } from "./canonical-model.js";
+import { assertNoCredentialKeys, createCompanySourceBinding } from "./canonical-model.js";
 import type { PostgresStorageAdapter } from "./postgres-storage.js";
 import type { CanonicalAccountingFactSet } from "./source-adapters.js";
 
@@ -6,6 +6,7 @@ export type CanonicalFactPersistenceStorage = Pick<
   PostgresStorageAdapter,
   | "upsertAccountingCompany"
   | "upsertAccountingSource"
+  | "upsertCompanySourceBinding"
   | "upsertImportBatch"
   | "upsertSyncCheckpoint"
   | "upsertAccounts"
@@ -56,14 +57,25 @@ export async function persistCanonicalFacts(
 ): Promise<CanonicalFactPersistenceResult> {
   assertNoCredentialKeys(facts);
 
+  const companies = await storage.upsertAccountingCompany(facts.company);
+  const sources = await storage.upsertAccountingSource(facts.source);
+  await storage.upsertCompanySourceBinding(
+    createCompanySourceBinding({
+      tenantId: facts.company.tenantId,
+      companyId: facts.company.companyId,
+      sourceId: facts.source.sourceId,
+      createdAt: facts.importBatch.startedAt
+    })
+  );
+
   return {
     tenantId: facts.company.tenantId,
     companyId: facts.company.companyId,
     sourceId: facts.source.sourceId,
     importBatchId: facts.importBatch.importBatchId,
     checkpointId: facts.checkpoint.checkpointId,
-    companies: await storage.upsertAccountingCompany(facts.company),
-    sources: await storage.upsertAccountingSource(facts.source),
+    companies,
+    sources,
     importBatches: await storage.upsertImportBatch(facts.importBatch),
     checkpoints: await storage.upsertSyncCheckpoint(facts.checkpoint),
     accounts: await storage.upsertAccounts(facts.accounts),

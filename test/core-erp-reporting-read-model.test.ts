@@ -209,7 +209,8 @@ describe("Core ERP canonical reporting read model", () => {
     });
 
     expect(result.persistence).toMatchObject({
-      snapshotId: "snapshot:tenant_fixture:balance_sheet:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
+      snapshotId:
+        "snapshot:tenant_fixture:company_fixture:source_native_fixture:balance_sheet:builder:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
       freshnessRow: {
         freshnessId: "freshness:tenant_fixture:company_fixture:source_native_fixture:balance_sheet:accrual:2026-01-01:2026-01-31:USD",
         status: "fresh",

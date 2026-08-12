@@ -106,6 +106,28 @@ export type AccountingSource = TenantScopedRecord & {
   readonly status: AccountingSourceStatus;
 };
 
+export type CompanySourceBinding = SourceScopedRecord & {
+  readonly companySourceId: string;
+  readonly companyId: CompanyId;
+  readonly createdAt: IsoDateTime;
+};
+
+export function createCompanySourceBinding(input: {
+  readonly tenantId: TenantId;
+  readonly companyId: CompanyId;
+  readonly sourceId: SourceId;
+  readonly createdAt: IsoDateTime;
+}): CompanySourceBinding {
+  const digest = createHash("sha256")
+    .update([input.tenantId, input.companyId, input.sourceId].join("\u0000"))
+    .digest("hex")
+    .slice(0, 24);
+  return {
+    ...input,
+    companySourceId: `company_source_${digest}`
+  };
+}
+
 export type Account = SourceScopedRecord & {
   readonly accountId: AccountId;
   readonly sourceAccountId: string;
@@ -163,7 +185,7 @@ export type AccountingTransaction = SourceScopedRecord & {
   readonly sourcePayloadRef?: SafeSourcePayloadRef;
 };
 
-export type TransactionLine = TenantScopedRecord & {
+export type TransactionLine = SourceScopedRecord & {
   readonly transactionLineId: TransactionLineId;
   readonly transactionId: TransactionId;
   readonly lineNumber: number;
@@ -251,8 +273,9 @@ export type DrilldownQueryRef = {
   readonly dimensionHash?: DimensionHash;
 };
 
-export type ReportSnapshot = TenantScopedRecord & {
+export type ReportSnapshot = SourceScopedRecord & {
   readonly reportSnapshotId: ReportSnapshotId;
+  readonly companyId: CompanyId;
   readonly reportName: string;
   readonly snapshotSource: ReportSnapshotSource;
   readonly accountingBasis: AccountingBasis;

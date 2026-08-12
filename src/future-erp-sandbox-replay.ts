@@ -401,10 +401,11 @@ class SandboxReplayReportStorage implements FutureErpCanonicalReportSnapshotStor
 
     return Promise.resolve({
       tenantId: input.tenantId,
+      companyId: input.companyId,
+      sourceId: input.sourceId,
       accounts: this.importResult.facts.accounts,
       postings: this.importResult.facts.postings,
       accountingBasis: input.accountingBasis,
-      sourceId: input.sourceId,
       currencyCode: input.currencyCode,
       periodStart: input.periodStart,
       periodEnd: input.periodEnd,

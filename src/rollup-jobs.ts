@@ -157,6 +157,7 @@ export type ScheduledRollupJobResult = {
 export type LateArrivalReprocessInput = {
   readonly tenantId: TenantId;
   readonly companyId: string;
+  readonly sourceId: SourceId;
   readonly changedPostings: readonly LedgerPosting[];
   readonly bucketGrains: readonly RollupBucketGrain[];
   readonly fiscalYearStartMonth: number;
@@ -496,6 +497,11 @@ export function planLateArrivalReprocess(input: LateArrivalReprocessInput): Late
   if (input.overlapDays < 0) {
     throw new Error("overlapDays must be nonnegative");
   }
+  for (const posting of input.changedPostings) {
+    if (posting.tenantId !== input.tenantId || posting.sourceId !== input.sourceId) {
+      throw new Error(`changed posting ${posting.postingId} is outside the late-arrival tenant/source scope`);
+    }
+  }
 
   const affectedPostingStart = minIsoDate(input.changedPostings.map((posting) => posting.postingDate));
   const affectedStart = addDays(affectedPostingStart, -input.overlapDays);
@@ -503,6 +509,8 @@ export function planLateArrivalReprocess(input: LateArrivalReprocessInput): Late
   const windows = buildRollupReprocessWindows(input, affectedStart, affectedEnd);
   const staleSnapshots: MarkReportSnapshotsStaleForPostingChangesInput = {
     tenantId: input.tenantId,
+    companyId: input.companyId,
+    sourceId: input.sourceId,
     affectedStart,
     affectedEnd,
     staleReason: input.staleReason,
@@ -652,7 +660,10 @@ export function createSnapshotRefreshContract(input: SnapshotRefreshContractInpu
     snapshotId: [
       "snapshot",
       input.tenantId,
+      input.companyId,
+      input.sourceId,
       input.reportName,
+      "builder",
       input.accountingBasis,
       input.periodStart,
       input.periodEnd,
@@ -686,6 +697,8 @@ export async function executeSnapshotRefresh(input: SnapshotRefreshRequest): Pro
   assertNoCredentialKeys(contract);
   const storedSnapshot = await input.storage.loadLatestReportSnapshot({
     tenantId: input.tenantId,
+    companyId: input.companyId,
+    sourceId: input.sourceId,
     reportName: input.reportName,
     accountingBasis: input.accountingBasis,
     periodStart: input.periodStart,

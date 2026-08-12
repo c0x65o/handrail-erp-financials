@@ -466,9 +466,9 @@ function expectNestedRollupLines(
 
   expect(parentIndex).toBeLessThan(childIndex);
   expect(childIndex).toBeLessThan(grandchildIndex);
-  expect(parent.reportLineId).toBe(`${reportName}:line:account:${expected.parentAccountId}`);
-  expect(child.reportLineId).toBe(`${reportName}:line:account:${expected.childAccountId}`);
-  expect(grandchild.reportLineId).toBe(`${reportName}:line:account:${expected.grandchildAccountId}`);
+  expect(parent.reportLineId).toBe(`${writtenReport.snapshot.reportSnapshotId}:line:account:${expected.parentAccountId}`);
+  expect(child.reportLineId).toBe(`${writtenReport.snapshot.reportSnapshotId}:line:account:${expected.childAccountId}`);
+  expect(grandchild.reportLineId).toBe(`${writtenReport.snapshot.reportSnapshotId}:line:account:${expected.grandchildAccountId}`);
   expect(child.parentReportLineId).toBe(parent.reportLineId);
   expect(grandchild.parentReportLineId).toBe(child.reportLineId);
   expect(parent.amount).toBe(expected.parentAmount);

@@ -171,6 +171,7 @@ describe("rollup, snapshot, freshness, and late-arrival job contracts", () => {
     const plan = planLateArrivalReprocess({
       tenantId: fixture.company.tenantId,
       companyId: fixture.company.companyId,
+      sourceId: fixture.source.sourceId,
       changedPostings: postings,
       bucketGrains: ["fiscal_quarter", "fiscal_year"],
       fiscalYearStartMonth: 4,
@@ -503,6 +504,7 @@ describe("rollup, snapshot, freshness, and late-arrival job contracts", () => {
     const plan = planLateArrivalReprocess({
       tenantId: fixture.company.tenantId,
       companyId: fixture.company.companyId,
+      sourceId: fixture.source.sourceId,
       changedPostings,
       bucketGrains: ["day", "month"],
       fiscalYearStartMonth: fixture.company.fiscalYearStartMonth,
@@ -545,6 +547,7 @@ describe("rollup, snapshot, freshness, and late-arrival job contracts", () => {
       buildLateArrivalReprocessExecutionContract({
         tenantId: fixture.company.tenantId,
         companyId: fixture.company.companyId,
+        sourceId: fixture.source.sourceId,
         changedPostings: [],
         bucketGrains: ["month"],
         fiscalYearStartMonth: fixture.company.fiscalYearStartMonth,
@@ -565,6 +568,7 @@ describe("rollup, snapshot, freshness, and late-arrival job contracts", () => {
     const request = {
       tenantId: fixture.company.tenantId,
       companyId: fixture.company.companyId,
+      sourceId: fixture.source.sourceId,
       changedPostings,
       bucketGrains: ["day", "month"] as const,
       fiscalYearStartMonth: fixture.company.fiscalYearStartMonth,
@@ -604,6 +608,8 @@ describe("rollup, snapshot, freshness, and late-arrival job contracts", () => {
       order: 2,
       input: {
         tenantId: fixture.company.tenantId,
+        companyId: fixture.company.companyId,
+        sourceId: fixture.source.sourceId,
         affectedStart: "2026-01-05",
         affectedEnd: "2026-01-12",
         staleReason: "late_arrival_overlap_reprocess",
@@ -658,6 +664,8 @@ describe("rollup, snapshot, freshness, and late-arrival job contracts", () => {
     });
     await adapter.markReportSnapshotsStaleForPostingChanges({
       tenantId: fixture.company.tenantId,
+      companyId: fixture.company.companyId,
+      sourceId: fixture.source.sourceId,
       affectedStart: "2026-01-05",
       affectedEnd: "2026-01-12",
       staleReason: "late_arrival_overlap_reprocess",
@@ -675,7 +683,7 @@ describe("rollup, snapshot, freshness, and late-arrival job contracts", () => {
       'on conflict ("tenant_id", "company_id", "source_id", "accounting_basis", "bucket_grain", "bucket_start", "bucket_end", "account_id", "currency_code", "dimension_hash", "party_id", "party_type", "item_id") do update'
     );
     expect(client.calls[2]?.sql).toContain('update "erp_financials"."report_snapshots"');
-    expect(client.calls[2]?.sql).toContain('"report_name" = any($5::text[])');
+    expect(client.calls[2]?.sql).toContain('rs."report_name" = any($7::text[])');
     expect(client.calls[2]?.params).toEqual(
       expect.arrayContaining(["2026-01-05", "2026-01-12", "late_arrival_overlap_reprocess", ["profit_and_loss"]])
     );
@@ -726,7 +734,8 @@ describe("rollup, snapshot, freshness, and late-arrival job contracts", () => {
       staleReason: "affected_snapshot_pending_refresh"
     });
     expect(snapshotContract).toMatchObject({
-      snapshotId: "snapshot:tenant_fixture:trial_balance:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
+      snapshotId:
+        "snapshot:tenant_fixture:company_fixture:source_native_fixture:trial_balance:builder:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
       freshnessRow: {
         status: "fresh",
         freshThrough: "2026-02-01T00:00:00.000Z"

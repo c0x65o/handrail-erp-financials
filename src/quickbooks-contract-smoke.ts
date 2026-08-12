@@ -198,6 +198,8 @@ export function createQuickBooksContractSmokeHarness(
   const facts = mapHandrailQuickBooksSdkResourcesToCanonicalFacts(adapterInput);
   const reportInput: ReportBuilderInput = {
     tenantId: facts.company.tenantId,
+    companyId: facts.company.companyId,
+    sourceId: facts.source.sourceId,
     accounts: facts.accounts,
     postings: facts.postings,
     accountingBasis: options.accountingBasis ?? adapterInput.context.accountingBasis,

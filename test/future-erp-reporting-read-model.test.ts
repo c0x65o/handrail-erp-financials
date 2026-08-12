@@ -365,7 +365,8 @@ describe("Future ERP canonical reporting read model", () => {
 
     expect(result.source).toBe("canonical_facts");
     expect(result.persistence).toMatchObject({
-      snapshotId: "snapshot:tenant_fixture:balance_sheet:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
+      snapshotId:
+        "snapshot:tenant_fixture:company_fixture:source_native_fixture:balance_sheet:builder:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
       freshnessRow: {
         freshnessId: "freshness:tenant_fixture:company_fixture:source_native_fixture:balance_sheet:accrual:2026-01-01:2026-01-31:USD",
         status: "fresh",
@@ -377,7 +378,8 @@ describe("Future ERP canonical reporting read model", () => {
     expect(storage.writtenReports).toHaveLength(1);
     expect(storage.writtenFreshnessRows).toHaveLength(1);
     expect(storage.writtenReports[0]?.snapshot).toMatchObject({
-      reportSnapshotId: "snapshot:tenant_fixture:balance_sheet:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
+      reportSnapshotId:
+        "snapshot:tenant_fixture:company_fixture:source_native_fixture:balance_sheet:builder:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
       reportName: "balance_sheet",
       accountingBasis: "accrual",
       periodStart: "2026-01-01",
@@ -463,7 +465,7 @@ describe("Future ERP canonical reporting read model", () => {
     });
 
     expect(result.persistence?.snapshotId).toBe(
-      "snapshot:tenant_fixture:profit_and_loss:accrual:2026-01-01:2026-01-31:2026-01-31:USD"
+      "snapshot:tenant_fixture:company_fixture:source_native_fixture:profit_and_loss:builder:accrual:2026-01-01:2026-01-31:2026-01-31:USD"
     );
     expect(result.persistence?.freshnessRow).toMatchObject({
       freshnessId: "freshness:tenant_fixture:company_fixture:source_native_fixture:profit_and_loss:accrual:2026-01-01:2026-01-31:USD",

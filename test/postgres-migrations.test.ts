@@ -1,0 +1,339 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  POSTGRES_CANONICAL_SCHEMA_MANIFEST,
+  POSTGRES_MIGRATIONS,
+  PostgresMigrationError,
+  migratePostgresSchema,
+  planPostgresMigrations
+} from "../src/index.js";
+
+import type {
+  AppliedPostgresMigration,
+  PostgresMigrationTransactionRunner,
+  PostgresQueryClient,
+  PostgresQueryResult,
+  PostgresSchemaManifest
+} from "../src/index.js";
+
+type CatalogRow = {
+  readonly object_type: "schema" | "table" | "column" | "index" | "constraint";
+  readonly table_name: string | null;
+  readonly object_name: string;
+  readonly data_type?: string | null;
+  readonly is_nullable?: string | null;
+};
+
+type DatabaseState = {
+  version: number;
+  ledgerExists: boolean;
+  ledger: AppliedPostgresMigration[];
+};
+
+describe("Postgres schema migrations", () => {
+  it("ships an immutable, checksum-addressed path from blank through the current schema", () => {
+    expect(POSTGRES_MIGRATIONS.map((entry) => [entry.fromVersion, entry.toVersion])).toEqual([
+      [0, 6],
+      [6, 7],
+      [7, 8],
+      [8, 9]
+    ]);
+    expect(POSTGRES_MIGRATIONS.every((entry) => /^[a-f0-9]{64}$/.test(entry.checksum))).toBe(true);
+    expect(new Set(POSTGRES_MIGRATIONS.map((entry) => entry.migrationId)).size).toBe(
+      POSTGRES_MIGRATIONS.length
+    );
+  });
+
+  it("plans a blank install without locking or mutating the database", async () => {
+    const client = new MigrationClient({ version: 0, ledgerExists: false, ledger: [] });
+
+    const plan = await planPostgresMigrations(client);
+
+    expect(plan.currentVersion).toBe(0);
+    expect(plan.targetVersion).toBe(9);
+    expect(plan.requiresBaselineAdoption).toBe(false);
+    expect(plan.pendingMigrations).toEqual(POSTGRES_MIGRATIONS);
+    expect(client.calls.some((call) => call.includes("pg_advisory_xact_lock"))).toBe(false);
+    expect(client.state).toEqual({ version: 0, ledgerExists: false, ledger: [] });
+  });
+
+  it("locks, transactionally installs a blank database, validates it, and records every migration", async () => {
+    const client = new MigrationClient({ version: 0, ledgerExists: false, ledger: [] });
+    const runner = new MemoryTransactionRunner(client);
+
+    const result = await migratePostgresSchema(runner, { appliedByRef: "deploy:future-erp:42" });
+
+    expect(result.currentVersion).toBe(0);
+    expect(result.targetVersion).toBe(9);
+    expect(result.adoptedBaselineVersion).toBeUndefined();
+    expect(result.applied.map((entry) => [entry.fromVersion, entry.toVersion])).toEqual([
+      [0, 6],
+      [6, 7],
+      [7, 8],
+      [8, 9]
+    ]);
+    expect(client.state.version).toBe(9);
+    expect(client.state.ledger.map((entry) => entry.migrationId)).toEqual(
+      POSTGRES_MIGRATIONS.map((entry) => entry.migrationId)
+    );
+    expect(client.calls[0]).toContain("pg_advisory_xact_lock");
+    expect(runner.commits).toBe(1);
+    expect(runner.rollbacks).toBe(0);
+  });
+
+  it("adopts an unversioned v6 database and applies only v6 to v8 upgrades", async () => {
+    const client = new MigrationClient({ version: 6, ledgerExists: false, ledger: [] });
+    const runner = new MemoryTransactionRunner(client);
+
+    const result = await migratePostgresSchema(runner, { appliedByRef: "operator:ray" });
+
+    expect(result.adoptedBaselineVersion).toBe(6);
+    expect(result.applied.map((entry) => entry.migrationId)).toEqual(
+      POSTGRES_MIGRATIONS.slice(1).map((entry) => entry.migrationId)
+    );
+    expect(client.state.ledger.map((entry) => entry.migrationId)).toEqual([
+      "baseline:v6",
+      ...POSTGRES_MIGRATIONS.slice(1).map((entry) => entry.migrationId)
+    ]);
+  });
+
+  it("treats a pre-created empty ledger as v7 until a durable v8 row is recorded", async () => {
+    const client = new MigrationClient({ version: 7, ledgerExists: true, ledger: [] });
+
+    const plan = await planPostgresMigrations(client);
+
+    expect(plan.currentVersion).toBe(7);
+    expect(plan.requiresBaselineAdoption).toBe(true);
+    expect(plan.pendingMigrations.map((entry) => entry.toVersion)).toEqual([8, 9]);
+  });
+
+  it("fails closed on checksum drift and rolls back the transaction", async () => {
+    const firstMigration = POSTGRES_MIGRATIONS[0];
+    if (firstMigration === undefined) {
+      throw new Error("migration fixture requires a bootstrap migration");
+    }
+    const client = new MigrationClient({
+      version: 6,
+      ledgerExists: true,
+      ledger: [appliedRow(firstMigration, { checksum: "0".repeat(64) })]
+    });
+    const runner = new MemoryTransactionRunner(client);
+
+    await expect(migratePostgresSchema(runner, { appliedByRef: "deploy:drift-check" })).rejects.toMatchObject({
+      code: "migration_history_drift"
+    } satisfies Partial<PostgresMigrationError>);
+
+    expect(runner.commits).toBe(0);
+    expect(runner.rollbacks).toBe(1);
+    expect(client.state.version).toBe(6);
+    expect(client.state.ledger).toHaveLength(1);
+  });
+
+  it("rolls back schema and ledger changes when an upgrade statement fails", async () => {
+    const client = new MigrationClient(
+      { version: 6, ledgerExists: false, ledger: [] },
+      POSTGRES_MIGRATIONS[1]?.migrationId
+    );
+    const runner = new MemoryTransactionRunner(client);
+
+    await expect(migratePostgresSchema(runner, { appliedByRef: "deploy:failure-test" })).rejects.toThrow(
+      "injected migration failure"
+    );
+
+    expect(runner.rollbacks).toBe(1);
+    expect(client.state).toEqual({ version: 6, ledgerExists: false, ledger: [] });
+  });
+});
+
+class MemoryTransactionRunner implements PostgresMigrationTransactionRunner {
+  commits = 0;
+  rollbacks = 0;
+
+  constructor(private readonly client: MigrationClient) {}
+
+  async transaction<Result>(work: (client: PostgresQueryClient) => Promise<Result>): Promise<Result> {
+    const before = structuredClone(this.client.state);
+    try {
+      const result = await work(this.client);
+      this.commits += 1;
+      return result;
+    } catch (error) {
+      this.client.state = before;
+      this.rollbacks += 1;
+      throw error;
+    }
+  }
+}
+
+class MigrationClient implements PostgresQueryClient {
+  readonly calls: string[] = [];
+
+  constructor(
+    public state: DatabaseState,
+    private readonly failMigrationId?: string
+  ) {}
+
+  query<Row extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string,
+    params: readonly unknown[] = []
+  ): Promise<PostgresQueryResult<Row>> {
+    this.calls.push(sql);
+
+    if (sql.includes("pg_advisory_xact_lock")) {
+      return this.result<Row>([]);
+    }
+
+    if (sql.includes("select to_regclass")) {
+      const relation = params[0];
+      const exists =
+        relation === "erp_financials.report_snapshots"
+          ? this.state.version >= 6
+          : relation === "erp_financials.schema_migrations"
+            ? this.state.ledgerExists
+            : relation === "erp_financials.company_sources"
+              ? this.state.version >= 9
+            : false;
+      return this.result<Row>([{ relation_name: exists ? relation : null }]);
+    }
+
+    if (sql.includes("information_schema.columns") && sql.includes("report_snapshots")) {
+      return this.result<Row>(
+        this.state.version >= 7 ? [{ column_name: "company_id" }, { column_name: "source_id" }] : []
+      );
+    }
+
+    if (sql.includes("information_schema.columns") && sql.includes("transaction_lines")) {
+      return this.result<Row>(
+        this.state.version >= 9
+          ? [
+              { column_name: "source_id" },
+              { column_name: "company_id" },
+              { column_name: "source_id" },
+              { column_name: "company_id" },
+              { column_name: "source_id" }
+            ]
+          : []
+      );
+    }
+
+    if (sql.includes("from information_schema.schemata")) {
+      return this.result<Row>(catalogRowsForManifest(POSTGRES_CANONICAL_SCHEMA_MANIFEST));
+    }
+
+    if (sql.includes('from "erp_financials"."schema_migrations"')) {
+      return this.result<Row>(this.state.ledger.map(rowToDatabase));
+    }
+
+    if (sql.includes('insert into "erp_financials"."schema_migrations"')) {
+      const row: AppliedPostgresMigration = {
+        migrationId: String(params[0]),
+        fromVersion: Number(params[1]),
+        toVersion: Number(params[2]),
+        name: String(params[3]),
+        checksum: String(params[4]),
+        manifestVersion: String(params[5]),
+        executionMs: Number(params[6]),
+        appliedByRef: String(params[7]),
+        appliedAt: "2026-08-12T22:00:00.000Z",
+        baseline: String(params[0]).startsWith("baseline:v")
+      };
+      this.state.ledger.push(row);
+      return this.result<Row>([rowToDatabase(row)], 1);
+    }
+
+    const definition = POSTGRES_MIGRATIONS.find((entry) => entry.sql === sql);
+    if (definition !== undefined) {
+      if (definition.migrationId === this.failMigrationId) {
+        throw new Error("injected migration failure");
+      }
+      this.state.version = definition.toVersion;
+      if (definition.toVersion === 8) {
+        this.state.ledgerExists = true;
+      }
+      return this.result<Row>([]);
+    }
+
+    if (sql.includes('create table if not exists "erp_financials"."schema_migrations"')) {
+      this.state.ledgerExists = true;
+      return this.result<Row>([]);
+    }
+
+    if (sql.startsWith("create schema if not exists")) {
+      return this.result<Row>([]);
+    }
+
+    throw new Error(`Unexpected migration test query: ${sql.slice(0, 100)}`);
+  }
+
+  private result<Row extends Record<string, unknown>>(
+    rows: readonly Record<string, unknown>[],
+    rowCount: number | null = rows.length
+  ): Promise<PostgresQueryResult<Row>> {
+    return Promise.resolve({ rows: rows as readonly Row[], rowCount });
+  }
+}
+
+function appliedRow(
+  definition: (typeof POSTGRES_MIGRATIONS)[number],
+  overrides: Partial<AppliedPostgresMigration> = {}
+): AppliedPostgresMigration {
+  return {
+    migrationId: definition.migrationId,
+    fromVersion: definition.fromVersion,
+    toVersion: definition.toVersion,
+    name: definition.name,
+    checksum: definition.checksum,
+    manifestVersion: POSTGRES_CANONICAL_SCHEMA_MANIFEST.manifestVersion,
+    executionMs: 1,
+    appliedByRef: "deploy:fixture",
+    appliedAt: "2026-08-12T21:00:00.000Z",
+    baseline: false,
+    ...overrides
+  };
+}
+
+function rowToDatabase(row: AppliedPostgresMigration): Record<string, unknown> {
+  return {
+    migration_id: row.migrationId,
+    from_version: row.fromVersion,
+    to_version: row.toVersion,
+    name: row.name,
+    checksum: row.checksum,
+    manifest_version: row.manifestVersion,
+    execution_ms: row.executionMs,
+    applied_by_ref: row.appliedByRef,
+    applied_at: row.appliedAt
+  };
+}
+
+function catalogRowsForManifest(manifest: PostgresSchemaManifest): readonly CatalogRow[] {
+  return [
+    { object_type: "schema", table_name: null, object_name: manifest.namespace },
+    ...manifest.tables.flatMap((table) => [
+      { object_type: "table" as const, table_name: table.name, object_name: table.name },
+      ...table.columns.map((column) => ({
+        object_type: "column" as const,
+        table_name: table.name,
+        object_name: column.name,
+        data_type: column.type,
+        is_nullable: column.nullable === true ? "YES" : "NO"
+      })),
+      ...table.indexes.map((index) => ({
+        object_type: "index" as const,
+        table_name: table.name,
+        object_name: index.name
+      })),
+      ...[
+        `${table.name}_pkey`,
+        ...table.constraints.map((constraint) => constraint.name),
+        ...table.columns
+          .filter((column) => column.type === "jsonb" && column.maxBytes !== undefined)
+          .map((column) => `${table.name}_${column.name}_bounded_json_check`)
+      ].map((constraintName) => ({
+        object_type: "constraint" as const,
+        table_name: table.name,
+        object_name: constraintName
+      }))
+    ])
+  ];
+}

@@ -115,7 +115,7 @@ const EXPECTED_REPLAY_WRITE_ENTITIES: readonly ReplayWriteEntity[] = [
 ];
 
 const REPORT_NAMES: readonly ReportName[] = ["profit_and_loss", "balance_sheet", "trial_balance", "cash_flow"];
-const EXPECTED_REPLAY_EVIDENCE_HASH = "c55a6930164dd00e32e51303cf33a61c9b67c5c7a4cb93a18632e0f19b7babf7";
+const EXPECTED_REPLAY_EVIDENCE_HASH = "1d2d4a292fe7feae4bee90228d5cec9c737ca5130408f2f3c0fa53127e0807fa";
 
 describe("Future ERP QuickBooks sandbox replay orchestration", () => {
   it("returns a bounded deterministic replay result without credentials or raw provider payloads", async () => {
@@ -326,10 +326,13 @@ describe("Future ERP QuickBooks sandbox replay orchestration", () => {
     expect(first.freshnessIds).toEqual(second.freshnessIds);
     expect(first.snapshotIds).toEqual({
       profit_and_loss:
-        "snapshot:tenant_qbo_sync_fixture:profit_and_loss:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
-      balance_sheet: "snapshot:tenant_qbo_sync_fixture:balance_sheet:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
-      trial_balance: "snapshot:tenant_qbo_sync_fixture:trial_balance:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
-      cash_flow: "snapshot:tenant_qbo_sync_fixture:cash_flow:accrual:2026-01-01:2026-01-31:2026-01-31:USD"
+        "snapshot:tenant_qbo_sync_fixture:company_future_erp_qbo_fixture:source_qbo_sync_fixture:profit_and_loss:builder:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
+      balance_sheet:
+        "snapshot:tenant_qbo_sync_fixture:company_future_erp_qbo_fixture:source_qbo_sync_fixture:balance_sheet:builder:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
+      trial_balance:
+        "snapshot:tenant_qbo_sync_fixture:company_future_erp_qbo_fixture:source_qbo_sync_fixture:trial_balance:builder:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
+      cash_flow:
+        "snapshot:tenant_qbo_sync_fixture:company_future_erp_qbo_fixture:source_qbo_sync_fixture:cash_flow:builder:accrual:2026-01-01:2026-01-31:2026-01-31:USD"
     });
     expect(first.freshnessIds).toEqual({
       profit_and_loss:
@@ -373,9 +376,9 @@ describe("Future ERP QuickBooks sandbox replay orchestration", () => {
     const child = requiredReplayLine(profitAndLossWrite.lines ?? [], nested.childAccountId);
     const grandchild = requiredReplayLine(profitAndLossWrite.lines ?? [], nested.grandchildAccountId);
 
-    expect(parent.reportLineId).toBe(`profit_and_loss:line:account:${nested.parentAccountId}`);
-    expect(child.reportLineId).toBe(`profit_and_loss:line:account:${nested.childAccountId}`);
-    expect(grandchild.reportLineId).toBe(`profit_and_loss:line:account:${nested.grandchildAccountId}`);
+    expect(parent.reportLineId).toBe(`${result.snapshotIds.profit_and_loss}:line:account:${nested.parentAccountId}`);
+    expect(child.reportLineId).toBe(`${result.snapshotIds.profit_and_loss}:line:account:${nested.childAccountId}`);
+    expect(grandchild.reportLineId).toBe(`${result.snapshotIds.profit_and_loss}:line:account:${nested.grandchildAccountId}`);
     expect(child.parentReportLineId).toBe(parent.reportLineId);
     expect(grandchild.parentReportLineId).toBe(child.reportLineId);
     expect(parent.sortOrder).toBeLessThan(child.sortOrder);

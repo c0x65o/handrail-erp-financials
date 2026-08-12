@@ -3,6 +3,7 @@ import type {
   AccountClassification,
   AccountingBasis,
   AccountId,
+  CompanyId,
   DecimalString,
   DrilldownRef,
   IsoCurrencyCode,
@@ -45,10 +46,11 @@ export type CashFlowDerivationMethod =
  */
 export type ReportBuilderInput = {
   readonly tenantId: TenantId;
+  readonly companyId: CompanyId;
+  readonly sourceId: SourceId;
   readonly accounts: readonly Account[];
   readonly postings: readonly LedgerPosting[];
   readonly accountingBasis: AccountingBasis;
-  readonly sourceId?: SourceId;
   readonly currencyCode: IsoCurrencyCode;
   readonly periodStart: IsoDate;
   readonly periodEnd: IsoDate;
@@ -133,14 +135,14 @@ export function buildProfitAndLossReport(input: ReportBuilderInput): BuiltReport
   const directAccumulators = accumulatorsForAccountBalances(directBalances, PROFIT_AND_LOSS_SECTIONS);
   const lines = buildAccountHierarchyRollupLines({
     tenantId: input.tenantId,
-    ...(input.sourceId === undefined ? {} : { sourceId: input.sourceId }),
+    sourceId: input.sourceId,
     reportSnapshotId: snapshot,
     reportName: "profit_and_loss",
     accounts: profitAndLossAccounts,
     accountAmounts: directAmounts,
     sectionOrder: PROFIT_AND_LOSS_SECTIONS,
     drilldownQuery: {
-      ...(input.sourceId === undefined ? {} : { sourceId: input.sourceId }),
+      sourceId: input.sourceId,
       accountingBasis: input.accountingBasis,
       periodStart: input.periodStart,
       periodEnd: input.periodEnd
@@ -200,14 +202,14 @@ export function buildBalanceSheetReport(input: ReportBuilderInput): BuiltReport 
   const directAccumulators = accumulatorsForAccountBalances(directBalances, BALANCE_SHEET_SECTIONS);
   const accountLines = buildAccountHierarchyRollupLines({
     tenantId: input.tenantId,
-    ...(input.sourceId === undefined ? {} : { sourceId: input.sourceId }),
+    sourceId: input.sourceId,
     reportSnapshotId: snapshot,
     reportName: "balance_sheet",
     accounts: balanceSheetAccounts,
     accountAmounts: directAmounts,
     sectionOrder: BALANCE_SHEET_SECTIONS,
     drilldownQuery: {
-      ...(input.sourceId === undefined ? {} : { sourceId: input.sourceId }),
+      sourceId: input.sourceId,
       accountingBasis: input.accountingBasis,
       periodStart: input.periodStart,
       periodEnd: input.periodEnd
@@ -241,7 +243,7 @@ export function buildBalanceSheetReport(input: ReportBuilderInput): BuiltReport 
     lines.push({
       tenantId: input.tenantId,
       reportSnapshotId: snapshot,
-      reportLineId: lineId("balance_sheet", lines.length + 1, earnings.key),
+      reportLineId: lineId(snapshot, lines.length + 1, earnings.key),
       section: "equity",
       label: earnings.label,
       amount: formatMoney(earnings.amountMinor),
@@ -297,7 +299,7 @@ export function buildTrialBalanceReport(input: ReportBuilderInput): BuiltReport 
   const directAmounts = accountHierarchyAmountsForBalances(directBalances, TRIAL_BALANCE_ACCOUNT_SECTIONS);
   const lines = buildAccountHierarchyRollupLines({
     tenantId: input.tenantId,
-    ...(input.sourceId === undefined ? {} : { sourceId: input.sourceId }),
+    sourceId: input.sourceId,
     reportSnapshotId: snapshot,
     reportName: "trial_balance",
     accounts: [...accountMap.values()],
@@ -305,7 +307,7 @@ export function buildTrialBalanceReport(input: ReportBuilderInput): BuiltReport 
     sectionOrder: TRIAL_BALANCE_ACCOUNT_SECTIONS,
     sectionForAccount: (account) => account.classification,
     drilldownQuery: {
-      ...(input.sourceId === undefined ? {} : { sourceId: input.sourceId }),
+      sourceId: input.sourceId,
       accountingBasis: input.accountingBasis,
       periodStart: input.periodStart,
       periodEnd: input.periodEnd
@@ -378,7 +380,7 @@ export function buildCashFlowReport(input: CashFlowBuilderInput): BuiltReport {
     .map((activity, index): ReportSnapshotLine => ({
       tenantId: input.tenantId,
       reportSnapshotId: snapshot,
-      reportLineId: lineId("cash_flow", index + 1, activity),
+      reportLineId: lineId(snapshot, index + 1, activity),
       section: activity,
       label: cashFlowLabel(activity),
       amount: formatMoney(activityTotals[activity].amountMinor),
@@ -559,7 +561,7 @@ export function buildIndirectCashFlowReport(input: CashFlowBuilderInput): BuiltR
     lines.push({
       tenantId: input.tenantId,
       reportSnapshotId: snapshot,
-      reportLineId: lineId("cash_flow", lines.length + 1, key),
+      reportLineId: lineId(snapshot, lines.length + 1, key),
       section,
       label,
       amount: formatMoney(accumulator.amountMinor),
@@ -649,6 +651,23 @@ export function buildIndirectCashFlowReport(input: CashFlowBuilderInput): BuiltR
 }
 
 export function assertReportBuilderInputComplete(input: ReportBuilderInput): void {
+  for (const [field, value] of [
+    ["tenantId", input.tenantId],
+    ["companyId", input.companyId],
+    ["sourceId", input.sourceId],
+    ["currencyCode", input.currencyCode]
+  ] as const) {
+    if (value.trim().length === 0) {
+      throw new Error(`Report builder input ${field} must not be empty`);
+    }
+  }
+  if (input.periodStart > input.periodEnd) {
+    throw new Error("Report builder input periodStart must be on or before periodEnd");
+  }
+  if (input.freshness?.sourceId !== undefined && input.freshness.sourceId !== input.sourceId) {
+    throw new Error("Report builder input freshness sourceId must match sourceId");
+  }
+
   const accountMap = createAccountMap(input);
   assertValidAccountHierarchy(input.accounts, { accountsToValidate: [...accountMap.values()] });
 
@@ -676,6 +695,8 @@ function buildReportResult(
   return {
     snapshot: {
       tenantId: input.tenantId,
+      companyId: input.companyId,
+      sourceId: input.sourceId,
       reportSnapshotId: snapshotId(reportName, input),
       reportName,
       snapshotSource: "builder",
@@ -870,13 +891,13 @@ function filterBeforeDatePostings(input: ReportBuilderInput): LedgerPosting[] {
 }
 
 function accountMatchesReportScope(input: ReportBuilderInput, account: Account): boolean {
-  return account.tenantId === input.tenantId && (input.sourceId === undefined || account.sourceId === input.sourceId);
+  return account.tenantId === input.tenantId && account.sourceId === input.sourceId;
 }
 
 function postingMatchesReportScope(input: ReportBuilderInput, posting: LedgerPosting): boolean {
   return (
     posting.tenantId === input.tenantId &&
-    (input.sourceId === undefined || posting.sourceId === input.sourceId) &&
+    posting.sourceId === input.sourceId &&
     posting.accountingBasis === input.accountingBasis &&
     posting.currencyCode === input.currencyCode
   );
@@ -977,10 +998,11 @@ function totalFromLines(
 }
 
 function totalFromAccumulator(input: ReportBuilderInput, reportName: ReportName, total: LineAccumulator): ReportSnapshotTotal {
+  const reportSnapshotId = snapshotId(reportName, input);
   return {
     tenantId: input.tenantId,
-    reportSnapshotId: snapshotId(reportName, input),
-    reportTotalId: totalId(reportName, total.key),
+    reportSnapshotId,
+    reportTotalId: totalId(reportSnapshotId, total.key),
     totalKey: total.key,
     label: total.label,
     amount: formatMoney(total.amountMinor),
@@ -1030,8 +1052,6 @@ function drilldownRef(
   accountIds: readonly AccountId[],
   sourceRefs: readonly SafeSourcePayloadRef[]
 ): DrilldownRef {
-  const sourceId = sourceIdForDrilldown(input, postingIds);
-
   return createCompactDrilldownRef({
     token: `${reportName}:${key}`,
     postingIds: unique(postingIds),
@@ -1039,7 +1059,7 @@ function drilldownRef(
     query: {
       kind: "ledger_postings",
       tenantId: input.tenantId,
-      ...(sourceId === undefined ? {} : { sourceId }),
+      sourceId: input.sourceId,
       accountingBasis: input.accountingBasis,
       periodStart: input.periodStart,
       periodEnd: input.periodEnd,
@@ -1053,7 +1073,10 @@ function snapshotId(reportName: ReportName, input: ReportBuilderInput): string {
   return [
     "snapshot",
     input.tenantId,
+    input.companyId,
+    input.sourceId,
     reportName,
+    "builder",
     input.accountingBasis,
     input.periodStart,
     input.periodEnd,
@@ -1062,12 +1085,12 @@ function snapshotId(reportName: ReportName, input: ReportBuilderInput): string {
   ].join(":");
 }
 
-function lineId(reportName: ReportName, index: number, key: string): string {
-  return `${reportName}:line:${index.toString().padStart(3, "0")}:${key}`;
+function lineId(reportSnapshotId: string, index: number, key: string): string {
+  return `${reportSnapshotId}:line:${index.toString().padStart(3, "0")}:${key}`;
 }
 
-function totalId(reportName: ReportName, key: string): string {
-  return `${reportName}:total:${key}`;
+function totalId(reportSnapshotId: string, key: string): string {
+  return `${reportSnapshotId}:total:${key}`;
 }
 
 function accountLabel(account: Account): string {
@@ -1115,16 +1138,6 @@ function emptyCashFlowAccumulator(activity: CashFlowActivity): CashFlowAccumulat
     accountIds: new Set<AccountId>(),
     sourceRefs: []
   };
-}
-
-function sourceIdForDrilldown(input: ReportBuilderInput, postingIds: readonly LedgerPostingId[]): SourceId | undefined {
-  if (input.sourceId !== undefined) {
-    return input.sourceId;
-  }
-
-  const postingIdSet = new Set(postingIds);
-  const sourceIds = unique(input.postings.filter((posting) => postingIdSet.has(posting.postingId)).map((posting) => posting.sourceId));
-  return sourceIds.length === 1 ? sourceIds[0] : undefined;
 }
 
 function sourceRefsForPostingIds(input: ReportBuilderInput, postingIds: readonly LedgerPostingId[]): SafeSourcePayloadRef[] {

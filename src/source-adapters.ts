@@ -524,6 +524,7 @@ function mapNormalizedLedgerToCanonicalFacts(input: NormalizedLedgerInput): Cano
       );
       return {
         tenantId: input.context.tenantId,
+        sourceId: input.context.sourceId,
         transactionLineId,
         transactionId,
         lineNumber: line.lineNumber,

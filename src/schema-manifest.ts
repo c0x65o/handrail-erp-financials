@@ -18,6 +18,7 @@ export type PostgresColumnManifest = {
 
 export type PostgresConstraintManifest = {
   readonly name: string;
+  readonly kind?: "check" | "foreign_key";
   readonly sql: string;
 };
 
@@ -42,8 +43,8 @@ export type PostgresTableManifest = {
 };
 
 export type PostgresSchemaManifest = {
-  readonly manifestVersion: "2026-08-11.transaction-matching-v1";
-  readonly schemaVersion: 6;
+  readonly manifestVersion: "2026-08-12.scoped-integrity-v1";
+  readonly schemaVersion: 9;
   readonly dialect: "postgres";
   readonly namespace: "erp_financials";
   readonly tables: readonly PostgresTableManifest[];
@@ -96,13 +97,27 @@ const bool = (name: string): PostgresColumnManifest => ({
   type: "boolean"
 });
 
+const foreignKey = (
+  name: string,
+  columns: readonly string[],
+  referencedTable: string,
+  referencedColumns: readonly string[]
+): PostgresConstraintManifest => ({
+  name,
+  kind: "foreign_key",
+  sql: `foreign key (${columns.map(quoteIdentifier).join(", ")}) references ${quoteIdentifier(
+    "erp_financials"
+  )}.${quoteIdentifier(referencedTable)} (${referencedColumns.map(quoteIdentifier).join(", ")}) on update restrict on delete restrict`
+});
+
 const table = (
   name: string,
   description: string,
   columns: readonly PostgresColumnManifest[],
   constraints: readonly PostgresConstraintManifest[],
   indexes: readonly PostgresIndexManifest[],
-  sourceScoped = true
+  sourceScoped = true,
+  tenantScoped = true
 ): PostgresTableManifest => ({
   name,
   description,
@@ -110,7 +125,7 @@ const table = (
   constraints,
   indexes,
   policies: {
-    tenantScoped: true,
+    tenantScoped,
     sourceScoped,
     noRawCredentials: true,
     boundedJson: columns.some((column) => column.type === "jsonb")
@@ -118,11 +133,52 @@ const table = (
 });
 
 export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
-  manifestVersion: "2026-08-11.transaction-matching-v1",
-  schemaVersion: 6,
+  manifestVersion: "2026-08-12.scoped-integrity-v1",
+  schemaVersion: 9,
   dialect: "postgres",
   namespace: "erp_financials",
   tables: [
+    table(
+      "schema_migrations",
+      "Ordered, checksum-verified package schema migration history.",
+      [
+        id("migration_id"),
+        integer("from_version"),
+        integer("to_version"),
+        text("name"),
+        text("checksum"),
+        text("manifest_version"),
+        integer("execution_ms"),
+        text("applied_by_ref"),
+        {
+          ...timestamp("applied_at"),
+          defaultSql: "clock_timestamp()"
+        }
+      ],
+      [
+        {
+          name: "schema_migrations_version_check",
+          sql: "from_version >= 0 and from_version < to_version"
+        },
+        {
+          name: "schema_migrations_checksum_check",
+          sql: "length(checksum) = 64"
+        },
+        {
+          name: "schema_migrations_execution_ms_check",
+          sql: "execution_ms >= 0"
+        }
+      ],
+      [
+        {
+          name: "schema_migrations_to_version_uidx",
+          columns: ["to_version"],
+          unique: true
+        }
+      ],
+      false,
+      false
+    ),
     table(
       "accounting_companies",
       "Tenant reporting entities.",
@@ -148,6 +204,11 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
           name: "accounting_companies_source_identity_uidx",
           columns: ["tenant_id", "source_system", "provider_environment", "source_company_ref"],
           unique: true
+        },
+        {
+          name: "accounting_companies_scope_uidx",
+          columns: ["tenant_id", "company_id"],
+          unique: true
         }
       ],
       false
@@ -172,9 +233,46 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
           name: "accounting_sources_connection_uidx",
           columns: ["tenant_id", "source_system", "provider_environment", "connection_ref"],
           unique: true
+        },
+        {
+          name: "accounting_sources_scope_uidx",
+          columns: ["tenant_id", "source_id"],
+          unique: true
         }
       ],
       false
+    ),
+    table(
+      "company_sources",
+      "Explicit allowed company/source bindings used to prevent cross-company financial writes.",
+      [
+        id("company_source_id"),
+        text("tenant_id"),
+        text("company_id"),
+        text("source_id"),
+        timestamp("created_at")
+      ],
+      [
+        foreignKey(
+          "company_sources_company_scope_fk",
+          ["tenant_id", "company_id"],
+          "accounting_companies",
+          ["tenant_id", "company_id"]
+        ),
+        foreignKey(
+          "company_sources_source_scope_fk",
+          ["tenant_id", "source_id"],
+          "accounting_sources",
+          ["tenant_id", "source_id"]
+        )
+      ],
+      [
+        {
+          name: "company_sources_scope_uidx",
+          columns: ["tenant_id", "company_id", "source_id"],
+          unique: true
+        }
+      ]
     ),
     table(
       "accounts",
@@ -193,7 +291,20 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         text("currency_code", true),
         bool("active")
       ],
-      [],
+      [
+        foreignKey(
+          "accounts_source_scope_fk",
+          ["tenant_id", "source_id"],
+          "accounting_sources",
+          ["tenant_id", "source_id"]
+        ),
+        foreignKey(
+          "accounts_parent_scope_fk",
+          ["tenant_id", "source_id", "parent_account_id"],
+          "accounts",
+          ["tenant_id", "source_id", "account_id"]
+        )
+      ],
       [
         {
           name: "accounts_source_account_uidx",
@@ -207,6 +318,11 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         {
           name: "accounts_parent_account_idx",
           columns: ["tenant_id", "source_id", "parent_account_id"]
+        },
+        {
+          name: "accounts_scope_uidx",
+          columns: ["tenant_id", "source_id", "account_id"],
+          unique: true
         }
       ]
     ),
@@ -222,11 +338,23 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         text("display_name"),
         bool("active")
       ],
-      [],
+      [
+        foreignKey(
+          "parties_source_scope_fk",
+          ["tenant_id", "source_id"],
+          "accounting_sources",
+          ["tenant_id", "source_id"]
+        )
+      ],
       [
         {
           name: "parties_source_party_uidx",
           columns: ["tenant_id", "source_id", "source_party_id"],
+          unique: true
+        },
+        {
+          name: "parties_scope_uidx",
+          columns: ["tenant_id", "source_id", "party_id"],
           unique: true
         }
       ]
@@ -246,11 +374,41 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         text("asset_account_id", true),
         bool("active")
       ],
-      [],
+      [
+        foreignKey(
+          "items_source_scope_fk",
+          ["tenant_id", "source_id"],
+          "accounting_sources",
+          ["tenant_id", "source_id"]
+        ),
+        foreignKey(
+          "items_income_account_scope_fk",
+          ["tenant_id", "source_id", "income_account_id"],
+          "accounts",
+          ["tenant_id", "source_id", "account_id"]
+        ),
+        foreignKey(
+          "items_expense_account_scope_fk",
+          ["tenant_id", "source_id", "expense_account_id"],
+          "accounts",
+          ["tenant_id", "source_id", "account_id"]
+        ),
+        foreignKey(
+          "items_asset_account_scope_fk",
+          ["tenant_id", "source_id", "asset_account_id"],
+          "accounts",
+          ["tenant_id", "source_id", "account_id"]
+        )
+      ],
       [
         {
           name: "items_source_item_uidx",
           columns: ["tenant_id", "source_id", "source_item_id"],
+          unique: true
+        },
+        {
+          name: "items_scope_uidx",
+          columns: ["tenant_id", "source_id", "item_id"],
           unique: true
         }
       ]
@@ -268,11 +426,29 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         text("parent_dimension_id", true),
         bool("active")
       ],
-      [],
+      [
+        foreignKey(
+          "accounting_dimensions_source_scope_fk",
+          ["tenant_id", "source_id"],
+          "accounting_sources",
+          ["tenant_id", "source_id"]
+        ),
+        foreignKey(
+          "accounting_dimensions_parent_scope_fk",
+          ["tenant_id", "source_id", "parent_dimension_id"],
+          "accounting_dimensions",
+          ["tenant_id", "source_id", "dimension_id"]
+        )
+      ],
       [
         {
           name: "accounting_dimensions_source_dimension_uidx",
           columns: ["tenant_id", "source_id", "dimension_kind", "source_dimension_id"],
+          unique: true
+        },
+        {
+          name: "accounting_dimensions_scope_uidx",
+          columns: ["tenant_id", "source_id", "dimension_id"],
           unique: true
         }
       ]
@@ -297,7 +473,20 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         text("memo", true),
         jsonb("source_payload_ref")
       ],
-      [],
+      [
+        foreignKey(
+          "transactions_source_scope_fk",
+          ["tenant_id", "source_id"],
+          "accounting_sources",
+          ["tenant_id", "source_id"]
+        ),
+        foreignKey(
+          "transactions_party_scope_fk",
+          ["tenant_id", "source_id", "party_id"],
+          "parties",
+          ["tenant_id", "source_id", "party_id"]
+        )
+      ],
       [
         {
           name: "transactions_source_transaction_uidx",
@@ -306,7 +495,12 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         },
         {
           name: "transactions_date_idx",
-          columns: ["tenant_id", "transaction_date"]
+          columns: ["tenant_id", "source_id", "transaction_date"]
+        },
+        {
+          name: "transactions_scope_uidx",
+          columns: ["tenant_id", "source_id", "transaction_id"],
+          unique: true
         }
       ]
     ),
@@ -316,6 +510,7 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
       [
         id("transaction_line_id"),
         text("tenant_id"),
+        text("source_id"),
         text("transaction_id"),
         integer("line_number"),
         text("account_id", true),
@@ -331,16 +526,44 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         {
           name: "transaction_lines_line_number_check",
           sql: "line_number >= 0"
-        }
+        },
+        foreignKey(
+          "transaction_lines_transaction_scope_fk",
+          ["tenant_id", "source_id", "transaction_id"],
+          "transactions",
+          ["tenant_id", "source_id", "transaction_id"]
+        ),
+        foreignKey(
+          "transaction_lines_account_scope_fk",
+          ["tenant_id", "source_id", "account_id"],
+          "accounts",
+          ["tenant_id", "source_id", "account_id"]
+        ),
+        foreignKey(
+          "transaction_lines_party_scope_fk",
+          ["tenant_id", "source_id", "party_id"],
+          "parties",
+          ["tenant_id", "source_id", "party_id"]
+        ),
+        foreignKey(
+          "transaction_lines_item_scope_fk",
+          ["tenant_id", "source_id", "item_id"],
+          "items",
+          ["tenant_id", "source_id", "item_id"]
+        )
       ],
       [
         {
           name: "transaction_lines_transaction_line_uidx",
-          columns: ["tenant_id", "transaction_id", "line_number"],
+          columns: ["tenant_id", "source_id", "transaction_id", "line_number"],
+          unique: true
+        },
+        {
+          name: "transaction_lines_scope_uidx",
+          columns: ["tenant_id", "source_id", "transaction_line_id"],
           unique: true
         }
-      ],
-      false
+      ]
     ),
     table(
       "ledger_postings",
@@ -379,7 +602,45 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         {
           name: "ledger_postings_dimension_hash_check",
           sql: "length(dimension_hash) = 64"
-        }
+        },
+        {
+          name: "ledger_postings_single_sided_check",
+          sql: "(debit_amount > 0 and credit_amount = 0) or (credit_amount > 0 and debit_amount = 0)"
+        },
+        {
+          name: "ledger_postings_net_amount_check",
+          sql: "net_amount = debit_amount - credit_amount"
+        },
+        foreignKey(
+          "ledger_postings_transaction_scope_fk",
+          ["tenant_id", "source_id", "transaction_id"],
+          "transactions",
+          ["tenant_id", "source_id", "transaction_id"]
+        ),
+        foreignKey(
+          "ledger_postings_transaction_line_scope_fk",
+          ["tenant_id", "source_id", "transaction_line_id"],
+          "transaction_lines",
+          ["tenant_id", "source_id", "transaction_line_id"]
+        ),
+        foreignKey(
+          "ledger_postings_account_scope_fk",
+          ["tenant_id", "source_id", "account_id"],
+          "accounts",
+          ["tenant_id", "source_id", "account_id"]
+        ),
+        foreignKey(
+          "ledger_postings_party_scope_fk",
+          ["tenant_id", "source_id", "party_id"],
+          "parties",
+          ["tenant_id", "source_id", "party_id"]
+        ),
+        foreignKey(
+          "ledger_postings_item_scope_fk",
+          ["tenant_id", "source_id", "item_id"],
+          "items",
+          ["tenant_id", "source_id", "item_id"]
+        )
       ],
       [
         {
@@ -441,7 +702,13 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         {
           name: "posting_rules_updated_at_check",
           sql: "updated_at >= created_at"
-        }
+        },
+        foreignKey(
+          "posting_rules_source_scope_fk",
+          ["tenant_id", "source_id"],
+          "accounting_sources",
+          ["tenant_id", "source_id"]
+        )
       ],
       [
         {
@@ -502,7 +769,19 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         {
           name: "transaction_match_candidates_evidence_shape_check",
           sql: "jsonb_typeof(evidence) = 'array' and jsonb_array_length(evidence) > 0"
-        }
+        },
+        foreignKey(
+          "transaction_match_candidates_origin_scope_fk",
+          ["tenant_id", "source_id", "origin_transaction_id"],
+          "transactions",
+          ["tenant_id", "source_id", "transaction_id"]
+        ),
+        foreignKey(
+          "transaction_match_candidates_target_scope_fk",
+          ["tenant_id", "source_id", "target_transaction_id"],
+          "transactions",
+          ["tenant_id", "source_id", "transaction_id"]
+        )
       ],
       [
         {
@@ -520,6 +799,11 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         {
           name: "transaction_match_candidates_origin_status_idx",
           columns: ["tenant_id", "source_id", "origin_transaction_id", "status", "score"]
+        },
+        {
+          name: "transaction_match_candidates_scope_uidx",
+          columns: ["tenant_id", "source_id", "match_candidate_id"],
+          unique: true
         }
       ]
     ),
@@ -550,7 +834,13 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         {
           name: "transaction_match_decisions_manual_actor_check",
           sql: "method <> 'manual' or (decided_by_ref is not null and btrim(decided_by_ref) <> '')"
-        }
+        },
+        foreignKey(
+          "transaction_match_decisions_candidate_scope_fk",
+          ["tenant_id", "source_id", "match_candidate_id"],
+          "transaction_match_candidates",
+          ["tenant_id", "source_id", "match_candidate_id"]
+        )
       ],
       [
         {
@@ -597,7 +887,25 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         {
           name: "payment_applications_updated_at_check",
           sql: "updated_at >= created_at"
-        }
+        },
+        foreignKey(
+          "payment_applications_payment_scope_fk",
+          ["tenant_id", "source_id", "payment_transaction_id"],
+          "transactions",
+          ["tenant_id", "source_id", "transaction_id"]
+        ),
+        foreignKey(
+          "payment_applications_invoice_scope_fk",
+          ["tenant_id", "source_id", "invoice_transaction_id"],
+          "transactions",
+          ["tenant_id", "source_id", "transaction_id"]
+        ),
+        foreignKey(
+          "payment_applications_decision_scope_fk",
+          ["tenant_id", "source_id", "match_decision_id"],
+          "transaction_match_decisions",
+          ["tenant_id", "source_id", "match_decision_id"]
+        )
       ],
       [
         {
@@ -657,7 +965,19 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         {
           name: "rollup_buckets_posting_count_check",
           sql: "posting_count >= 0"
-        }
+        },
+        foreignKey(
+          "rollup_buckets_company_source_scope_fk",
+          ["tenant_id", "company_id", "source_id"],
+          "company_sources",
+          ["tenant_id", "company_id", "source_id"]
+        ),
+        foreignKey(
+          "rollup_buckets_account_scope_fk",
+          ["tenant_id", "source_id", "account_id"],
+          "accounts",
+          ["tenant_id", "source_id", "account_id"]
+        )
       ],
       [
         {
@@ -714,7 +1034,14 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         jsonb("warning_summary"),
         jsonb("error_summary")
       ],
-      [],
+      [
+        foreignKey(
+          "import_batches_source_scope_fk",
+          ["tenant_id", "source_id"],
+          "accounting_sources",
+          ["tenant_id", "source_id"]
+        )
+      ],
       [
         {
           name: "import_batches_source_batch_uidx",
@@ -741,11 +1068,23 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         timestamp("latest_source_updated_at", true),
         text("status")
       ],
-      [],
+      [
+        foreignKey(
+          "sync_checkpoints_source_scope_fk",
+          ["tenant_id", "source_id"],
+          "accounting_sources",
+          ["tenant_id", "source_id"]
+        )
+      ],
       [
         {
           name: "sync_checkpoints_source_object_uidx",
           columns: ["tenant_id", "source_id", "source_object", "cursor_kind"],
+          unique: true
+        },
+        {
+          name: "sync_checkpoints_scope_uidx",
+          columns: ["tenant_id", "source_id", "checkpoint_id"],
           unique: true
         }
       ]
@@ -774,7 +1113,13 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         {
           name: "report_freshness_period_check",
           sql: "period_start <= period_end"
-        }
+        },
+        foreignKey(
+          "report_freshness_company_source_scope_fk",
+          ["tenant_id", "company_id", "source_id"],
+          "company_sources",
+          ["tenant_id", "company_id", "source_id"]
+        )
       ],
       [
         {
@@ -804,6 +1149,8 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
       [
         id("report_snapshot_id"),
         text("tenant_id"),
+        text("company_id"),
+        text("source_id"),
         text("report_name"),
         text("snapshot_source"),
         text("accounting_basis"),
@@ -820,13 +1167,21 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         {
           name: "report_snapshots_period_check",
           sql: "period_start <= period_end"
-        }
+        },
+        foreignKey(
+          "report_snapshots_company_source_scope_fk",
+          ["tenant_id", "company_id", "source_id"],
+          "company_sources",
+          ["tenant_id", "company_id", "source_id"]
+        )
       ],
       [
         {
           name: "report_snapshots_request_uidx",
           columns: [
             "tenant_id",
+            "company_id",
+            "source_id",
             "report_name",
             "snapshot_source",
             "accounting_basis",
@@ -836,9 +1191,13 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
             "currency_code"
           ],
           unique: true
+        },
+        {
+          name: "report_snapshots_scope_uidx",
+          columns: ["tenant_id", "company_id", "source_id", "report_snapshot_id"],
+          unique: true
         }
-      ],
-      false
+      ]
     ),
     table(
       "report_snapshot_lines",
@@ -846,6 +1205,8 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
       [
         id("report_line_id"),
         text("tenant_id"),
+        text("company_id"),
+        text("source_id"),
         text("report_snapshot_id"),
         text("parent_report_line_id", true),
         text("section"),
@@ -855,15 +1216,38 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         integer("sort_order"),
         jsonb("drilldown_ref")
       ],
-      [],
+      [
+        foreignKey(
+          "report_snapshot_lines_snapshot_scope_fk",
+          ["tenant_id", "company_id", "source_id", "report_snapshot_id"],
+          "report_snapshots",
+          ["tenant_id", "company_id", "source_id", "report_snapshot_id"]
+        ),
+        foreignKey(
+          "report_snapshot_lines_parent_scope_fk",
+          ["tenant_id", "company_id", "source_id", "parent_report_line_id"],
+          "report_snapshot_lines",
+          ["tenant_id", "company_id", "source_id", "report_line_id"]
+        ),
+        foreignKey(
+          "report_snapshot_lines_account_scope_fk",
+          ["tenant_id", "source_id", "account_id"],
+          "accounts",
+          ["tenant_id", "source_id", "account_id"]
+        )
+      ],
       [
         {
           name: "report_snapshot_lines_sort_uidx",
-          columns: ["tenant_id", "report_snapshot_id", "sort_order", "report_line_id"],
+          columns: ["tenant_id", "company_id", "source_id", "report_snapshot_id", "sort_order", "report_line_id"],
+          unique: true
+        },
+        {
+          name: "report_snapshot_lines_scope_uidx",
+          columns: ["tenant_id", "company_id", "source_id", "report_line_id"],
           unique: true
         }
-      ],
-      false
+      ]
     ),
     table(
       "report_snapshot_totals",
@@ -871,21 +1255,29 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
       [
         id("report_total_id"),
         text("tenant_id"),
+        text("company_id"),
+        text("source_id"),
         text("report_snapshot_id"),
         text("total_key"),
         text("label"),
         numeric("amount"),
         jsonb("drilldown_ref")
       ],
-      [],
+      [
+        foreignKey(
+          "report_snapshot_totals_snapshot_scope_fk",
+          ["tenant_id", "company_id", "source_id", "report_snapshot_id"],
+          "report_snapshots",
+          ["tenant_id", "company_id", "source_id", "report_snapshot_id"]
+        )
+      ],
       [
         {
           name: "report_snapshot_totals_total_key_uidx",
-          columns: ["tenant_id", "report_snapshot_id", "total_key"],
+          columns: ["tenant_id", "company_id", "source_id", "report_snapshot_id", "total_key"],
           unique: true
         }
-      ],
-      false
+      ]
     )
   ]
 } as const;
@@ -938,7 +1330,8 @@ function renderTableSql(namespace: string, tableManifest: PostgresTableManifest)
       : [];
   const checkDefinitions = [
     ...tableManifest.constraints.map(
-      (constraint) => `constraint ${quoteIdentifier(constraint.name)} check (${constraint.sql})`
+      (constraint) =>
+        `constraint ${quoteIdentifier(constraint.name)} ${constraint.kind === "foreign_key" ? constraint.sql : `check (${constraint.sql})`}`
     ),
     ...tableManifest.columns
       .filter((column) => column.type === "jsonb" && column.maxBytes !== undefined)

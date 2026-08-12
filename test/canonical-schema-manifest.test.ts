@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   POSTGRES_CANONICAL_SCHEMA_MANIFEST,
+  POSTGRES_MIGRATIONS,
   assertLedgerPostingAmounts,
   assertManifestHasNoCredentialColumns,
   assertNoCredentialKeys,
@@ -17,17 +18,27 @@ const FUTURE_ERP_CANONICAL_SCHEMA_MIGRATION_SQL = readFileSync(
   new URL("../migrations/future-erp/20260620000000_create_erp_financials_canonical_schema.sql", import.meta.url),
   "utf8"
 );
+const REPORT_SNAPSHOT_SCOPE_UPGRADE_SQL = readFileSync(
+  new URL("../migrations/future-erp/20260812000000_scope_report_snapshots.sql", import.meta.url),
+  "utf8"
+);
+const MIGRATION_LEDGER_UPGRADE_SQL = readFileSync(
+  new URL("../migrations/future-erp/20260812010000_add_schema_migration_ledger.sql", import.meta.url),
+  "utf8"
+);
 
 describe("canonical schema manifest", () => {
   it("is versioned and covers the documented canonical entities", () => {
-    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.manifestVersion).toBe("2026-08-11.transaction-matching-v1");
-    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion).toBe(6);
+    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.manifestVersion).toBe("2026-08-12.scoped-integrity-v1");
+    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion).toBe(9);
 
     const tableNames = POSTGRES_CANONICAL_SCHEMA_MANIFEST.tables.map((table) => table.name);
 
     expect(tableNames).toEqual([
+      "schema_migrations",
       "accounting_companies",
       "accounting_sources",
+      "company_sources",
       "accounts",
       "parties",
       "items",
@@ -93,6 +104,12 @@ describe("canonical schema manifest", () => {
     expect(firstRender).toContain(
       'create unique index if not exists "report_freshness_identity_uidx" on "erp_financials"."report_freshness" ("tenant_id", "company_id", "source_id", "report_name", "accounting_basis", "period_start", "period_end", "currency_code");'
     );
+    expect(firstRender).toContain(
+      'create unique index if not exists "report_snapshots_request_uidx" on "erp_financials"."report_snapshots" ("tenant_id", "company_id", "source_id", "report_name", "snapshot_source", "accounting_basis", "period_start", "period_end", "as_of_date", "currency_code");'
+    );
+    expect(
+      POSTGRES_CANONICAL_SCHEMA_MANIFEST.tables.find((table) => table.name === "report_snapshots")?.policies.sourceScoped
+    ).toBe(true);
     expect(firstRender).toContain(
       "constraint \"transactions_source_payload_ref_bounded_json_check\" check (octet_length(coalesce(\"source_payload_ref\"::text, '')) <= 4096)"
     );
@@ -180,11 +197,35 @@ describe("canonical schema manifest", () => {
     }
   });
 
-  it("keeps the Future ERP migration aligned to the canonical Postgres renderer", () => {
-    expect(FUTURE_ERP_CANONICAL_SCHEMA_MIGRATION_SQL).toBe(renderPostgresSchemaSql(POSTGRES_CANONICAL_SCHEMA_MANIFEST));
+  it("keeps historical migrations immutable and exposes an ordered path to the canonical renderer", () => {
+    expect(FUTURE_ERP_CANONICAL_SCHEMA_MIGRATION_SQL).not.toContain('"schema_migrations"');
+    expect(FUTURE_ERP_CANONICAL_SCHEMA_MIGRATION_SQL).not.toContain(
+      '"report_snapshots" (\n  "report_snapshot_id" text not null,\n  "tenant_id" text not null,\n  "company_id"'
+    );
+    expect(MIGRATION_LEDGER_UPGRADE_SQL).toContain('create table if not exists "erp_financials"."schema_migrations"');
+    expect(POSTGRES_MIGRATIONS.map(({ fromVersion, toVersion }) => [fromVersion, toVersion])).toEqual([
+      [0, 6],
+      [6, 7],
+      [7, 8],
+      [8, 9]
+    ]);
+    expect(renderPostgresSchemaSql()).toContain('create table if not exists "erp_financials"."schema_migrations"');
     expect(FUTURE_ERP_CANONICAL_SCHEMA_MIGRATION_SQL).not.toMatch(
       /\b(token|secret|credential|password|client_secret|access_token|refresh_token|raw_provider_payload|raw_payload)\b/i
     );
+  });
+
+  it("ships a fail-closed v6 to v7 report snapshot scope upgrade", () => {
+    expect(REPORT_SNAPSHOT_SCOPE_UPGRADE_SQL).toContain('add column if not exists "company_id" text');
+    expect(REPORT_SNAPSHOT_SCOPE_UPGRADE_SQL).toContain('add column if not exists "source_id" text');
+    expect(REPORT_SNAPSHOT_SCOPE_UPGRADE_SQL).toContain(
+      "each legacy snapshot must map to exactly one company/source through report_freshness"
+    );
+    expect(REPORT_SNAPSHOT_SCOPE_UPGRADE_SQL).toContain('alter column "company_id" set not null');
+    expect(REPORT_SNAPSHOT_SCOPE_UPGRADE_SQL).toContain('alter column "source_id" set not null');
+    expect(REPORT_SNAPSHOT_SCOPE_UPGRADE_SQL).toContain("':legacy-line:' || length(lines.\"report_line_id\")::text");
+    expect(REPORT_SNAPSHOT_SCOPE_UPGRADE_SQL).toContain("':legacy-total:' || length(totals.\"report_total_id\")::text");
+    expect(REPORT_SNAPSHOT_SCOPE_UPGRADE_SQL).toContain('rs."snapshot_source"');
   });
 });
 

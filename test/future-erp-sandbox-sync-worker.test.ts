@@ -31,7 +31,7 @@ type CatalogRow = {
   readonly object_name: string;
 };
 
-const EXPECTED_OWNER_EVIDENCE_HASH = "9a5af739bb621b9f358cbba3ff4a5dcd9b9b85e7b4ff5f419380082997619401";
+const EXPECTED_OWNER_EVIDENCE_HASH = "b45d1e57699f37046849941eee9858d9313ec13a1f9fcb65863a1dcbc17f36ee";
 
 describe("Future ERP QuickBooks sandbox sync worker", () => {
   it("preflights the SDK/service and returns safe replay import metadata", async () => {
@@ -338,10 +338,13 @@ describe("Future ERP QuickBooks sandbox sync worker", () => {
     });
     expect(result.reports?.snapshotIds).toEqual({
       profit_and_loss:
-        "snapshot:tenant_qbo_sync_fixture:profit_and_loss:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
-      balance_sheet: "snapshot:tenant_qbo_sync_fixture:balance_sheet:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
-      trial_balance: "snapshot:tenant_qbo_sync_fixture:trial_balance:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
-      cash_flow: "snapshot:tenant_qbo_sync_fixture:cash_flow:accrual:2026-01-01:2026-01-31:2026-01-31:USD"
+        "snapshot:tenant_qbo_sync_fixture:company_future_erp_qbo_fixture:source_qbo_sync_fixture:profit_and_loss:builder:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
+      balance_sheet:
+        "snapshot:tenant_qbo_sync_fixture:company_future_erp_qbo_fixture:source_qbo_sync_fixture:balance_sheet:builder:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
+      trial_balance:
+        "snapshot:tenant_qbo_sync_fixture:company_future_erp_qbo_fixture:source_qbo_sync_fixture:trial_balance:builder:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
+      cash_flow:
+        "snapshot:tenant_qbo_sync_fixture:company_future_erp_qbo_fixture:source_qbo_sync_fixture:cash_flow:builder:accrual:2026-01-01:2026-01-31:2026-01-31:USD"
     });
     expect(writeQueryTables(client.calls).filter((table) => table === "report_snapshots")).toHaveLength(4);
     expect(writeQueryTables(client.calls).filter((table) => table === "report_freshness")).toHaveLength(4);

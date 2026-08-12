@@ -4,6 +4,7 @@ import type {
   AccountingCompany,
   AccountingDimension,
   AccountingSource,
+  CompanySourceBinding,
   AccountingTransaction,
   DecimalString,
   ImportBatch,
@@ -34,6 +35,7 @@ import {
   assertNoCredentialKeys,
   assertSafeDrilldownRef,
   assertSafeSourcePayloadRef,
+  createCompanySourceBinding,
   createCompactDrilldownRef
 } from "./canonical-model.js";
 import {
@@ -58,7 +60,7 @@ import {
   assertManifestHasNoCredentialColumns,
   renderPostgresSchemaSql
 } from "./schema-manifest.js";
-import type { PostgresSchemaManifest, PostgresTableManifest } from "./schema-manifest.js";
+import type { PostgresColumnManifest, PostgresSchemaManifest, PostgresTableManifest } from "./schema-manifest.js";
 import type {
   StandardReportAccountingMethod,
   StandardReportDisplayColumnsBy,
@@ -96,6 +98,10 @@ export type PostgresSchemaValidationIssueKind =
   | "missing_schema"
   | "missing_table"
   | "missing_column"
+  | "incompatible_column_type"
+  | "incompatible_column_nullability"
+  | "incompatible_index_definition"
+  | "incompatible_constraint_definition"
   | "missing_index"
   | "missing_constraint"
   | "credential_column"
@@ -194,6 +200,12 @@ export type LoadReportBuilderInput = {
   readonly generatedAt?: IsoDateTime;
 };
 
+export type LoadAccountsInput = {
+  readonly tenantId: TenantId;
+  readonly sourceId: SourceId;
+  readonly accountIds?: readonly string[];
+};
+
 export type StoredReportSnapshot = {
   readonly snapshot: ReportSnapshot;
   readonly lines: readonly ReportSnapshotLine[];
@@ -202,6 +214,8 @@ export type StoredReportSnapshot = {
 
 export type LoadReportSnapshotInput = {
   readonly tenantId: TenantId;
+  readonly companyId: string;
+  readonly sourceId: SourceId;
   readonly reportName: ReportName;
   readonly accountingBasis: AccountingBasis;
   readonly periodStart: IsoDate;
@@ -251,6 +265,7 @@ export type PostgresStorageAdapter = StandardReportPresentationReadModelStorage 
   validateSchema(): Promise<PostgresSchemaValidationResult>;
   upsertAccountingCompany(company: AccountingCompany): Promise<number>;
   upsertAccountingSource(source: AccountingSource): Promise<number>;
+  upsertCompanySourceBinding(binding: CompanySourceBinding): Promise<number>;
   upsertImportBatch(importBatch: ImportBatch): Promise<number>;
   upsertSyncCheckpoint(checkpoint: SyncCheckpoint): Promise<number>;
   upsertAccounts(accounts: readonly Account[]): Promise<number>;
@@ -275,6 +290,7 @@ export type PostgresStorageAdapter = StandardReportPresentationReadModelStorage 
   markReportSnapshotsStale(input: MarkReportSnapshotsStaleInput): Promise<number>;
   markReportSnapshotsStaleForPostingChanges(input: MarkReportSnapshotsStaleForPostingChangesInput): Promise<number>;
   markReportSnapshotsStaleForAccountHierarchyChanges(input: MarkReportSnapshotsStaleForAccountHierarchyChangesInput): Promise<number>;
+  loadAccounts(input: LoadAccountsInput): Promise<readonly Account[]>;
   loadReportBuilderInput(input: LoadReportBuilderInput): Promise<ReportBuilderInput>;
   loadLatestReportSnapshot(input: LoadReportSnapshotInput): Promise<StoredReportSnapshot | undefined>;
   loadRollupBuckets(input: LoadRollupBucketsInput): Promise<readonly RollupBucket[]>;
@@ -309,6 +325,8 @@ export type DeleteLedgerFactsOutsideImportBatchResult = {
 
 export type MarkReportSnapshotsStaleForPostingChangesInput = {
   readonly tenantId: TenantId;
+  readonly companyId: string;
+  readonly sourceId: SourceId;
   readonly affectedStart: IsoDate;
   readonly affectedEnd: IsoDate;
   readonly staleReason: string;
@@ -333,6 +351,9 @@ type CatalogRow = {
   readonly object_type: "schema" | "table" | "column" | "index" | "constraint";
   readonly table_name: string | null;
   readonly object_name: string;
+  readonly data_type?: string | null;
+  readonly is_nullable?: string | null;
+  readonly definition?: string | null;
 };
 
 const FIXTURE_SUPPORT_TABLES = [
@@ -387,6 +408,13 @@ export function createPostgresStorageAdapter(
         "connection_ref"
       ]);
     },
+    async upsertCompanySourceBinding(binding) {
+      return upsertRows(client, manifest, "company_sources", [companySourceBindingRow(binding)], [
+        "tenant_id",
+        "company_id",
+        "source_id"
+      ]);
+    },
     async upsertImportBatch(importBatch) {
       return upsertRows(client, manifest, "import_batches", [importBatchRow(importBatch)], [
         "tenant_id",
@@ -439,6 +467,7 @@ export function createPostgresStorageAdapter(
     async upsertTransactionLines(lines) {
       return upsertRows(client, manifest, "transaction_lines", lines.map(transactionLineRow), [
         "tenant_id",
+        "source_id",
         "transaction_id",
         "line_number"
       ]);
@@ -549,6 +578,9 @@ export function createPostgresStorageAdapter(
     async markReportSnapshotsStaleForAccountHierarchyChanges(input) {
       return markReportSnapshotsStaleForAccountHierarchyChanges(client, manifest, input);
     },
+    async loadAccounts(input) {
+      return loadAccounts(client, manifest, input);
+    },
     async loadReportBuilderInput(input) {
       return loadReportBuilderInput(client, manifest, input);
     },
@@ -593,6 +625,7 @@ export async function validatePostgresSchema(
   assertManifestHasNoCredentialColumns(manifest);
   const catalogRows = await readCatalogRows(client, manifest.namespace);
   const available = new Set(catalogRows.map(catalogKey));
+  const catalogByKey = new Map(catalogRows.map((row) => [catalogKey(row), row]));
   const issues: PostgresSchemaValidationIssue[] = [];
 
   if (!available.has(`schema::${manifest.namespace}`)) {
@@ -614,13 +647,35 @@ export async function validatePostgresSchema(
     }
 
     for (const column of table.columns) {
-      if (!available.has(`column::${table.name}.${column.name}`)) {
+      const key = `column::${table.name}.${column.name}`;
+      const catalogColumn = catalogByKey.get(key);
+      if (catalogColumn === undefined) {
         issues.push({
           kind: "missing_column",
           table: table.name,
           objectName: column.name,
           message: `missing column ${manifest.namespace}.${table.name}.${column.name}`
         });
+      }
+      if (catalogColumn?.data_type != null && normalizePostgresType(catalogColumn.data_type) !== column.type) {
+        issues.push({
+          kind: "incompatible_column_type",
+          table: table.name,
+          objectName: column.name,
+          message: `incompatible column type for ${manifest.namespace}.${table.name}.${column.name}: expected ${column.type}, found ${catalogColumn.data_type}`
+        });
+      }
+      if (catalogColumn?.is_nullable != null) {
+        const actualNullable = catalogColumn.is_nullable.toUpperCase() === "YES";
+        const expectedNullable = column.nullable === true;
+        if (actualNullable !== expectedNullable) {
+          issues.push({
+            kind: "incompatible_column_nullability",
+            table: table.name,
+            objectName: column.name,
+            message: `incompatible nullability for ${manifest.namespace}.${table.name}.${column.name}: expected ${expectedNullable ? "nullable" : "not null"}`
+          });
+        }
       }
       if (isDisallowedCredentialColumnName(column.name)) {
         issues.push({
@@ -633,23 +688,51 @@ export async function validatePostgresSchema(
     }
 
     for (const index of table.indexes) {
-      if (!available.has(`index::${index.name}`)) {
+      const key = `index::${index.name}`;
+      const catalogIndex = catalogByKey.get(key);
+      if (catalogIndex === undefined) {
         issues.push({
           kind: "missing_index",
           table: table.name,
           objectName: index.name,
           message: `missing index ${manifest.namespace}.${index.name}`
         });
+      } else if (
+        catalogIndex.definition != null &&
+        !indexDefinitionMatches(catalogIndex.definition, index.columns, index.unique === true)
+      ) {
+        issues.push({
+          kind: "incompatible_index_definition",
+          table: table.name,
+          objectName: index.name,
+          message: `incompatible index definition for ${manifest.namespace}.${index.name}`
+        });
       }
     }
 
     for (const constraintName of expectedConstraintNames(table)) {
-      if (!available.has(`constraint::${table.name}.${constraintName}`)) {
+      const key = `constraint::${table.name}.${constraintName}`;
+      const catalogConstraint = catalogByKey.get(key);
+      if (catalogConstraint === undefined) {
         issues.push({
           kind: "missing_constraint",
           table: table.name,
           objectName: constraintName,
           message: `missing constraint ${manifest.namespace}.${table.name}.${constraintName}`
+        });
+      }
+    }
+    for (const constraint of table.constraints.filter((entry) => entry.kind === "foreign_key")) {
+      const catalogConstraint = catalogByKey.get(`constraint::${table.name}.${constraint.name}`);
+      if (
+        catalogConstraint?.definition != null &&
+        normalizeForeignKeyDefinition(catalogConstraint.definition) !== normalizeForeignKeyDefinition(constraint.sql)
+      ) {
+        issues.push({
+          kind: "incompatible_constraint_definition",
+          table: table.name,
+          objectName: constraint.name,
+          message: `incompatible foreign-key definition for ${manifest.namespace}.${table.name}.${constraint.name}`
         });
       }
     }
@@ -684,9 +767,20 @@ async function loadStatementFixture(
 ): Promise<FixtureLoadResult> {
   const adapter = createPostgresStorageAdapter(client, manifest);
 
+  const companies = await adapter.upsertAccountingCompany(fixture.company);
+  const sources = await adapter.upsertAccountingSource(fixture.source);
+  await adapter.upsertCompanySourceBinding(
+    createCompanySourceBinding({
+      tenantId: fixture.company.tenantId,
+      companyId: fixture.company.companyId,
+      sourceId: fixture.source.sourceId,
+      createdAt: fixture.importBatch.startedAt
+    })
+  );
+
   return {
-    companies: await adapter.upsertAccountingCompany(fixture.company),
-    sources: await adapter.upsertAccountingSource(fixture.source),
+    companies,
+    sources,
     importBatches: await adapter.upsertImportBatch(fixture.importBatch),
     checkpoints: await adapter.upsertSyncCheckpoint(fixture.checkpoint),
     accounts: await adapter.upsertAccounts(fixture.accounts),
@@ -704,8 +798,11 @@ async function writeReportSnapshot(
   manifest: PostgresSchemaManifest,
   report: BuiltReport
 ): Promise<number> {
+  assertReportSnapshotWriteScope(report);
   const snapshotCount = await upsertRows(client, manifest, "report_snapshots", [reportSnapshotRow(report.snapshot)], [
     "tenant_id",
+    "company_id",
+    "source_id",
     "report_name",
     "snapshot_source",
     "accounting_basis",
@@ -719,6 +816,8 @@ async function writeReportSnapshot(
     manifest,
     "report_snapshot_lines",
     report.snapshot.tenantId,
+    report.snapshot.companyId,
+    report.snapshot.sourceId,
     report.snapshot.reportSnapshotId,
     "report_line_id",
     report.lines.map((line) => line.reportLineId)
@@ -728,22 +827,59 @@ async function writeReportSnapshot(
     manifest,
     "report_snapshot_totals",
     report.snapshot.tenantId,
+    report.snapshot.companyId,
+    report.snapshot.sourceId,
     report.snapshot.reportSnapshotId,
     "report_total_id",
     report.totals.map((total) => total.reportTotalId)
   );
-  const lineCount = await upsertRows(client, manifest, "report_snapshot_lines", report.lines.map(reportSnapshotLineRow), [
-    "report_line_id"
-  ]);
+  const lineCount = await upsertRows(
+    client,
+    manifest,
+    "report_snapshot_lines",
+    report.lines.map((line) => reportSnapshotLineRow(line, report.snapshot)),
+    ["tenant_id", "company_id", "source_id", "report_line_id"]
+  );
   const totalCount = await upsertRows(
     client,
     manifest,
     "report_snapshot_totals",
-    report.totals.map(reportSnapshotTotalRow),
-    ["report_total_id"]
+    report.totals.map((total) => reportSnapshotTotalRow(total, report.snapshot)),
+    ["tenant_id", "company_id", "source_id", "report_total_id"]
   );
 
   return snapshotCount + lineCount + totalCount;
+}
+
+function assertReportSnapshotWriteScope(report: BuiltReport): void {
+  const { snapshot } = report;
+  const childIdPrefix = `${snapshot.reportSnapshotId}:`;
+  const lineIds = new Set(report.lines.map((line) => line.reportLineId));
+
+  if (snapshot.companyId.trim().length === 0 || snapshot.sourceId.trim().length === 0) {
+    throw new Error("report snapshot companyId and sourceId must not be empty");
+  }
+
+  for (const line of report.lines) {
+    if (line.tenantId !== snapshot.tenantId || line.reportSnapshotId !== snapshot.reportSnapshotId) {
+      throw new Error(`report snapshot line ${line.reportLineId} is outside the snapshot scope`);
+    }
+    if (!line.reportLineId.startsWith(childIdPrefix)) {
+      throw new Error(`report snapshot line ${line.reportLineId} must include its snapshot id`);
+    }
+    if (line.parentReportLineId !== undefined && !lineIds.has(line.parentReportLineId)) {
+      throw new Error(`report snapshot line ${line.reportLineId} references a parent outside the snapshot`);
+    }
+  }
+
+  for (const total of report.totals) {
+    if (total.tenantId !== snapshot.tenantId || total.reportSnapshotId !== snapshot.reportSnapshotId) {
+      throw new Error(`report snapshot total ${total.reportTotalId} is outside the snapshot scope`);
+    }
+    if (!total.reportTotalId.startsWith(childIdPrefix)) {
+      throw new Error(`report snapshot total ${total.reportTotalId} must include its snapshot id`);
+    }
+  }
 }
 
 async function markReportSnapshotsStale(
@@ -770,56 +906,19 @@ async function markReportSnapshotsStaleForPostingChanges(
   manifest: PostgresSchemaManifest,
   input: MarkReportSnapshotsStaleForPostingChangesInput
 ): Promise<number> {
-  const parameters: unknown[] = [input.tenantId, input.affectedStart, input.affectedEnd, input.staleReason];
-  const filters = [
-    `"tenant_id" = $1`,
-    `(("period_start" <= $3::date and "period_end" >= $2::date) or "as_of_date" >= $2::date)`
+  const parameters: unknown[] = [
+    input.tenantId,
+    input.affectedStart,
+    input.affectedEnd,
+    input.staleReason,
+    input.companyId,
+    input.sourceId
   ];
-
-  if (input.reportNames !== undefined && input.reportNames.length > 0) {
-    parameters.push(input.reportNames);
-    filters.push(`"report_name" = any($${String(parameters.length)}::text[])`);
-  }
-  if (input.accountingBasis !== undefined) {
-    parameters.push(input.accountingBasis);
-    filters.push(`"accounting_basis" = $${String(parameters.length)}`);
-  }
-  if (input.currencyCode !== undefined) {
-    parameters.push(input.currencyCode);
-    filters.push(`"currency_code" = $${String(parameters.length)}`);
-  }
-
-  const result = await client.query(
-    `update ${qualifiedTable(manifest, "report_snapshots")}
-set "freshness" = jsonb_set(coalesce("freshness", '{}'::jsonb), '{status}', '"stale"', true) || jsonb_build_object('staleReason', $4::text)
-where ${filters.join(" and ")}`,
-    parameters
-  );
-
-  return result.rowCount ?? 0;
-}
-
-async function markReportSnapshotsStaleForAccountHierarchyChanges(
-  client: PostgresQueryClient,
-  manifest: PostgresSchemaManifest,
-  input: MarkReportSnapshotsStaleForAccountHierarchyChangesInput
-): Promise<number> {
-  const parameters: unknown[] = [input.tenantId, input.companyId, input.sourceId, input.staleReason];
   const filters = [
     `rs."tenant_id" = $1`,
-    `exists (
-  select 1
-  from ${qualifiedTable(manifest, "report_freshness")} rf
-  where rf."tenant_id" = rs."tenant_id"
-    and rf."company_id" = $2
-    and rf."source_id" = $3
-    and rf."report_name" = rs."report_name"
-    and rf."accounting_basis" = rs."accounting_basis"
-    and rf."period_start" = rs."period_start"
-    and rf."period_end" = rs."period_end"
-    and rf."currency_code" = rs."currency_code"
-)`,
-    `(rs."freshness"->>'sourceId' is null or rs."freshness"->>'sourceId' = $3)`
+    `rs."company_id" = $5`,
+    `rs."source_id" = $6`,
+    `(("period_start" <= $3::date and "period_end" >= $2::date) or "as_of_date" >= $2::date)`
   ];
 
   if (input.reportNames !== undefined && input.reportNames.length > 0) {
@@ -843,6 +942,69 @@ where ${filters.join(" and ")}`,
   );
 
   return result.rowCount ?? 0;
+}
+
+async function markReportSnapshotsStaleForAccountHierarchyChanges(
+  client: PostgresQueryClient,
+  manifest: PostgresSchemaManifest,
+  input: MarkReportSnapshotsStaleForAccountHierarchyChangesInput
+): Promise<number> {
+  const parameters: unknown[] = [input.tenantId, input.companyId, input.sourceId, input.staleReason];
+  const filters = [
+    `rs."tenant_id" = $1`,
+    `rs."company_id" = $2`,
+    `rs."source_id" = $3`
+  ];
+
+  if (input.reportNames !== undefined && input.reportNames.length > 0) {
+    parameters.push(input.reportNames);
+    filters.push(`rs."report_name" = any($${String(parameters.length)}::text[])`);
+  }
+  if (input.accountingBasis !== undefined) {
+    parameters.push(input.accountingBasis);
+    filters.push(`rs."accounting_basis" = $${String(parameters.length)}`);
+  }
+  if (input.currencyCode !== undefined) {
+    parameters.push(input.currencyCode);
+    filters.push(`rs."currency_code" = $${String(parameters.length)}`);
+  }
+
+  const result = await client.query(
+    `update ${qualifiedTable(manifest, "report_snapshots")} rs
+set "freshness" = jsonb_set(coalesce(rs."freshness", '{}'::jsonb), '{status}', '"stale"', true) || jsonb_build_object('staleReason', $4::text)
+where ${filters.join(" and ")}`,
+    parameters
+  );
+
+  return result.rowCount ?? 0;
+}
+
+async function loadAccounts(
+  client: PostgresQueryClient,
+  manifest: PostgresSchemaManifest,
+  input: LoadAccountsInput
+): Promise<readonly Account[]> {
+  if (input.accountIds !== undefined && input.accountIds.length === 0) {
+    return [];
+  }
+
+  const parameters: unknown[] = [input.tenantId, input.sourceId];
+  const filters = [`"tenant_id" = $1`, `"source_id" = $2`];
+
+  if (input.accountIds !== undefined) {
+    parameters.push(input.accountIds);
+    filters.push(`"account_id" = any($3::text[])`);
+  }
+
+  const result = await client.query(
+    `select "account_id", "tenant_id", "source_id", "source_account_id", "account_number", "name", "type", "subtype", "classification", "parent_account_id", "currency_code", "active"
+from ${qualifiedTable(manifest, "accounts")}
+where ${filters.join(" and ")}
+order by "account_id"`,
+    parameters
+  );
+
+  return result.rows.map(accountFromRow);
 }
 
 async function deleteLedgerFactsOutsideImportBatch(
@@ -942,10 +1104,11 @@ limit 1`,
 
   return {
     tenantId: input.tenantId,
+    companyId: input.companyId,
+    sourceId: input.sourceId,
     accounts: accountResult.rows.map(accountFromRow),
     postings: postingResult.rows.map(ledgerPostingFromRow),
     accountingBasis: input.accountingBasis,
-    sourceId: input.sourceId,
     currencyCode: input.currencyCode,
     periodStart: input.periodStart,
     periodEnd: input.periodEnd,
@@ -961,19 +1124,23 @@ async function loadLatestReportSnapshot(
   input: LoadReportSnapshotInput
 ): Promise<StoredReportSnapshot | undefined> {
   const snapshotResult = await client.query<Row>(
-    `select "report_snapshot_id", "tenant_id", "report_name", "snapshot_source", "accounting_basis", "period_start", "period_end", "as_of_date", "currency_code", "generated_at", "freshness", "reconciliation_status", "reconciliation_difference"
+    `select "report_snapshot_id", "tenant_id", "company_id", "source_id", "report_name", "snapshot_source", "accounting_basis", "period_start", "period_end", "as_of_date", "currency_code", "generated_at", "freshness", "reconciliation_status", "reconciliation_difference"
 from ${qualifiedTable(manifest, "report_snapshots")}
 where "tenant_id" = $1
-  and "report_name" = $2
-  and "accounting_basis" = $3
-  and "period_start" = $4::date
-  and "period_end" = $5::date
-  and "as_of_date" = coalesce($6::date, $5::date)
-  and "currency_code" = $7
+  and "company_id" = $2
+  and "source_id" = $3
+  and "report_name" = $4
+  and "accounting_basis" = $5
+  and "period_start" = $6::date
+  and "period_end" = $7::date
+  and "as_of_date" = coalesce($8::date, $7::date)
+  and "currency_code" = $9
 order by "generated_at" desc
 limit 1`,
     [
       input.tenantId,
+      input.companyId,
+      input.sourceId,
       input.reportName,
       input.accountingBasis,
       input.periodStart,
@@ -990,18 +1157,18 @@ limit 1`,
 
   const snapshot = reportSnapshotFromRow(snapshotRow);
   const lineResult = await client.query<Row>(
-    `select "report_line_id", "tenant_id", "report_snapshot_id", "parent_report_line_id", "section", "label", "account_id", "amount", "sort_order", "drilldown_ref"
+    `select "report_line_id", "tenant_id", "company_id", "source_id", "report_snapshot_id", "parent_report_line_id", "section", "label", "account_id", "amount", "sort_order", "drilldown_ref"
 from ${qualifiedTable(manifest, "report_snapshot_lines")}
-where "tenant_id" = $1 and "report_snapshot_id" = $2
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3 and "report_snapshot_id" = $4
 order by "sort_order", "report_line_id"`,
-    [input.tenantId, snapshot.reportSnapshotId]
+    [input.tenantId, input.companyId, input.sourceId, snapshot.reportSnapshotId]
   );
   const totalResult = await client.query<Row>(
-    `select "report_total_id", "tenant_id", "report_snapshot_id", "total_key", "label", "amount", "drilldown_ref"
+    `select "report_total_id", "tenant_id", "company_id", "source_id", "report_snapshot_id", "total_key", "label", "amount", "drilldown_ref"
 from ${qualifiedTable(manifest, "report_snapshot_totals")}
-where "tenant_id" = $1 and "report_snapshot_id" = $2
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3 and "report_snapshot_id" = $4
 order by "report_total_id"`,
-    [input.tenantId, snapshot.reportSnapshotId]
+    [input.tenantId, input.companyId, input.sourceId, snapshot.reportSnapshotId]
   );
 
   return {
@@ -1078,6 +1245,8 @@ async function loadStandardReportPresentation(
   for (const group of groups) {
     const storedSnapshot = await loadLatestReportSnapshot(client, manifest, {
       tenantId: request.tenantId,
+      companyId: request.companyId,
+      sourceId: request.sourceId,
       reportName: request.reportName,
       accountingBasis: accountingMethod,
       periodStart: group.periodStart,
@@ -1100,6 +1269,8 @@ async function loadStandardReportPresentation(
 
   const primarySnapshot = await loadLatestReportSnapshot(client, manifest, {
     tenantId: request.tenantId,
+    companyId: request.companyId,
+    sourceId: request.sourceId,
     reportName: request.reportName,
     accountingBasis: accountingMethod,
     periodStart: request.periodStart,
@@ -1181,6 +1352,8 @@ async function loadDimensionStandardReportPresentationFromRollups(
   }));
   const primarySnapshot = await loadLatestReportSnapshot(client, manifest, {
     tenantId: request.tenantId,
+    companyId: request.companyId,
+    sourceId: request.sourceId,
     reportName: request.reportName,
     accountingBasis: accountingMethod,
     periodStart: request.periodStart,
@@ -1418,7 +1591,10 @@ function profitAndLossReportFromRollupRows(
   const reportSnapshotId = [
     "snapshot",
     request.tenantId,
+    request.companyId,
+    request.sourceId,
     request.reportName,
+    "rollup",
     accountingMethod,
     request.periodStart,
     request.periodEnd,
@@ -1556,6 +1732,8 @@ function profitAndLossReportFromRollupRows(
     snapshot: {
       reportSnapshotId,
       tenantId: request.tenantId,
+      companyId: request.companyId,
+      sourceId: request.sourceId,
       reportName: request.reportName,
       snapshotSource: "rollup",
       accountingBasis: accountingMethod,
@@ -1845,7 +2023,10 @@ function synthesizePrimaryReportFromColumns(
   const reportSnapshotId = [
     "snapshot",
     request.tenantId,
+    request.companyId,
+    request.sourceId,
     request.reportName,
+    "rollup",
     accountingMethod,
     request.periodStart,
     request.periodEnd,
@@ -1914,6 +2095,8 @@ function synthesizePrimaryReportFromColumns(
     snapshot: {
       reportSnapshotId,
       tenantId: request.tenantId,
+      companyId: request.companyId,
+      sourceId: request.sourceId,
       reportName: request.reportName,
       snapshotSource: "rollup",
       accountingBasis: accountingMethod,
@@ -1939,7 +2122,17 @@ function synthesizePrimaryReportFromColumns(
         ...aggregate.template,
         tenantId: request.tenantId,
         reportSnapshotId,
-        reportLineId: aggregate.template.accountId === undefined ? `presentation:${request.reportName}:line:${key}` : aggregate.template.reportLineId,
+        reportLineId:
+          aggregate.template.accountId === undefined
+            ? `${reportSnapshotId}:line:${key}`
+            : `${reportSnapshotId}:line:account:${key}`,
+        ...(aggregate.template.parentReportLineId === undefined
+          ? {}
+          : {
+              parentReportLineId: `${reportSnapshotId}:line:${
+                aggregate.template.parentReportLineId.split(":line:").at(-1) ?? aggregate.template.parentReportLineId
+              }`
+            }),
         amount: formatMoney(aggregate.amountMinor),
         sortOrder: (index + 1) * 10,
         drilldownRef: createCompactDrilldownRef({
@@ -1964,7 +2157,7 @@ function synthesizePrimaryReportFromColumns(
         ...aggregate.template,
         tenantId: request.tenantId,
         reportSnapshotId,
-        reportTotalId: `presentation:${request.reportName}:total:${key}`,
+        reportTotalId: `${reportSnapshotId}:total:${key}`,
         amount: formatMoney(aggregate.amountMinor),
         drilldownRef: createCompactDrilldownRef({
           token: `${request.reportName}:${key}`,
@@ -2201,14 +2394,16 @@ async function pruneMissingSnapshotChildren(
   manifest: PostgresSchemaManifest,
   tableName: string,
   tenantId: TenantId,
+  companyId: string,
+  sourceId: string,
   reportSnapshotId: string,
   idColumn: string,
   retainedIds: readonly string[]
 ): Promise<void> {
   await client.query(
     `delete from ${qualifiedTable(manifest, tableName)}
-where "tenant_id" = $1 and "report_snapshot_id" = $2 and not ("${idColumn}" = any($3::text[]))`,
-    [tenantId, reportSnapshotId, retainedIds]
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3 and "report_snapshot_id" = $4 and not ("${idColumn}" = any($5::text[]))`,
+    [tenantId, companyId, sourceId, reportSnapshotId, retainedIds]
   );
 }
 
@@ -2256,29 +2451,33 @@ on conflict (${conflictColumns.map(quoteIdentifier).join(", ")}) ${updateSql}`;
 
 async function readCatalogRows(client: PostgresQueryClient, namespace: string): Promise<readonly CatalogRow[]> {
   const result = await client.query<CatalogRow>(
-    `select 'schema'::text as object_type, null::text as table_name, schema_name as object_name
+    `select 'schema'::text as object_type, null::text as table_name, schema_name as object_name, null::text as data_type, null::text as is_nullable, null::text as definition
 from information_schema.schemata
 where schema_name = $1
 union all
-select 'table'::text as object_type, table_name, table_name as object_name
+select 'table'::text as object_type, table_name, table_name as object_name, null::text as data_type, null::text as is_nullable, null::text as definition
 from information_schema.tables
 where table_schema = $1 and table_type = 'BASE TABLE'
 union all
-select 'column'::text as object_type, table_name, column_name as object_name
+select 'column'::text as object_type, table_name, column_name as object_name, data_type, is_nullable, null::text as definition
 from information_schema.columns
 where table_schema = $1
 union all
-select 'index'::text as object_type, null::text as table_name, indexname as object_name
+select 'index'::text as object_type, tablename as table_name, indexname as object_name, null::text as data_type, null::text as is_nullable, indexdef as definition
 from pg_indexes
 where schemaname = $1
 union all
-select 'constraint'::text as object_type, conrelid::regclass::text as table_name, conname as object_name
+select 'constraint'::text as object_type, conrelid::regclass::text as table_name, conname as object_name, null::text as data_type, null::text as is_nullable, pg_get_constraintdef(oid, true) as definition
 from pg_constraint
 where connamespace = $1::regnamespace`,
     [namespace]
   );
 
   return result.rows;
+}
+
+function normalizePostgresType(dataType: string): PostgresColumnManifest["type"] | string {
+  return dataType === "timestamp with time zone" ? "timestamptz" : dataType;
 }
 
 function catalogKey(row: CatalogRow): string {
@@ -2301,6 +2500,32 @@ function expectedConstraintNames(table: PostgresTableManifest): readonly string[
       .filter((column) => column.type === "jsonb" && column.maxBytes !== undefined)
       .map((column) => `${table.name}_${column.name}_bounded_json_check`)
   ];
+}
+
+function indexDefinitionMatches(
+  definition: string,
+  expectedColumns: readonly string[],
+  expectedUnique: boolean
+): boolean {
+  const actualUnique = /\bcreate\s+unique\s+index\b/i.test(definition);
+  const columnsMatch = /\(([^()]*)\)\s*(?:where\b.*)?$/i.exec(definition);
+  if (columnsMatch?.[1] === undefined || actualUnique !== expectedUnique) {
+    return false;
+  }
+  const actualColumns = columnsMatch[1]
+    .split(",")
+    .map((column) => column.trim().replaceAll('"', "").split(/\s+/u)[0]);
+  return actualColumns.length === expectedColumns.length &&
+    actualColumns.every((column, index) => column === expectedColumns[index]);
+}
+
+function normalizeForeignKeyDefinition(definition: string): string {
+  return definition
+    .toLowerCase()
+    .replaceAll('"', "")
+    .replace(/\s+/gu, "")
+    .replace(/\bonupdatenoaction\b/gu, "")
+    .replace(/\bondeletenoaction\b/gu, "");
 }
 
 function companyRow(company: AccountingCompany): Row {
@@ -2328,6 +2553,16 @@ function sourceRow(source: AccountingSource): Row {
     checkpoint_id: source.checkpointId,
     latest_synced_at: source.latestSyncedAt,
     status: source.status
+  };
+}
+
+function companySourceBindingRow(binding: CompanySourceBinding): Row {
+  return {
+    company_source_id: binding.companySourceId,
+    tenant_id: binding.tenantId,
+    company_id: binding.companyId,
+    source_id: binding.sourceId,
+    created_at: binding.createdAt
   };
 }
 
@@ -2412,6 +2647,7 @@ function transactionLineRow(line: TransactionLine): Row {
   return {
     transaction_line_id: line.transactionLineId,
     tenant_id: line.tenantId,
+    source_id: line.sourceId,
     transaction_id: line.transactionId,
     line_number: line.lineNumber,
     account_id: line.accountId,
@@ -2554,6 +2790,8 @@ function reportSnapshotRow(snapshot: ReportSnapshot): Row {
   return {
     report_snapshot_id: snapshot.reportSnapshotId,
     tenant_id: snapshot.tenantId,
+    company_id: snapshot.companyId,
+    source_id: snapshot.sourceId,
     report_name: snapshot.reportName,
     snapshot_source: snapshot.snapshotSource,
     accounting_basis: snapshot.accountingBasis,
@@ -2568,11 +2806,13 @@ function reportSnapshotRow(snapshot: ReportSnapshot): Row {
   };
 }
 
-function reportSnapshotLineRow(line: ReportSnapshotLine): Row {
+function reportSnapshotLineRow(line: ReportSnapshotLine, snapshot: ReportSnapshot): Row {
   assertSafeDrilldownRef(line.drilldownRef);
   return {
     report_line_id: line.reportLineId,
     tenant_id: line.tenantId,
+    company_id: snapshot.companyId,
+    source_id: snapshot.sourceId,
     report_snapshot_id: line.reportSnapshotId,
     parent_report_line_id: line.parentReportLineId,
     section: line.section,
@@ -2584,11 +2824,13 @@ function reportSnapshotLineRow(line: ReportSnapshotLine): Row {
   };
 }
 
-function reportSnapshotTotalRow(total: ReportSnapshotTotal): Row {
+function reportSnapshotTotalRow(total: ReportSnapshotTotal, snapshot: ReportSnapshot): Row {
   assertSafeDrilldownRef(total.drilldownRef);
   return {
     report_total_id: total.reportTotalId,
     tenant_id: total.tenantId,
+    company_id: snapshot.companyId,
+    source_id: snapshot.sourceId,
     report_snapshot_id: total.reportSnapshotId,
     total_key: total.totalKey,
     label: total.label,
@@ -2734,6 +2976,8 @@ function reportSnapshotFromRow(row: Row): ReportSnapshot {
   return {
     reportSnapshotId: requiredString(row.report_snapshot_id, "report_snapshot_id"),
     tenantId: requiredString(row.tenant_id, "tenant_id"),
+    companyId: requiredString(row.company_id, "company_id"),
+    sourceId: requiredString(row.source_id, "source_id"),
     reportName: requiredString(row.report_name, "report_name"),
     snapshotSource: requiredString(row.snapshot_source, "snapshot_source") as ReportSnapshotSource,
     accountingBasis: requiredString(row.accounting_basis, "accounting_basis") as AccountingBasis,

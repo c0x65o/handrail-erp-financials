@@ -1,6 +1,6 @@
 # handrail-erp-financials
 
-Provider-neutral TypeScript foundation for reusable ERP financial reporting.
+Provider-neutral TypeScript foundation for reusable ERP accounting and financial reporting.
 This package is intended to give host ERP apps a shared kernel for canonical
 accounting facts, schema and migration manifests, deterministic
 fixture/reference report formulas, rollups, snapshots, freshness tracking,
@@ -83,6 +83,75 @@ references, cycles, cross-source references, nested report line shape,
 presentation row hierarchy metadata, drilldown scope, and QuickBooks
 source-adapter boundaries.
 
+## Reusable Account And Journal Service
+
+Host applications that create native accounts and journal entries should use
+`createErpFinancials(...)` instead of coordinating individual canonical writes.
+The host supplies its Postgres pool or transaction runner once; the service
+validates the complete account hierarchy, enforces balanced and active-account
+journal postings, creates stable canonical ids, persists every ledger row
+atomically, rejects conflicting idempotency-key reuse, and marks affected report
+snapshots stale.
+
+```ts
+import { createErpFinancials } from "@handrail/erp-financials";
+
+const financials = createErpFinancials({
+  database: postgresPool,
+  tenantId: "tenant_1",
+  companyId: "company_1",
+  sourceId: "native_ledger",
+  currencyCode: "USD"
+});
+
+await financials.accounts.upsertTree({
+  parent: {
+    accountKey: "service-revenue",
+    accountNumber: "4000",
+    name: "Service Revenue",
+    classification: "income"
+  },
+  children: [
+    {
+      accountKey: "setup-fee",
+      accountNumber: "4010",
+      name: "Setup Fee",
+      classification: "income"
+    },
+    {
+      accountKey: "access-fee",
+      accountNumber: "4020",
+      name: "Access Fee",
+      classification: "income"
+    }
+  ]
+});
+
+await financials.journalEntries.post({
+  idempotencyKey: "service-revenue-reclass-2026-08",
+  date: "2026-08-12",
+  memo: "Break out service revenue",
+  lines: [
+    { accountKey: "service-revenue", debit: "100.00" },
+    { accountKey: "setup-fee", credit: "30.00" },
+    { accountKey: "access-fee", credit: "70.00" }
+  ]
+});
+```
+
+A standard Postgres pool with `connect()` can be passed directly; the package
+owns `BEGIN`, `COMMIT`, `ROLLBACK`, and connection release. A host database
+library that already exposes transactions can instead supply an
+`ErpFinancialsTransactionRunner`, or adapt a pool explicitly with
+`createPostgresTransactionRunner(...)`. Authorization and approval decisions
+stay with the host; canonical write orchestration does not. Snapshot
+invalidation is part of the atomic write. The host scheduler should run the
+normal rollup and snapshot-refresh workers after a successful result.
+
+`accountKey` is the recommended app-facing reference: the package derives a
+tenant/source-scoped canonical `accountId` from it. Existing integrations may
+pass an explicit canonical `accountId` instead.
+
 The first deterministic fixture set exports representative companies, sources,
 accounts, parties, items, dimensions, transactions, transaction lines, and
 ledger postings. The raw-posting report builders calculate profit and loss,
@@ -158,6 +227,10 @@ The supported adoption surfaces are:
   `evidence` field returned by the host-neutral QuickBooks workers, to expose
   import batch, checkpoint, canonical row/write counts, freshness, resume
   metadata, and bounded safe source refs through app read APIs.
+- Native accounting operations: `createErpFinancials` is the preferred
+  package-level API for account-tree upserts and balanced journal posting. It
+  owns validation, deterministic ids, idempotency, atomic canonical writes, and
+  report-snapshot invalidation after the host supplies a transaction runner.
 - QuickBooks normalized mapping: `HandrailQuickBooksSdkResourcesAdapterInput`,
   `mapHandrailQuickBooksSdkResourcesToCanonicalFacts`,
   `mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts`, and

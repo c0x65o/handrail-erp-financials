@@ -9,6 +9,7 @@ native ERP data.
 The package should standardize:
 
 - canonical accounting facts
+- provider-neutral account hierarchy and journal posting orchestration
 - provider-neutral transaction matching and posting rule contracts
 - database migration manifests
 - report read models
@@ -91,6 +92,12 @@ Individual ERP apps own:
 - AI tool registration and prompt boundaries
 - customer-specific extensions
 - app-specific imports that are not generally reusable
+
+Apps provide a standard Postgres pool or a database-library-specific transaction
+runner once. Native account-tree and journal-entry callers should use the
+package-level `createErpFinancials(...)` service so balance validation, idempotency, canonical
+row construction, atomic persistence, and report invalidation are not repeated
+in every host.
 
 Apps consume this package rather than copying schema and report code.
 

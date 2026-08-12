@@ -81,6 +81,8 @@ export type StatementFixtureSet = {
   readonly postings: readonly LedgerPosting[];
   readonly reportRequest: {
     readonly tenantId: string;
+    readonly companyId: string;
+    readonly sourceId: string;
     readonly accountingBasis: "accrual";
     readonly currencyCode: "USD";
     readonly periodStart: "2026-01-01";
@@ -201,6 +203,7 @@ export type NormalizedQuickBooksSyncFixtureSet = {
 };
 
 const tenantId = "tenant_fixture";
+const companyId = "company_fixture";
 const sourceId = "source_native_fixture";
 const importBatchId = "batch_fixture_2026_01";
 const checkpointId = "checkpoint_fixture_2026_01";
@@ -244,7 +247,7 @@ const emptyHash = createDimensionHash(noDimensions);
 export const ERP_FINANCIALS_STATEMENT_FIXTURE: StatementFixtureSet = {
   company: {
     tenantId,
-    companyId: "company_fixture",
+    companyId,
     legalName: "Fixture Manufacturing LLC",
     displayName: "Fixture Manufacturing",
     baseCurrencyCode: currencyCode,
@@ -402,6 +405,8 @@ export const ERP_FINANCIALS_STATEMENT_FIXTURE: StatementFixtureSet = {
   ],
   reportRequest: {
     tenantId,
+    companyId,
+    sourceId,
     accountingBasis,
     currencyCode,
     periodStart: "2026-01-01",
@@ -1483,6 +1488,7 @@ function line(
 ): TransactionLine {
   return {
     tenantId,
+    sourceId,
     transactionLineId,
     transactionId,
     lineNumber,
@@ -1562,6 +1568,8 @@ function reportRequestFromFacts(
   };
   return {
     tenantId: facts.company.tenantId,
+    companyId: facts.company.companyId,
+    sourceId: facts.source.sourceId,
     accounts: facts.accounts,
     postings: facts.postings,
     accountingBasis: facts.postings[0]?.accountingBasis ?? "accrual",

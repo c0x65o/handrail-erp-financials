@@ -38,10 +38,14 @@ describe("ERP Financials fixture smoke health", () => {
     expect(first.summaryHash).toEqual(second.summaryHash);
     expect(first.reports.profit_and_loss?.summaryHash).toEqual(second.reports.profit_and_loss?.summaryHash);
     expect(first.snapshotIds).toEqual({
-      profit_and_loss: "snapshot:tenant_fixture:profit_and_loss:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
-      balance_sheet: "snapshot:tenant_fixture:balance_sheet:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
-      trial_balance: "snapshot:tenant_fixture:trial_balance:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
-      cash_flow: "snapshot:tenant_fixture:cash_flow:accrual:2026-01-01:2026-01-31:2026-01-31:USD"
+      profit_and_loss:
+        "snapshot:tenant_fixture:company_fixture:source_native_fixture:profit_and_loss:builder:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
+      balance_sheet:
+        "snapshot:tenant_fixture:company_fixture:source_native_fixture:balance_sheet:builder:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
+      trial_balance:
+        "snapshot:tenant_fixture:company_fixture:source_native_fixture:trial_balance:builder:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
+      cash_flow:
+        "snapshot:tenant_fixture:company_fixture:source_native_fixture:cash_flow:builder:accrual:2026-01-01:2026-01-31:2026-01-31:USD"
     });
     expect(first.freshnessIds).toEqual({
       profit_and_loss:

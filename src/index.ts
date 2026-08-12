@@ -18,6 +18,7 @@ export {
   assertSafeDrilldownRef,
   assertSafeSourcePayloadRef,
   canonicalSourceIdentityKey,
+  createCompanySourceBinding,
   createCompactDrilldownRef,
   createDimensionHash
 } from "./canonical-model.js";
@@ -39,6 +40,13 @@ export {
   installPostgresSchema,
   validatePostgresSchema
 } from "./postgres-storage.js";
+export {
+  POSTGRES_MIGRATIONS,
+  PostgresMigrationError,
+  migratePostgresSchema,
+  planPostgresMigrations,
+  validatePostgresMigrationHistory
+} from "./postgres-migrations.js";
 export { checkErpFinancialsInstallHealth } from "./install-health.js";
 export { runErpFinancialsFixtureSmokeHealth } from "./fixture-smoke-health.js";
 export { checkErpFinancialsFreshnessAndDrilldownHealth } from "./health-checks.js";
@@ -52,6 +60,13 @@ export {
   createCanonicalFactPersistenceWorker,
   persistCanonicalFacts
 } from "./canonical-fact-persistence.js";
+export {
+  JOURNAL_ENTRY_POSTED_STALE_REASON,
+  ErpFinancialsIdempotencyConflictError,
+  ErpFinancialsValidationError,
+  createErpFinancials,
+  createPostgresTransactionRunner
+} from "./erp-financials-service.js";
 export {
   CORE_ERP_PERSISTENCE_EVIDENCE_DEFAULT_CHANGED_RESOURCE_LIMIT,
   CORE_ERP_PERSISTENCE_EVIDENCE_DEFAULT_DRILLDOWN_POSTING_LIMIT,
@@ -191,6 +206,18 @@ export type {
   BuildAccountHierarchyRollupLinesInput
 } from "./account-hierarchy-rollup-lines.js";
 export type {
+  AppliedPostgresMigration,
+  MigratePostgresSchemaOptions,
+  MigratePostgresSchemaResult,
+  PlanPostgresMigrationsOptions,
+  PostgresMigrationDefinition,
+  PostgresMigrationHistoryIssue,
+  PostgresMigrationHistoryIssueKind,
+  PostgresMigrationHistoryValidation,
+  PostgresMigrationPlan,
+  PostgresMigrationTransactionRunner
+} from "./postgres-migrations.js";
+export type {
   Account,
   AccountClassification,
   AccountStatus,
@@ -203,6 +230,7 @@ export type {
   AccountingTransaction,
   AccountId,
   CompanyId,
+  CompanySourceBinding,
   CursorKind,
   DecimalString,
   DimensionHash,
@@ -329,6 +357,7 @@ export type {
   DeleteLedgerFactsOutsideImportBatchInput,
   DeleteLedgerFactsOutsideImportBatchResult,
   LoadReportBuilderInput,
+  LoadAccountsInput,
   LoadReportSnapshotInput,
   LoadRollupBucketsInput,
   MarkReportSnapshotsStaleForAccountHierarchyChangesInput,
@@ -394,6 +423,23 @@ export type {
   CanonicalFactPersistenceStorage,
   CanonicalFactPersistenceWorker
 } from "./canonical-fact-persistence.js";
+export type {
+  CreateErpFinancialsInput,
+  ErpFinancials,
+  ErpFinancialsAccountDefinition,
+  ErpFinancialsAccountReference,
+  ErpFinancialsAccountTreeNode,
+  ErpFinancialsDatabase,
+  ErpFinancialsPostgresPool,
+  ErpFinancialsPostgresTransactionClient,
+  ErpFinancialsTransactionRunner,
+  JournalEntryWriteCounts,
+  PostJournalEntryInput,
+  PostJournalEntryLineInput,
+  PostJournalEntryResult,
+  UpsertAccountTreeInput,
+  UpsertAccountTreeResult
+} from "./erp-financials-service.js";
 export type {
   BuildCoreErpPersistenceEvidenceInput,
   CoreErpPersistenceEvidence,

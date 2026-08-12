@@ -33,6 +33,45 @@ const reportRequest = {
 };
 
 describe("deterministic fixture/reference report builders from canonical postings", () => {
+  it("scopes snapshot, line, and total identities by company, source, and report window", () => {
+    const baseline = buildProfitAndLossReport(reportRequest);
+    const otherWindow = buildProfitAndLossReport({ ...reportRequest, periodStart: "2026-01-02" });
+    const otherCompany = buildProfitAndLossReport({ ...reportRequest, companyId: "company_secondary" });
+    const otherSourceId = "source_secondary";
+    const otherSource = buildProfitAndLossReport({
+      ...reportRequest,
+      sourceId: otherSourceId,
+      accounts: reportRequest.accounts.map((account) => ({ ...account, sourceId: otherSourceId })),
+      postings: reportRequest.postings.map((posting) => ({ ...posting, sourceId: otherSourceId })),
+      freshness: { status: "fresh", sourceId: otherSourceId }
+    });
+
+    for (const report of [baseline, otherWindow, otherCompany, otherSource]) {
+      expect(report.snapshot.reportSnapshotId).toContain(`:${report.snapshot.companyId}:${report.snapshot.sourceId}:`);
+      expect(report.snapshot.reportSnapshotId).toContain(`:${report.snapshot.reportName}:${report.snapshot.snapshotSource}:`);
+      expect(report.lines.every((line) => line.reportLineId.startsWith(`${report.snapshot.reportSnapshotId}:line:`))).toBe(true);
+      expect(report.totals.every((total) => total.reportTotalId.startsWith(`${report.snapshot.reportSnapshotId}:total:`))).toBe(true);
+    }
+
+    const identitySets = [baseline, otherWindow, otherCompany, otherSource].map(
+      (report) =>
+        new Set([
+          report.snapshot.reportSnapshotId,
+          ...report.lines.map((line) => line.reportLineId),
+          ...report.totals.map((total) => total.reportTotalId)
+        ])
+    );
+    for (let leftIndex = 0; leftIndex < identitySets.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < identitySets.length; rightIndex += 1) {
+        const left = identitySets[leftIndex];
+        const right = identitySets[rightIndex];
+        expect(left).toBeDefined();
+        expect(right).toBeDefined();
+        expect([...left!].filter((identity) => right!.has(identity))).toEqual([]);
+      }
+    }
+  });
+
   it("builds profit and loss totals with material drilldown evidence", () => {
     const report = buildProfitAndLossReport(reportRequest);
 
@@ -133,7 +172,7 @@ describe("deterministic fixture/reference report builders from canonical posting
     const equityChild = requiredLine(report, "acct_nested_equity_child");
     const currentEarningsLine = report.lines.find((line) => line.label === "Net Income");
 
-    expect(assetParent.reportLineId).toBe("balance_sheet:line:account:acct_nested_asset_parent");
+    expect(assetParent.reportLineId).toBe(`${report.snapshot.reportSnapshotId}:line:account:acct_nested_asset_parent`);
     expect(assetParent.amount).toBe("600.00");
     expect(assetChild.parentReportLineId).toBe(assetParent.reportLineId);
     expect(assetChild.amount).toBe("500.00");
@@ -235,7 +274,7 @@ describe("deterministic fixture/reference report builders from canonical posting
     const liabilityChild = requiredLine(report, "acct_tb_liability_child");
     const liabilityGrandchild = requiredLine(report, "acct_tb_liability_grandchild");
 
-    expect(assetParent.reportLineId).toBe("trial_balance:line:account:acct_tb_asset_parent");
+    expect(assetParent.reportLineId).toBe(`${report.snapshot.reportSnapshotId}:line:account:acct_tb_asset_parent`);
     expect(assetParent.section).toBe("debit");
     expect(assetParent.amount).toBe("300.00");
     expect(assetParent.parentReportLineId).toBeUndefined();
@@ -785,7 +824,7 @@ describe("deterministic fixture/reference report builders from canonical posting
     const incomeChild = requiredLine(report, "acct_nested_income_child");
     const incomeGrandchild = requiredLine(report, "acct_nested_income_grandchild");
 
-    expect(incomeParent.reportLineId).toBe("profit_and_loss:line:account:acct_nested_income_parent");
+    expect(incomeParent.reportLineId).toBe(`${report.snapshot.reportSnapshotId}:line:account:acct_nested_income_parent`);
     expect(incomeParent.amount).toBe("6000.00");
     expect(incomeParent.parentReportLineId).toBeUndefined();
     expect(incomeParent.drilldownRef.accountIds).toEqual([
@@ -845,6 +884,19 @@ describe("deterministic fixture/reference report builders from canonical posting
         )
       })
     ).toThrow(/credential-like field/);
+  });
+
+  it("rejects incomplete or internally inconsistent report scope", () => {
+    expect(() => buildProfitAndLossReport({ ...reportRequest, companyId: "" })).toThrow(/companyId must not be empty/);
+    expect(() =>
+      buildProfitAndLossReport({ ...reportRequest, periodStart: "2026-02-01", periodEnd: "2026-01-31" })
+    ).toThrow(/periodStart must be on or before periodEnd/);
+    expect(() =>
+      buildProfitAndLossReport({
+        ...reportRequest,
+        freshness: { ...reportRequest.freshness, sourceId: "source_wrong" }
+      })
+    ).toThrow(/freshness sourceId must match sourceId/);
   });
 
   it.each([

@@ -108,7 +108,8 @@ describe("normalized QuickBooks contract smoke harness", () => {
         updatedAt: "2026-02-01T10:15:00.000Z"
       },
       snapshotRefresh: {
-        snapshotId: "snapshot:tenant_qbo_sync_fixture:profit_and_loss:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
+        snapshotId:
+          "snapshot:tenant_qbo_sync_fixture:company_realm_qbo_sync_fixture:source_qbo_sync_fixture:profit_and_loss:builder:accrual:2026-01-01:2026-01-31:2026-01-31:USD",
         freshnessId:
           "freshness:tenant_qbo_sync_fixture:company_realm_qbo_sync_fixture:source_qbo_sync_fixture:profit_and_loss:accrual:2026-01-01:2026-01-31:USD",
         status: "fresh",
@@ -227,7 +228,7 @@ describe("normalized QuickBooks contract smoke harness", () => {
           "ERP Financials can build cash_flow from canonical facts, but QuickBooks provider cash-flow parity is intentionally unsupported in deterministic contract fixtures."
       }
     ]);
-    expect(harness.snapshotHash).toBe("e24fe29a70b655fea68615a79b7dd038d74b7007402bcc19301cb59f5cd932b3");
+    expect(harness.snapshotHash).toBe("926853afa0f26968546376b1b251db97e8b48084142cd1d24a2c54bee1f63f0a");
     expect(JSON.stringify(harness)).not.toMatch(/access[_-]?token|refresh[_-]?token|client[_-]?secret|clientSecret|rawPayload/i);
     assertNoCredentialKeys(harness.snapshot);
   });

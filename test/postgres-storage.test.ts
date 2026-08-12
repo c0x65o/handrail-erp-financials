@@ -41,6 +41,9 @@ type CatalogRow = {
   readonly object_type: "schema" | "table" | "column" | "index" | "constraint";
   readonly table_name: string | null;
   readonly object_name: string;
+  readonly data_type?: string | null;
+  readonly is_nullable?: string | null;
+  readonly definition?: string | null;
 };
 
 describe("Postgres storage adapter", () => {
@@ -49,8 +52,8 @@ describe("Postgres storage adapter", () => {
     const result = await installPostgresSchema(client, POSTGRES_CANONICAL_SCHEMA_MANIFEST, { dryRun: true });
 
     expect(result.executed).toBe(false);
-    expect(result.manifestVersion).toBe("2026-08-11.transaction-matching-v1");
-    expect(result.schemaVersion).toBe(6);
+    expect(result.manifestVersion).toBe("2026-08-12.scoped-integrity-v1");
+    expect(result.schemaVersion).toBe(9);
     expect(result.statements[0]).toBe('create schema if not exists "erp_financials";');
     expect(result.statements.some((statement) => statement.includes('"rollup_buckets"'))).toBe(true);
     expect(result.statements.some((statement) => statement.includes('"report_freshness"'))).toBe(true);
@@ -82,6 +85,59 @@ describe("Postgres storage adapter", () => {
       expect.arrayContaining(["missing_table", "missing_index", "missing_constraint", "missing_fixture_support"])
     );
     expect(missingResult.issues.some((issue) => issue.objectName === "ledger_postings")).toBe(true);
+  });
+
+  it("fails schema validation when an existing column has an unsafe type or nullability", async () => {
+    const incompatibleRows = catalogRowsForManifest(POSTGRES_CANONICAL_SCHEMA_MANIFEST).map((row) =>
+      row.object_type === "column" && row.table_name === "report_snapshots" && row.object_name === "company_id"
+        ? { ...row, data_type: "integer", is_nullable: "YES" }
+        : row
+    );
+
+    const result = await validatePostgresSchema(new RecordingClient(incompatibleRows));
+
+    expect(result.compatible).toBe(false);
+    expect(result.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "incompatible_column_type",
+          table: "report_snapshots",
+          objectName: "company_id"
+        }),
+        expect.objectContaining({
+          kind: "incompatible_column_nullability",
+          table: "report_snapshots",
+          objectName: "company_id"
+        })
+      ])
+    );
+  });
+
+  it("detects index and scoped foreign-key definition drift, not only missing names", async () => {
+    const incompatibleRows = catalogRowsForManifest(POSTGRES_CANONICAL_SCHEMA_MANIFEST).map((row) => {
+      if (row.object_type === "index" && row.object_name === "transactions_scope_uidx") {
+        return { ...row, definition: 'create unique index transactions_scope_uidx on erp_financials.transactions using btree (tenant_id, transaction_id)' };
+      }
+      if (row.object_type === "constraint" && row.object_name === "transactions_source_scope_fk") {
+        return {
+          ...row,
+          definition: "foreign key (tenant_id, source_id) references erp_financials.accounting_sources (source_id, tenant_id) on update restrict on delete restrict"
+        };
+      }
+      return row;
+    });
+
+    const result = await validatePostgresSchema(new RecordingClient(incompatibleRows));
+
+    expect(result.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "incompatible_index_definition", objectName: "transactions_scope_uidx" }),
+        expect.objectContaining({
+          kind: "incompatible_constraint_definition",
+          objectName: "transactions_source_scope_fk"
+        })
+      ])
+    );
   });
 
   it("generates tenant/source idempotent upserts for reprocessed ledger postings", async () => {
@@ -331,10 +387,11 @@ describe("Postgres storage adapter", () => {
 
     expect(lineUpsertCall).toBeDefined();
     expect(lineUpsertCall?.sql).toContain('"parent_report_line_id"');
+    const reportSnapshotId = report.snapshot.reportSnapshotId;
     expect(parentLineParamsByReportLineId(lineUpsertCall?.params ?? [])).toEqual({
-      "profit_and_loss:line:account:acct_storage_parent": null,
-      "profit_and_loss:line:account:acct_storage_child": "profit_and_loss:line:account:acct_storage_parent",
-      "profit_and_loss:line:account:acct_storage_grandchild": "profit_and_loss:line:account:acct_storage_child"
+      [`${reportSnapshotId}:line:account:acct_storage_parent`]: null,
+      [`${reportSnapshotId}:line:account:acct_storage_child`]: `${reportSnapshotId}:line:account:acct_storage_parent`,
+      [`${reportSnapshotId}:line:account:acct_storage_grandchild`]: `${reportSnapshotId}:line:account:acct_storage_child`
     });
   });
 
@@ -354,9 +411,9 @@ describe("Postgres storage adapter", () => {
 
     expect(client.calls).toHaveLength(1);
     expect(client.calls[0]?.sql).toContain('update "erp_financials"."report_snapshots" rs');
-    expect(client.calls[0]?.sql).toContain('from "erp_financials"."report_freshness" rf');
-    expect(client.calls[0]?.sql).toContain('rf."company_id" = $2');
-    expect(client.calls[0]?.sql).toContain('rf."source_id" = $3');
+    expect(client.calls[0]?.sql).toContain('rs."company_id" = $2');
+    expect(client.calls[0]?.sql).toContain('rs."source_id" = $3');
+    expect(client.calls[0]?.sql).not.toContain('"report_freshness"');
     expect(client.calls[0]?.sql).toContain(`rs."report_name" = any($5::text[])`);
     expect(client.calls[0]?.sql).toContain(`rs."accounting_basis" = $6`);
     expect(client.calls[0]?.sql).toContain(`rs."currency_code" = $7`);
@@ -376,6 +433,7 @@ describe("Postgres storage adapter", () => {
     const adapter = createPostgresStorageAdapter(client);
     const nestedReport = nestedHierarchyReport();
     const flatReport = flatGrandchildReport(nestedReport);
+    const reportSnapshotId = nestedReport.snapshot.reportSnapshotId;
 
     await adapter.writeReportSnapshot(flatReport);
     await adapter.writeReportSnapshot(nestedReport);
@@ -389,18 +447,18 @@ describe("Postgres storage adapter", () => {
     );
 
     expect(lineDeleteCalls).toHaveLength(3);
-    expect(lineDeleteCalls[1]?.params[2]).toEqual([
-      "profit_and_loss:line:account:acct_storage_parent",
-      "profit_and_loss:line:account:acct_storage_child",
-      "profit_and_loss:line:account:acct_storage_grandchild"
+    expect(lineDeleteCalls[1]?.params[4]).toEqual([
+      `${reportSnapshotId}:line:account:acct_storage_parent`,
+      `${reportSnapshotId}:line:account:acct_storage_child`,
+      `${reportSnapshotId}:line:account:acct_storage_grandchild`
     ]);
-    expect(lineDeleteCalls[2]?.params[2]).toEqual(["profit_and_loss:line:account:acct_storage_grandchild"]);
+    expect(lineDeleteCalls[2]?.params[4]).toEqual([`${reportSnapshotId}:line:account:acct_storage_grandchild`]);
     expect(parentLineParamsByReportLineId(lineUpsertCalls[1]?.params ?? [])).toMatchObject({
-      "profit_and_loss:line:account:acct_storage_child": "profit_and_loss:line:account:acct_storage_parent",
-      "profit_and_loss:line:account:acct_storage_grandchild": "profit_and_loss:line:account:acct_storage_child"
+      [`${reportSnapshotId}:line:account:acct_storage_child`]: `${reportSnapshotId}:line:account:acct_storage_parent`,
+      [`${reportSnapshotId}:line:account:acct_storage_grandchild`]: `${reportSnapshotId}:line:account:acct_storage_child`
     });
     expect(parentLineParamsByReportLineId(lineUpsertCalls[2]?.params ?? [])).toEqual({
-      "profit_and_loss:line:account:acct_storage_grandchild": null
+      [`${reportSnapshotId}:line:account:acct_storage_grandchild`]: null
     });
   });
 
@@ -672,11 +730,11 @@ describe("Postgres storage adapter", () => {
         money(60 * totalMultiplier)
       );
       expect(snapshotLineByAccountId(presentation.primaryReport.lines, "acct_snapshot_expense_child")).toMatchObject({
-        parentReportLineId: "profit_and_loss:line:account:acct_snapshot_expense_parent",
+        parentReportLineId: `${presentation.primaryReport.snapshot.reportSnapshotId}:line:account:acct_snapshot_expense_parent`,
         amount: money(50 * totalMultiplier)
       });
       expect(snapshotLineByAccountId(presentation.primaryReport.lines, "acct_snapshot_expense_grandchild")).toMatchObject({
-        parentReportLineId: "profit_and_loss:line:account:acct_snapshot_expense_child",
+        parentReportLineId: `${presentation.primaryReport.snapshot.reportSnapshotId}:line:account:acct_snapshot_expense_child`,
         amount: money(30 * totalMultiplier)
       });
       expect(presentation.primaryReport.totals.find((total) => total.totalKey === "total_expenses")?.amount).toBe(
@@ -739,6 +797,8 @@ describe("Postgres storage adapter", () => {
         snapshot: {
           report_snapshot_id: reportSnapshotId,
           tenant_id: request.tenantId,
+          company_id: request.companyId,
+          source_id: request.sourceId,
           report_name: request.reportName,
           snapshot_source: "builder",
           accounting_basis: request.accountingMethod,
@@ -759,6 +819,8 @@ describe("Postgres storage adapter", () => {
 
     const storedSnapshot = await adapter.loadLatestReportSnapshot({
       tenantId: request.tenantId,
+      companyId: request.companyId,
+      sourceId: request.sourceId,
       reportName: request.reportName,
       accountingBasis: request.accountingMethod,
       periodStart: request.periodStart,
@@ -771,10 +833,10 @@ describe("Postgres storage adapter", () => {
     expect(snapshotLineByAccountId(storedSnapshot?.lines ?? [], "acct_storage_parent").parentReportLineId).toBeUndefined();
     expect(Object.hasOwn(snapshotLineByAccountId(storedSnapshot?.lines ?? [], "acct_storage_parent"), "parentReportLineId")).toBe(false);
     expect(snapshotLineByAccountId(storedSnapshot?.lines ?? [], "acct_storage_child").parentReportLineId).toBe(
-      "profit_and_loss:line:account:acct_storage_parent"
+      `${reportSnapshotId}:line:account:acct_storage_parent`
     );
     expect(snapshotLineByAccountId(storedSnapshot?.lines ?? [], "acct_storage_grandchild").parentReportLineId).toBe(
-      "profit_and_loss:line:account:acct_storage_child"
+      `${reportSnapshotId}:line:account:acct_storage_child`
     );
   });
 
@@ -1027,16 +1089,16 @@ describe("Postgres storage adapter", () => {
       );
       expect(snapshotLineByAccountId(presentation.primaryReport.lines, "acct_root_expense").parentReportLineId).toBeUndefined();
       expect(snapshotLineByAccountId(presentation.primaryReport.lines, "acct_parent_expense").parentReportLineId).toBe(
-        "profit_and_loss:line:account:acct_root_expense"
+        `${presentation.primaryReport.snapshot.reportSnapshotId}:line:account:acct_root_expense`
       );
       expect(snapshotLineByAccountId(presentation.primaryReport.lines, "acct_child_expense").parentReportLineId).toBe(
-        "profit_and_loss:line:account:acct_parent_expense"
+        `${presentation.primaryReport.snapshot.reportSnapshotId}:line:account:acct_parent_expense`
       );
       expect(snapshotLineByAccountId(presentation.primaryReport.lines, "acct_grandchild_expense").parentReportLineId).toBe(
-        "profit_and_loss:line:account:acct_child_expense"
+        `${presentation.primaryReport.snapshot.reportSnapshotId}:line:account:acct_child_expense`
       );
       expect(snapshotLineByAccountId(presentation.primaryReport.lines, "acct_sibling_expense").parentReportLineId).toBe(
-        "profit_and_loss:line:account:acct_parent_expense"
+        `${presentation.primaryReport.snapshot.reportSnapshotId}:line:account:acct_parent_expense`
       );
       expect(snapshotLineByAccountId(presentation.primaryReport.lines, "acct_parent_expense").drilldownRef.accountIds).toEqual([
         "acct_child_expense",
@@ -1110,7 +1172,7 @@ describe("Postgres storage adapter", () => {
     expect(rowCell(presentation, "line:account:acct_parent_expense", "actual:customer:party_customer_acme")?.amount).toBe("75.00");
     expect(rowCell(presentation, "line:account:acct_child_expense", "actual:customer:party_customer_acme")?.amount).toBe("75.00");
     expect(snapshotLineByAccountId(presentation.primaryReport.lines, "acct_child_expense").parentReportLineId).toBe(
-      "profit_and_loss:line:account:acct_parent_expense"
+      `${presentation.primaryReport.snapshot.reportSnapshotId}:line:account:acct_parent_expense`
     );
     expect(client.calls.some((call) => call.sql.includes('"ledger_postings"'))).toBe(false);
   });
@@ -1340,8 +1402,9 @@ type DateGrainSnapshotPeriod = {
 
 function nestedHierarchyReport(): BuiltReport {
   const tenantId = "tenant_storage_nested";
+  const companyId = "company_storage_nested";
   const sourceId = "source_storage_nested";
-  const reportSnapshotId = "snapshot:tenant_storage_nested:profit_and_loss:nested";
+  const reportSnapshotId = `snapshot:${tenantId}:${companyId}:${sourceId}:profit_and_loss:nested`;
   const periodStart = "2026-01-01";
   const periodEnd = "2026-01-31";
   const lines = buildAccountHierarchyRollupLines({
@@ -1367,6 +1430,8 @@ function nestedHierarchyReport(): BuiltReport {
     snapshot: {
       reportSnapshotId,
       tenantId,
+      companyId,
+      sourceId,
       reportName: "profit_and_loss",
       snapshotSource: "builder",
       accountingBasis: "accrual",
@@ -1465,13 +1530,13 @@ function nestedStorageAmount(
 }
 
 function parentLineParamsByReportLineId(params: readonly unknown[]): Record<string, unknown> {
-  const columnsPerReportSnapshotLine = 10;
+  const columnsPerReportSnapshotLine = 12;
   const byReportLineId: Record<string, unknown> = {};
 
   for (let index = 0; index < params.length; index += columnsPerReportSnapshotLine) {
     const reportLineId = params[index];
     if (typeof reportLineId === "string") {
-      byReportLineId[reportLineId] = params[index + 3];
+      byReportLineId[reportLineId] = params[index + 5];
     }
   }
 
@@ -1488,14 +1553,14 @@ function nestedStoredSnapshotLines(
       request,
       reportSnapshotId,
       "acct_storage_child",
-      "profit_and_loss:line:account:acct_storage_parent",
+      `${reportSnapshotId}:line:account:acct_storage_parent`,
       20
     ),
     nestedStoredSnapshotLine(
       request,
       reportSnapshotId,
       "acct_storage_grandchild",
-      "profit_and_loss:line:account:acct_storage_child",
+      `${reportSnapshotId}:line:account:acct_storage_child`,
       30
     )
   ];
@@ -1508,7 +1573,7 @@ function nestedStoredSnapshotLine(
   parentReportLineId: string | null,
   sortOrder: number
 ): Record<string, unknown> {
-  const reportLineId = `profit_and_loss:line:account:${accountId}`;
+  const reportLineId = `${reportSnapshotId}:line:account:${accountId}`;
 
   return {
     report_line_id: reportLineId,
@@ -1569,7 +1634,7 @@ class SnapshotPresentationClient implements PostgresQueryClient {
     }
 
     if (sql.includes('from "erp_financials"."report_snapshot_lines"')) {
-      const snapshot = this.snapshotById(stringParam(params[1]));
+      const snapshot = this.snapshotById(stringParam(params[3]));
       return Promise.resolve({
         rows: (snapshot?.lines ?? []) as readonly Row[],
         rowCount: snapshot?.lines.length ?? 0
@@ -1577,7 +1642,7 @@ class SnapshotPresentationClient implements PostgresQueryClient {
     }
 
     if (sql.includes('from "erp_financials"."report_snapshot_totals"')) {
-      const snapshot = this.snapshotById(stringParam(params[1]));
+      const snapshot = this.snapshotById(stringParam(params[3]));
       return Promise.resolve({
         rows: (snapshot?.totals ?? []) as readonly Row[],
         rowCount: snapshot?.totals.length ?? 0
@@ -1627,7 +1692,7 @@ function nestedDateGrainProfitAndLossSnapshot(
   periodEnd: IsoDate,
   multiplier: number
 ): SnapshotBundle {
-  const reportSnapshotId = `snapshot:${request.tenantId}:profit_and_loss:nested:${periodStart}:${periodEnd}`;
+  const reportSnapshotId = `snapshot:${request.tenantId}:${request.companyId}:${request.sourceId}:profit_and_loss:nested:${periodStart}:${periodEnd}`;
   const incomeAmount = money(100 * multiplier);
   const parentExpenseAmount = money(60 * multiplier);
   const childExpenseAmount = money(50 * multiplier);
@@ -1639,6 +1704,8 @@ function nestedDateGrainProfitAndLossSnapshot(
     snapshot: {
       report_snapshot_id: reportSnapshotId,
       tenant_id: request.tenantId,
+      company_id: request.companyId,
+      source_id: request.sourceId,
       report_name: request.reportName,
       snapshot_source: "rollup",
       accounting_basis: request.accountingMethod,
@@ -1736,9 +1803,9 @@ function nestedDateGrainSnapshotLine(
   sortOrder: number,
   parentAccountId?: string
 ): Record<string, unknown> {
-  const reportLineId = `profit_and_loss:line:account:${accountId}`;
+  const reportLineId = `${reportSnapshotId}:line:account:${accountId}`;
   const parentReportLineId =
-    parentAccountId === undefined ? null : `profit_and_loss:line:account:${parentAccountId}`;
+    parentAccountId === undefined ? null : `${reportSnapshotId}:line:account:${parentAccountId}`;
 
   return {
     report_line_id: reportLineId,
@@ -1760,7 +1827,7 @@ function profitAndLossSnapshot(
   periodEnd: IsoDate,
   monthNumber: number
 ): SnapshotBundle {
-  const reportSnapshotId = `snapshot:${request.tenantId}:profit_and_loss:${periodStart}:${periodEnd}`;
+  const reportSnapshotId = `snapshot:${request.tenantId}:${request.companyId}:${request.sourceId}:profit_and_loss:${periodStart}:${periodEnd}`;
   const income = money(monthNumber * 200);
   const expense = money(monthNumber * 100);
   const netIncome = money(monthNumber * 100);
@@ -1770,6 +1837,8 @@ function profitAndLossSnapshot(
     snapshot: {
       report_snapshot_id: reportSnapshotId,
       tenant_id: request.tenantId,
+      company_id: request.companyId,
+      source_id: request.sourceId,
       report_name: request.reportName,
       snapshot_source: "rollup",
       accounting_basis: request.accountingMethod,
@@ -1784,7 +1853,7 @@ function profitAndLossSnapshot(
     },
     lines: [
       {
-        report_line_id: "profit_and_loss:line:001:acct_sales",
+        report_line_id: `${reportSnapshotId}:line:001:acct_sales`,
         tenant_id: request.tenantId,
         report_snapshot_id: reportSnapshotId,
         parent_report_line_id: null,
@@ -1796,7 +1865,7 @@ function profitAndLossSnapshot(
         drilldown_ref: drilldownRef(request, periodStart, periodEnd, "acct_sales", "profit_and_loss:acct_sales")
       },
       {
-        report_line_id: "profit_and_loss:line:002:acct_expense",
+        report_line_id: `${reportSnapshotId}:line:002:acct_expense`,
         tenant_id: request.tenantId,
         report_snapshot_id: reportSnapshotId,
         parent_report_line_id: null,
@@ -1831,7 +1900,7 @@ function totalRow(
   }
 ): Record<string, unknown> {
   return {
-    report_total_id: `profit_and_loss:total:${totalKey}`,
+    report_total_id: `${reportSnapshotId}:total:${totalKey}`,
     tenant_id: request.tenantId,
     report_snapshot_id: reportSnapshotId,
     total_key: totalKey,
@@ -1898,8 +1967,10 @@ function snapshotKeyFromParams(params: readonly unknown[]): string {
     params[2],
     params[3],
     params[4],
-    params[5] ?? params[4],
-    params[6]
+    params[5],
+    params[6],
+    params[7] ?? params[6],
+    params[8]
   ].join("|");
 }
 
@@ -1910,6 +1981,8 @@ function stringParam(value: unknown): string {
 function snapshotKeyFromRow(row: Record<string, unknown>): string {
   return [
     row.tenant_id,
+    row.company_id,
+    row.source_id,
     row.report_name,
     row.accounting_basis,
     row.period_start,
@@ -1985,12 +2058,15 @@ function catalogRowsForManifest(manifest: PostgresSchemaManifest): readonly Cata
       ...table.columns.map((column) => ({
         object_type: "column" as const,
         table_name: table.name,
-        object_name: column.name
+        object_name: column.name,
+        data_type: column.type,
+        is_nullable: column.nullable === true ? "YES" : "NO"
       })),
       ...table.indexes.map((index) => ({
         object_type: "index" as const,
         table_name: table.name,
-        object_name: index.name
+        object_name: index.name,
+        definition: `create ${index.unique === true ? "unique " : ""}index ${index.name} on ${manifest.namespace}.${table.name} using btree (${index.columns.join(", ")})`
       })),
       ...[
         `${table.name}_pkey`,
@@ -2001,7 +2077,8 @@ function catalogRowsForManifest(manifest: PostgresSchemaManifest): readonly Cata
       ].map((constraintName) => ({
         object_type: "constraint" as const,
         table_name: table.name,
-        object_name: constraintName
+        object_name: constraintName,
+        definition: table.constraints.find((constraint) => constraint.name === constraintName)?.sql
       }))
     ])
   ];

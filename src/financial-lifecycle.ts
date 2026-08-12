@@ -1,0 +1,210 @@
+import { createHash } from "node:crypto";
+
+import { assertNoCredentialKeys } from "./canonical-model.js";
+
+import type { IsoDateTime, JsonValue } from "./canonical-model.js";
+import type { PostgresQueryClient } from "./postgres-storage.js";
+
+export type FinancialOperationContext = {
+  readonly actorRef: string;
+  readonly approverRef?: string;
+  readonly requestId: string;
+  readonly correlationId: string;
+  readonly reasonCode: string;
+  readonly reasonDetail?: string;
+  readonly occurredAt: IsoDateTime;
+};
+
+export type FinancialLifecycleScope = {
+  readonly tenantId: string;
+  readonly companyId: string;
+  readonly sourceId: string;
+};
+
+export type AppendFinancialLifecycleEventInput = FinancialLifecycleScope & {
+  readonly aggregateType: string;
+  readonly aggregateId: string;
+  readonly eventType: string;
+  readonly idempotencyKey: string;
+  readonly operation: FinancialOperationContext;
+  readonly payload?: JsonValue;
+  readonly priorEventId?: string;
+  readonly recordedAt: IsoDateTime;
+};
+
+export type FinancialLifecycleEventResult = {
+  readonly eventId: string;
+  readonly status: "recorded" | "already_recorded";
+  readonly payloadChecksum: string;
+};
+
+type StoredLifecycleRow = Record<string, unknown> & {
+  readonly event_id?: unknown;
+  readonly aggregate_type?: unknown;
+  readonly aggregate_id?: unknown;
+  readonly event_type?: unknown;
+  readonly payload_checksum?: unknown;
+};
+
+export class FinancialLifecycleIdempotencyConflictError extends Error {
+  readonly idempotencyKey: string;
+
+  constructor(idempotencyKey: string) {
+    super(`Financial lifecycle idempotency key ${idempotencyKey} is already associated with a different event`);
+    this.name = "FinancialLifecycleIdempotencyConflictError";
+    this.idempotencyKey = idempotencyKey;
+    Object.setPrototypeOf(this, FinancialLifecycleIdempotencyConflictError.prototype);
+  }
+}
+
+export function assertFinancialOperationContext(context: FinancialOperationContext): void {
+  assertNonEmpty(context.actorRef, "operation.actorRef");
+  assertNonEmpty(context.requestId, "operation.requestId");
+  assertNonEmpty(context.correlationId, "operation.correlationId");
+  assertNonEmpty(context.reasonCode, "operation.reasonCode");
+  if (context.approverRef !== undefined) {
+    assertNonEmpty(context.approverRef, "operation.approverRef");
+  }
+  if (context.reasonDetail !== undefined) {
+    assertNonEmpty(context.reasonDetail, "operation.reasonDetail");
+  }
+  assertIsoDateTime(context.occurredAt, "operation.occurredAt");
+}
+
+export function assertIndependentApproval(context: FinancialOperationContext): void {
+  assertFinancialOperationContext(context);
+  if (context.approverRef === undefined) {
+    throw new Error("operation.approverRef is required for this financial operation");
+  }
+  if (context.approverRef === context.actorRef) {
+    throw new Error("operation.approverRef must differ from operation.actorRef");
+  }
+}
+
+export async function appendFinancialLifecycleEvent(
+  client: PostgresQueryClient,
+  input: AppendFinancialLifecycleEventInput
+): Promise<FinancialLifecycleEventResult> {
+  assertScope(input);
+  assertFinancialOperationContext(input.operation);
+  assertNonEmpty(input.aggregateType, "aggregateType");
+  assertNonEmpty(input.aggregateId, "aggregateId");
+  assertNonEmpty(input.eventType, "eventType");
+  assertNonEmpty(input.idempotencyKey, "idempotencyKey");
+  assertIsoDateTime(input.recordedAt, "recordedAt");
+  if (input.priorEventId !== undefined) {
+    assertNonEmpty(input.priorEventId, "priorEventId");
+  }
+  const payload = input.payload ?? {};
+  assertNoCredentialKeys(payload);
+  const payloadChecksum = checksum(payload);
+  const eventId = lifecycleEventId(input, payloadChecksum);
+
+  const inserted = await client.query<StoredLifecycleRow>(
+    `insert into "erp_financials"."financial_lifecycle_events" (
+  "event_id", "tenant_id", "company_id", "source_id", "aggregate_type", "aggregate_id", "event_type",
+  "actor_ref", "approver_ref", "request_id", "correlation_id", "reason_code", "reason_detail",
+  "occurred_at", "recorded_at", "idempotency_key", "payload_checksum", "payload", "prior_event_id"
+) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+on conflict ("tenant_id", "company_id", "source_id", "idempotency_key") do nothing
+returning "event_id", "aggregate_type", "aggregate_id", "event_type", "payload_checksum"`,
+    [
+      eventId,
+      input.tenantId,
+      input.companyId,
+      input.sourceId,
+      input.aggregateType,
+      input.aggregateId,
+      input.eventType,
+      input.operation.actorRef,
+      input.operation.approverRef,
+      input.operation.requestId,
+      input.operation.correlationId,
+      input.operation.reasonCode,
+      input.operation.reasonDetail,
+      input.operation.occurredAt,
+      input.recordedAt,
+      input.idempotencyKey,
+      payloadChecksum,
+      payload,
+      input.priorEventId
+    ]
+  );
+
+  if (inserted.rows[0] !== undefined) {
+    return { eventId, status: "recorded", payloadChecksum };
+  }
+
+  const existing = await client.query<StoredLifecycleRow>(
+    `select "event_id", "aggregate_type", "aggregate_id", "event_type", "payload_checksum"
+from "erp_financials"."financial_lifecycle_events"
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3 and "idempotency_key" = $4
+for key share`,
+    [input.tenantId, input.companyId, input.sourceId, input.idempotencyKey]
+  );
+  const row = existing.rows[0];
+  if (
+    row === undefined ||
+    row.event_id !== eventId ||
+    row.aggregate_type !== input.aggregateType ||
+    row.aggregate_id !== input.aggregateId ||
+    row.event_type !== input.eventType ||
+    row.payload_checksum !== payloadChecksum
+  ) {
+    throw new FinancialLifecycleIdempotencyConflictError(input.idempotencyKey);
+  }
+  return { eventId, status: "already_recorded", payloadChecksum };
+}
+
+function lifecycleEventId(input: AppendFinancialLifecycleEventInput, payloadChecksum: string): string {
+  return `event_${createHash("sha256")
+    .update(
+      [
+        input.tenantId,
+        input.companyId,
+        input.sourceId,
+        input.aggregateType,
+        input.aggregateId,
+        input.eventType,
+        input.idempotencyKey,
+        payloadChecksum
+      ].join("\u0000")
+    )
+    .digest("hex")
+    .slice(0, 24)}`;
+}
+
+function checksum(value: JsonValue): string {
+  return createHash("sha256").update(stableJson(value)).digest("hex");
+}
+
+function stableJson(value: JsonValue): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJson).join(",")}]`;
+  }
+  return `{${Object.entries(value)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`)
+    .join(",")}}`;
+}
+
+function assertScope(scope: FinancialLifecycleScope): void {
+  assertNonEmpty(scope.tenantId, "tenantId");
+  assertNonEmpty(scope.companyId, "companyId");
+  assertNonEmpty(scope.sourceId, "sourceId");
+}
+
+function assertNonEmpty(value: string, field: string): void {
+  if (value.trim().length === 0) {
+    throw new Error(`${field} must not be empty`);
+  }
+}
+
+function assertIsoDateTime(value: string, field: string): void {
+  if (Number.isNaN(Date.parse(value))) {
+    throw new Error(`${field} must be a valid ISO date-time`);
+  }
+}

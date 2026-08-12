@@ -58,7 +58,7 @@ export type FutureErpScheduledRollupWorkerResult = ScheduledRollupJobResult & {
 
 export type FutureErpLateArrivalWorkerRequest = Omit<
   LateArrivalReprocessExecuteInput,
-  "tenantId" | "companyId" | "postings" | "postingReader" | "storage"
+  "tenantId" | "companyId" | "sourceId" | "postings" | "postingReader" | "storage"
 >;
 
 export type FutureErpRollupAndLateArrivalWorker = {
@@ -105,6 +105,7 @@ export function createFutureErpRollupAndLateArrivalWorker(
         ...request,
         tenantId: options.scope.tenantId,
         companyId: options.scope.companyId,
+        sourceId: options.scope.sourceId,
         postingReader: options.postingReader,
         storage
       });

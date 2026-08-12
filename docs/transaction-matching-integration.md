@@ -21,8 +21,8 @@ their audit records and state transitions distinct.
 
 | Layer | Owns |
 | --- | --- |
-| ERP Financials | Provider-neutral types, runtime validation, deterministic posting-rule evaluation, canonical schema, and idempotent persistence methods |
-| Host ERP | Tenant rule configuration, account selection, transaction reads, match-candidate generation, authorization, review UI, database transaction boundaries, and approved proposal-to-ledger orchestration |
+| ERP Financials | Provider-neutral types, runtime validation, deterministic posting-rule evaluation, canonical schema, idempotent persistence methods, and atomic native journal posting through `createErpFinancials(...)` |
+| Host ERP | Tenant rule configuration, account selection, transaction reads, match-candidate generation, authorization, review UI, and a standard Postgres pool or database-library transaction runner configured once for the package service |
 | Provider adapter or service | Provider API access, credentials, normalized source data, and authoritative provider postings |
 
 The package does not currently score payment-to-invoice candidates. A host or a
@@ -173,26 +173,27 @@ since the proposal was displayed.
 
 ## 4. Convert an Approved Proposal to Canonical Ledger Facts
 
-`evaluatePostingRules` returns a proposal; it does not write an
-`AccountingTransaction`, `TransactionLine`, or `LedgerPosting`. The host must
-map each approved proposal line into its canonical ledger write model and use
-stable identifiers derived from the business operation and proposal sequence.
+`evaluatePostingRules` returns a proposal; it does not post without host
+authorization. After approval, the preferred path is to map proposal lines to
+the debit/credit input accepted by `createErpFinancials(...).journalEntries.post(...)`.
+That operation validates the complete journal, creates stable canonical rows,
+persists them in one host-supplied Postgres transaction, and invalidates affected
+report snapshots.
 
 For each proposal line:
 
 - preserve `accountId`, `partyId`, `dimensionRefs`, `debitAmount`, and
-  `creditAmount`;
-- set `netAmount` to debit minus credit using decimal-safe arithmetic;
-- create `dimensionHash` with the package's `createDimensionHash` helper;
-- attach the host's import batch or native posting batch identity; and
-- use a stable `sourcePostingId` so a retry updates instead of duplicates the
-  posting.
+  `creditAmount` when mapping it to the high-level input; and
+- use the approved business operation's stable identity as `idempotencyKey`.
 
-Persist the transaction, lines, postings, and any related payment-application
-status transition within one host-owned database transaction. Construct the
-storage adapter with that transaction's query client. The individual storage
-methods validate and upsert their rows, but do not create a multi-call database
-transaction for the host.
+The service calculates `netAmount` and `dimensionHash`, creates the native
+posting batch and stable source ids, and rejects a retry if the same
+`idempotencyKey` is presented with different content.
+
+When related application state must commit with the journal in the same larger
+business transaction, advanced hosts may still use the lower-level storage
+methods with a transaction-scoped client. The individual methods validate and
+upsert rows but do not create a multi-call transaction themselves.
 
 ```ts
 await hostDatabase.transaction(async (transactionClient) => {

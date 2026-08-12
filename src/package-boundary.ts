@@ -8,9 +8,10 @@ export const ERP_FINANCIALS_PACKAGE = {
 };
 
 export const PACKAGE_BOUNDARY = {
-  purpose: "provider-neutral ERP financial reporting kernel",
+  purpose: "provider-neutral ERP accounting and financial reporting kernel",
   owns: [
     "canonical accounting facts",
+    "account hierarchy and journal posting orchestration",
     "transaction matching and posting rule evaluation",
     "schema and migration manifests",
     "deterministic fixture/reference report formulas",

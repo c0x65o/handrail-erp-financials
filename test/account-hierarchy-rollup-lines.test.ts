@@ -32,7 +32,7 @@ describe("account hierarchy rollup report lines", () => {
 
     expect(lineSummary(lines)).toEqual([
       {
-        id: "profit_and_loss:line:account:acct_parent",
+        id: `${reportSnapshotId}:line:account:acct_parent`,
         parentId: undefined,
         label: "6000 Operating Expenses",
         amount: "65.00",
@@ -41,8 +41,8 @@ describe("account hierarchy rollup report lines", () => {
         postingIds: ["post_child", "post_grandchild", "post_parent", "post_sibling"]
       },
       {
-        id: "profit_and_loss:line:account:acct_child",
-        parentId: "profit_and_loss:line:account:acct_parent",
+        id: `${reportSnapshotId}:line:account:acct_child`,
+        parentId: `${reportSnapshotId}:line:account:acct_parent`,
         label: "6100 Admin",
         amount: "50.00",
         sortOrder: 20,
@@ -50,8 +50,8 @@ describe("account hierarchy rollup report lines", () => {
         postingIds: ["post_child", "post_grandchild"]
       },
       {
-        id: "profit_and_loss:line:account:acct_grandchild",
-        parentId: "profit_and_loss:line:account:acct_child",
+        id: `${reportSnapshotId}:line:account:acct_grandchild`,
+        parentId: `${reportSnapshotId}:line:account:acct_child`,
         label: "6110 Software",
         amount: "30.00",
         sortOrder: 30,
@@ -59,8 +59,8 @@ describe("account hierarchy rollup report lines", () => {
         postingIds: ["post_grandchild"]
       },
       {
-        id: "profit_and_loss:line:account:acct_sibling",
-        parentId: "profit_and_loss:line:account:acct_parent",
+        id: `${reportSnapshotId}:line:account:acct_sibling`,
+        parentId: `${reportSnapshotId}:line:account:acct_parent`,
         label: "6200 Facilities",
         amount: "5.00",
         sortOrder: 40,
@@ -126,21 +126,21 @@ describe("account hierarchy rollup report lines", () => {
     });
 
     expect(lineIdsByAccount(shallow, ["acct_depth_parent", "acct_depth_child", "acct_depth_leaf"])).toEqual({
-      acct_depth_parent: "profit_and_loss:line:account:acct_depth_parent",
-      acct_depth_child: "profit_and_loss:line:account:acct_depth_child",
-      acct_depth_leaf: "profit_and_loss:line:account:acct_depth_leaf"
+      acct_depth_parent: `${reportSnapshotId}:line:account:acct_depth_parent`,
+      acct_depth_child: `${reportSnapshotId}:line:account:acct_depth_child`,
+      acct_depth_leaf: `${reportSnapshotId}:line:account:acct_depth_leaf`
     });
     expect(lineIdsByAccount(deeper, ["acct_depth_parent", "acct_depth_child", "acct_depth_leaf"])).toEqual(
       lineIdsByAccount(shallow, ["acct_depth_parent", "acct_depth_child", "acct_depth_leaf"])
     );
     expect(requiredLine(shallow, "acct_depth_child").parentReportLineId).toBe(
-      "profit_and_loss:line:account:acct_depth_parent"
+      `${reportSnapshotId}:line:account:acct_depth_parent`
     );
     expect(requiredLine(deeper, "acct_depth_group").parentReportLineId).toBe(
-      "profit_and_loss:line:account:acct_depth_parent"
+      `${reportSnapshotId}:line:account:acct_depth_parent`
     );
     expect(requiredLine(deeper, "acct_depth_child").parentReportLineId).toBe(
-      "profit_and_loss:line:account:acct_depth_group"
+      `${reportSnapshotId}:line:account:acct_depth_group`
     );
     expect(deeper.map((line) => [line.accountId, line.sortOrder])).toEqual([
       ["acct_depth_parent", 10],
@@ -179,11 +179,11 @@ describe("account hierarchy rollup report lines", () => {
       ["acct_order_beta", 60]
     ]);
     expect(lines.slice(1).map((line) => line.parentReportLineId)).toEqual([
-      "profit_and_loss:line:account:acct_order_parent",
-      "profit_and_loss:line:account:acct_order_parent",
-      "profit_and_loss:line:account:acct_order_parent",
-      "profit_and_loss:line:account:acct_order_parent",
-      "profit_and_loss:line:account:acct_order_parent"
+      `${reportSnapshotId}:line:account:acct_order_parent`,
+      `${reportSnapshotId}:line:account:acct_order_parent`,
+      `${reportSnapshotId}:line:account:acct_order_parent`,
+      `${reportSnapshotId}:line:account:acct_order_parent`,
+      `${reportSnapshotId}:line:account:acct_order_parent`
     ]);
   });
 
@@ -208,8 +208,8 @@ describe("account hierarchy rollup report lines", () => {
 
     expect(lines.map((line) => [line.accountId, line.amount, line.parentReportLineId, line.sortOrder])).toEqual([
       ["acct_zero_visible_parent", "7.00", undefined, 10],
-      ["acct_zero_mid", "7.00", "profit_and_loss:line:account:acct_zero_visible_parent", 20],
-      ["acct_zero_leaf", "7.00", "profit_and_loss:line:account:acct_zero_mid", 30],
+      ["acct_zero_mid", "7.00", `${reportSnapshotId}:line:account:acct_zero_visible_parent`, 20],
+      ["acct_zero_leaf", "7.00", `${reportSnapshotId}:line:account:acct_zero_mid`, 30],
       ["acct_zero_evidence", "0.00", undefined, 40]
     ]);
     expect(lines.some((line) => line.accountId === "acct_zero_empty_parent")).toBe(false);
@@ -259,7 +259,7 @@ describe("account hierarchy rollup report lines", () => {
     expect(implicitLine.label).toBe("Provider-Neutral Label");
     expect(implicitLine.parentReportLineId).toBeUndefined();
     expect(explicitLine.label).toBe("Canonical Child");
-    expect(explicitLine.parentReportLineId).toBe("profit_and_loss:line:account:acct_provider_parent");
+    expect(explicitLine.parentReportLineId).toBe(`${reportSnapshotId}:line:account:acct_provider_parent`);
   });
 
   it("does not infer hierarchy from labels, account numbers, source ids, or provider payload metadata", () => {

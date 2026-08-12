@@ -355,10 +355,10 @@ Expected report snapshot and freshness ids:
 
 | Report | Snapshot id | Freshness id |
 | --- | --- | --- |
-| `profit_and_loss` | `snapshot:tenant_qbo_sync_fixture:profit_and_loss:accrual:2026-01-01:2026-01-31:2026-01-31:USD` | `freshness:tenant_qbo_sync_fixture:company_future_erp_qbo_fixture:source_qbo_sync_fixture:profit_and_loss:accrual:2026-01-01:2026-01-31:USD` |
-| `balance_sheet` | `snapshot:tenant_qbo_sync_fixture:balance_sheet:accrual:2026-01-01:2026-01-31:2026-01-31:USD` | `freshness:tenant_qbo_sync_fixture:company_future_erp_qbo_fixture:source_qbo_sync_fixture:balance_sheet:accrual:2026-01-01:2026-01-31:USD` |
-| `trial_balance` | `snapshot:tenant_qbo_sync_fixture:trial_balance:accrual:2026-01-01:2026-01-31:2026-01-31:USD` | `freshness:tenant_qbo_sync_fixture:company_future_erp_qbo_fixture:source_qbo_sync_fixture:trial_balance:accrual:2026-01-01:2026-01-31:USD` |
-| `cash_flow` | `snapshot:tenant_qbo_sync_fixture:cash_flow:accrual:2026-01-01:2026-01-31:2026-01-31:USD` | `freshness:tenant_qbo_sync_fixture:company_future_erp_qbo_fixture:source_qbo_sync_fixture:cash_flow:accrual:2026-01-01:2026-01-31:USD` |
+| `profit_and_loss` | `snapshot:tenant_qbo_sync_fixture:company_future_erp_qbo_fixture:source_qbo_sync_fixture:profit_and_loss:builder:accrual:2026-01-01:2026-01-31:2026-01-31:USD` | `freshness:tenant_qbo_sync_fixture:company_future_erp_qbo_fixture:source_qbo_sync_fixture:profit_and_loss:accrual:2026-01-01:2026-01-31:USD` |
+| `balance_sheet` | `snapshot:tenant_qbo_sync_fixture:company_future_erp_qbo_fixture:source_qbo_sync_fixture:balance_sheet:builder:accrual:2026-01-01:2026-01-31:2026-01-31:USD` | `freshness:tenant_qbo_sync_fixture:company_future_erp_qbo_fixture:source_qbo_sync_fixture:balance_sheet:accrual:2026-01-01:2026-01-31:USD` |
+| `trial_balance` | `snapshot:tenant_qbo_sync_fixture:company_future_erp_qbo_fixture:source_qbo_sync_fixture:trial_balance:builder:accrual:2026-01-01:2026-01-31:2026-01-31:USD` | `freshness:tenant_qbo_sync_fixture:company_future_erp_qbo_fixture:source_qbo_sync_fixture:trial_balance:accrual:2026-01-01:2026-01-31:USD` |
+| `cash_flow` | `snapshot:tenant_qbo_sync_fixture:company_future_erp_qbo_fixture:source_qbo_sync_fixture:cash_flow:builder:accrual:2026-01-01:2026-01-31:2026-01-31:USD` | `freshness:tenant_qbo_sync_fixture:company_future_erp_qbo_fixture:source_qbo_sync_fixture:cash_flow:accrual:2026-01-01:2026-01-31:USD` |
 
 The replay writes in this deterministic order and then repeats the same
 identities on a second replay, proving idempotent `on conflict` upsert behavior:
