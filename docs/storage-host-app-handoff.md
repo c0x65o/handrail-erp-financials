@@ -35,6 +35,13 @@ Native ERP ledger events
   -> the same storage upsert, rollup, snapshot, and freshness methods
 ```
 
+For native posting-rule evaluation and customer/vendor payment matching before
+canonical ledger persistence, follow
+[transaction-matching-integration.md](transaction-matching-integration.md).
+That guide defines the separate rule and matching workflows, approval-to-ledger
+boundary, append-only decision audit, idempotency, and balance concurrency
+requirements.
+
 ## ERP Financials Adapter Contract
 
 The ERP Financials adapter contract for the Handrail QuickBooks SDK/service is:

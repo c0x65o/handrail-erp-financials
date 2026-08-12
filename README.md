@@ -72,6 +72,10 @@ cent arithmetic, deterministic half-up percentage rounding, and must balance
 debits to credits before they can be returned. Every proposed account is also
 required to exist and be active in the canonical chart of accounts supplied to
 the evaluator.
+See
+[docs/transaction-matching-integration.md](docs/transaction-matching-integration.md)
+for the host workflow from schema installation and rule configuration through
+match decisions, payment applications, and approved proposal-to-ledger writes.
 Canonical account hierarchy behavior is provider-neutral and defined in
 [docs/account-hierarchy-rules.md](docs/account-hierarchy-rules.md), including
 parent postings, descendant totals, inactive parents, invalid parent

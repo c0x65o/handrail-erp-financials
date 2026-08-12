@@ -7,6 +7,9 @@ without changing deploy, runtime, OAuth, or provider configuration.
 Use this with [storage-host-app-handoff.md](storage-host-app-handoff.md) for
 the worker data flow and [quickbooks-boundary.md](quickbooks-boundary.md) for
 provider ownership.
+For native posting rules, payment-to-invoice matching, approval, and canonical
+ledger write orchestration, use
+[transaction-matching-integration.md](transaction-matching-integration.md).
 
 ## Local Checkouts
 

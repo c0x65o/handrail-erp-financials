@@ -20,6 +20,10 @@ same canonical model.
 - [architecture.md](architecture.md): System boundaries and package ownership.
 - [canonical-data-model.md](canonical-data-model.md): Tables and domain facts
   this package should standardize.
+- [transaction-matching-integration.md](transaction-matching-integration.md):
+  End-to-end host integration for posting-rule evaluation, payment-to-invoice
+  candidate generation, append-only decisions, payment applications,
+  proposal-to-ledger orchestration, idempotency, and concurrency controls.
 - [account-hierarchy-rules.md](account-hierarchy-rules.md): Provider-neutral
   canonical account hierarchy rules for parent postings, descendant rollups,
   inactive accounts, invalid parent references, cycles, and source-adapter

@@ -21,6 +21,9 @@ Future ERP orchestration, and canonical storage, use
 [storage-host-app-handoff.md](storage-host-app-handoff.md).
 For the Future ERP-specific local package/link setup and validation handoff,
 use [future-erp-dependency-handoff.md](future-erp-dependency-handoff.md).
+For native posting rules, transaction matching, payment applications, and the
+approved proposal-to-ledger workflow, use
+[transaction-matching-integration.md](transaction-matching-integration.md).
 For safe retry cadence, deterministic evidence fields, fixture smoke
 interpretation, drilldown health failure handling, and escalation boundaries,
 use [operations-runbook.md](operations-runbook.md).
@@ -39,6 +42,7 @@ Host apps should call these exported `@handrail/erp-financials` APIs directly:
 | --- | --- |
 | Canonical schema, install, and health | `POSTGRES_CANONICAL_SCHEMA_MANIFEST`, `renderPostgresSchemaSql`, `createPostgresStorageAdapter(...).installSchema()`, `createPostgresStorageAdapter(...).validateSchema()`, `validatePostgresSchema`, `checkErpFinancialsInstallHealth`, `validateFutureErpCanonicalSchemaPreflight`, `preflightFutureErpInstallHealth`, `createFutureErpInstallHealthPreflightWorker` |
 | Storage adapter and persistence | `createPostgresStorageAdapter`, `createFutureErpCanonicalFactPersistenceWorker`, `persistFutureErpCanonicalFacts` |
+| Posting rules and transaction matching | `evaluatePostingRules`, `PostingRule`, `PostingRuleEvaluationInput`, `TransactionMatchCandidate`, `TransactionMatchDecision`, `PaymentApplication`, `createPostgresStorageAdapter(...).upsertPostingRules()`, `createPostgresStorageAdapter(...).upsertTransactionMatchCandidates()`, `createPostgresStorageAdapter(...).recordTransactionMatchDecisions()`, `createPostgresStorageAdapter(...).upsertPaymentApplications()` |
 | QuickBooks normalized mapping | `HandrailQuickBooksSdkResourcesAdapterInput`, `mapHandrailQuickBooksSdkResourcesToCanonicalFacts`, `mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts`, `mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts` |
 | QuickBooks sync worker contracts | `createFutureErpQuickBooksFullSyncWorker`, `createFutureErpQuickBooksIncrementalSyncWorker`, `NormalizedQuickBooksFullSyncRequestEnvelope`, `NormalizedQuickBooksFullSyncResponseEnvelope`, `NormalizedQuickBooksIncrementalSyncRequestEnvelope`, `NormalizedQuickBooksIncrementalSyncResponseEnvelope`, `createHandrailQuickBooksFullSyncServiceHandler`, `createHandrailQuickBooksSyncClient`, `HandrailQuickBooksSyncClient`, `HandrailQuickBooksSyncClientTransport` |
 | Fixture/reference report formulas and persisted report flow | `buildProfitAndLossReport`, `buildBalanceSheetReport`, `buildTrialBalanceReport`, `buildCashFlowReport`, `buildReferenceStandardReportPresentationFromFacts`, `buildStandardReportPresentationFromReadModel`, `buildFutureErpReportFromCanonicalReadModel`, `createSnapshotRefreshContract`, `reconcileReportFreshness`, `createFutureErpRollupAndLateArrivalWorker`, `createFutureErpSnapshotRefreshAndFreshnessWorker` |

@@ -200,6 +200,10 @@ Important rules:
 
 ## Transaction Matching and Posting Rules
 
+For the host application workflow, state transitions, idempotency keys, and
+approval-to-ledger boundary, see
+[transaction-matching-integration.md](transaction-matching-integration.md).
+
 ### posting_rules
 
 Tenant/source-scoped rules describe provider-neutral conditions and proposed
