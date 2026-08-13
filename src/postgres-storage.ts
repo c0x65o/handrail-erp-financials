@@ -2458,7 +2458,9 @@ async function upsertRows(
       validateCredentialFreeRow(tableName, row);
       return `(${columns
         .map((column) => {
-          parameters.push(row[column] ?? null);
+          const value = row[column] ?? null;
+          const columnManifest = table.columns.find((candidate) => candidate.name === column);
+          parameters.push(columnManifest?.type === "jsonb" && value !== null ? JSON.stringify(value) : value);
           return `$${String(parameters.length)}`;
         })
         .join(", ")})`;

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { assertNoCredentialKeys } from "./canonical-model.js";
+import { ErpFinancialsError } from "./sdk-errors.js";
 
 import type { IsoDateTime, JsonValue } from "./canonical-model.js";
 import type { PostgresQueryClient } from "./postgres-storage.js";
@@ -54,11 +55,15 @@ type StoredLifecycleRow = Record<string, unknown> & {
   readonly prior_event_id?: unknown;
 };
 
-export class FinancialLifecycleIdempotencyConflictError extends Error {
+export class FinancialLifecycleIdempotencyConflictError extends ErpFinancialsError {
   readonly idempotencyKey: string;
 
   constructor(idempotencyKey: string) {
-    super(`Financial lifecycle idempotency key ${idempotencyKey} is already associated with a different event`);
+    super(
+      "idempotency_conflict",
+      `Financial lifecycle idempotency key ${idempotencyKey} is already associated with a different event`,
+      { details: { idempotencyKey } }
+    );
     this.name = "FinancialLifecycleIdempotencyConflictError";
     this.idempotencyKey = idempotencyKey;
     Object.setPrototypeOf(this, FinancialLifecycleIdempotencyConflictError.prototype);
@@ -66,26 +71,26 @@ export class FinancialLifecycleIdempotencyConflictError extends Error {
 }
 
 export function assertFinancialOperationContext(context: FinancialOperationContext): void {
-  assertNonEmpty(context.actorRef, "operation.actorRef");
-  assertNonEmpty(context.requestId, "operation.requestId");
-  assertNonEmpty(context.correlationId, "operation.correlationId");
-  assertNonEmpty(context.reasonCode, "operation.reasonCode");
+  assertNonEmpty(context.actorRef, "operation.actorRef", "authorization_context_invalid");
+  assertNonEmpty(context.requestId, "operation.requestId", "authorization_context_invalid");
+  assertNonEmpty(context.correlationId, "operation.correlationId", "authorization_context_invalid");
+  assertNonEmpty(context.reasonCode, "operation.reasonCode", "authorization_context_invalid");
   if (context.approverRef !== undefined) {
-    assertNonEmpty(context.approverRef, "operation.approverRef");
+    assertNonEmpty(context.approverRef, "operation.approverRef", "authorization_context_invalid");
   }
   if (context.reasonDetail !== undefined) {
-    assertNonEmpty(context.reasonDetail, "operation.reasonDetail");
+    assertNonEmpty(context.reasonDetail, "operation.reasonDetail", "authorization_context_invalid");
   }
-  assertIsoDateTime(context.occurredAt, "operation.occurredAt");
+  assertIsoDateTime(context.occurredAt, "operation.occurredAt", "authorization_context_invalid");
 }
 
 export function assertIndependentApproval(context: FinancialOperationContext): void {
   assertFinancialOperationContext(context);
   if (context.approverRef === undefined) {
-    throw new Error("operation.approverRef is required for this financial operation");
+    throw new ErpFinancialsError("authorization_context_invalid", "operation.approverRef is required for this financial operation");
   }
   if (context.approverRef === context.actorRef) {
-    throw new Error("operation.approverRef must differ from operation.actorRef");
+    throw new ErpFinancialsError("authorization_context_invalid", "operation.approverRef must differ from operation.actorRef");
   }
 }
 
@@ -134,7 +139,7 @@ returning "event_id", "aggregate_type", "aggregate_id", "event_type", "payload_c
       input.recordedAt,
       input.idempotencyKey,
       payloadChecksum,
-      payload,
+      JSON.stringify(payload),
       input.priorEventId
     ]
   );
@@ -223,14 +228,22 @@ function assertScope(scope: FinancialLifecycleScope): void {
   assertNonEmpty(scope.sourceId, "sourceId");
 }
 
-function assertNonEmpty(value: string, field: string): void {
+function assertNonEmpty(
+  value: string,
+  field: string,
+  code: "authorization_context_invalid" | "invalid_input" = "invalid_input"
+): void {
   if (value.trim().length === 0) {
-    throw new Error(`${field} must not be empty`);
+    throw new ErpFinancialsError(code, `${field} must not be empty`);
   }
 }
 
-function assertIsoDateTime(value: string, field: string): void {
+function assertIsoDateTime(
+  value: string,
+  field: string,
+  code: "authorization_context_invalid" | "invalid_input" = "invalid_input"
+): void {
   if (Number.isNaN(Date.parse(value))) {
-    throw new Error(`${field} must be a valid ISO date-time`);
+    throw new ErpFinancialsError(code, `${field} must be a valid ISO date-time`);
   }
 }

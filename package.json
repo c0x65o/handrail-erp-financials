@@ -1,6 +1,6 @@
 {
   "name": "@handrail/erp-financials",
-  "version": "0.1.24",
+  "version": "0.2.1",
   "description": "Provider-neutral ERP accounting and reporting kernel for canonical facts, journal posting, rollups, snapshots, and report APIs.",
   "type": "module",
   "license": "UNLICENSED",
@@ -19,6 +19,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./sdk": {
+      "types": "./dist/sdk.d.ts",
+      "import": "./dist/sdk.js"
     }
   },
   "types": "./dist/index.d.ts",

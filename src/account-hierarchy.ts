@@ -1,4 +1,5 @@
 import type { Account, AccountId, SourceId, TenantId } from "./canonical-model.js";
+import { ErpFinancialsError } from "./sdk-errors.js";
 
 export type AccountHierarchyDiagnosticCode =
   | "account_parent_orphan"
@@ -26,11 +27,13 @@ export type AccountHierarchyValidationOptions = {
   readonly accountsToValidate?: readonly Account[];
 };
 
-export class AccountHierarchyValidationError extends Error {
+export class AccountHierarchyValidationError extends ErpFinancialsError {
   readonly diagnostics: readonly AccountHierarchyDiagnostic[];
 
   constructor(diagnostics: readonly AccountHierarchyDiagnostic[]) {
-    super(accountHierarchyValidationMessage(diagnostics));
+    super("invalid_account_hierarchy", accountHierarchyValidationMessage(diagnostics), {
+      details: { diagnosticCount: diagnostics.length }
+    });
     this.name = "AccountHierarchyValidationError";
     this.diagnostics = diagnostics;
     Object.setPrototypeOf(this, AccountHierarchyValidationError.prototype);

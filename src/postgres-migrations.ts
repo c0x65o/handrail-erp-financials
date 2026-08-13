@@ -123,6 +123,10 @@ const migrationFiles = {
   atomicSubledgersV13: new URL(
     "../migrations/future-erp/20260812060000_add_atomic_subledgers.sql",
     import.meta.url
+  ),
+  sdkV1FoundationV14: new URL(
+    "../migrations/future-erp/20260812070000_add_sdk_v1_foundation.sql",
+    import.meta.url
   )
 } as const;
 
@@ -200,6 +204,13 @@ export const POSTGRES_MIGRATIONS: readonly PostgresMigrationDefinition[] = [
     12,
     13,
     migrationFiles.atomicSubledgersV13
+  ),
+  migration(
+    "20260812070000_add_sdk_v1_foundation",
+    "Add reporting books, unified matching evidence, invoice detail, outbox, and bank reconciliation foundation",
+    13,
+    14,
+    migrationFiles.sdkV1FoundationV14
   )
 ] as const;
 
@@ -257,7 +268,8 @@ export async function migratePostgresSchema(
         initialVersion !== 10 &&
         initialVersion !== 11 &&
         initialVersion !== 12 &&
-        initialVersion !== 13
+        initialVersion !== 13 &&
+        initialVersion !== 14
       ) {
         throw new PostgresMigrationError(
           "unsupported_legacy_schema",
@@ -528,10 +540,16 @@ order by table_name, column_name`,
       if (!(await relationExists(client, `${namespace}.journal_entry_links`))) {
         return 11;
       }
-      return (await relationExists(client, `${namespace}.subledger_documents`)) &&
-        (await relationExists(client, `${namespace}.subledger_applications`))
-        ? 13
-        : 12;
+      if (
+        !(await relationExists(client, `${namespace}.subledger_documents`)) ||
+        !(await relationExists(client, `${namespace}.subledger_applications`))
+      ) {
+        return 12;
+      }
+      return (await relationExists(client, `${namespace}.reporting_books`)) &&
+        (await relationExists(client, `${namespace}.financial_outbox`))
+        ? 14
+        : 13;
     }
     // An empty ledger can exist after an interrupted/manual bootstrap. The
     // ledger itself is the v8 change, but without a durable migration row we

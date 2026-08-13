@@ -17,6 +17,9 @@ same canonical model.
 
 ## Documents
 
+- [sdk-v1-contract.md](sdk-v1-contract.md): Preferred pre-v1 host integration,
+  reporting-book/source identity, book chart, invoice lifecycle, matching,
+  currency, read models, errors, outbox runtime, and compatibility contract.
 - [architecture.md](architecture.md): System boundaries and package ownership.
 - [canonical-data-model.md](canonical-data-model.md): Tables and domain facts
   this package should standardize.

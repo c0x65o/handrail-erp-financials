@@ -3,6 +3,7 @@ import { Pool } from "pg";
 
 import {
   POSTGRES_CANONICAL_SCHEMA_MANIFEST,
+  createErpFinancialsSdk,
   migratePostgresSchema,
   validatePostgresMigrationHistory,
   validatePostgresSchema
@@ -42,9 +43,9 @@ describeIntegration("ERP Financials real PostgreSQL", () => {
     expect(result.targetVersion).toBe(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion);
     expect(result.applied.at(-1)?.toVersion).toBe(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion);
     expect(schema).toMatchObject({ compatible: true, fixtureSupport: true, issues: [] });
-    expect(history).toMatchObject({ compatible: true, currentVersion: 13, issues: [] });
+    expect(history).toMatchObject({ compatible: true, currentVersion: 14, issues: [] });
     await expect(
-      pool.query("update erp_financials.schema_migrations set name = 'tampered' where to_version = 13")
+      pool.query("update erp_financials.schema_migrations set name = 'tampered' where to_version = 14")
     ).rejects.toThrow("schema migration history is append-only");
   });
 
@@ -154,7 +155,7 @@ insert into erp_financials.journal_entry_links values
       expect(unavailable.rows[0]?.acquired).toBe(false);
 
       const before = await first.query<{ count: string }>("select count(*)::text as count from erp_financials.schema_migrations");
-      await second.query("insert into erp_financials.schema_migrations values ('integration_probe', 13, 14, 'probe', repeat('b', 64), 'probe', 0, 'integration', clock_timestamp())");
+      await second.query("insert into erp_financials.schema_migrations values ('integration_probe', 14, 15, 'probe', repeat('b', 64), 'probe', 0, 'integration', clock_timestamp())");
       await second.query("commit");
       const during = await first.query<{ count: string }>("select count(*)::text as count from erp_financials.schema_migrations");
       expect(during.rows[0]?.count).toBe(before.rows[0]?.count);
@@ -306,6 +307,175 @@ where tenant_id = 'tenant_1' and source_id = 'source_1' and transaction_id = 'jo
       client.release();
     }
   });
+
+  it("runs the host-facing SDK from book setup through invoice, atomic match, reconciliation, reads, and outbox delivery", async () => {
+    await migratePostgresSchema(runner, { appliedByRef: "integration:sdk-v1" });
+    await seedAccountingScope(pool);
+    const operation = sdkOperation();
+    const sdk = createErpFinancialsSdk({
+      database: runner,
+      tenantId: "tenant_1",
+      companyId: "company_1",
+      bookId: "book_primary",
+      writeSourceId: "source_1",
+      currencyCode: "USD",
+      postingPolicy: "legacy_unrestricted",
+      now: () => "2026-08-12T12:00:00.000Z"
+    });
+
+    await sdk.books.define({
+      operation,
+      bookId: "book_primary",
+      name: "Primary",
+      baseCurrencyCode: "USD"
+    });
+    await sdk.books.bindSource({
+      operation,
+      bookId: "book_primary",
+      sourceId: "source_1",
+      sourceRole: "active",
+      effectiveFrom: "2026-01-01"
+    });
+    for (const account of [
+      { bookAccountKey: "income", name: "Income", classification: "income" as const },
+      {
+        bookAccountKey: "service_revenue",
+        name: "Service Revenue",
+        classification: "income" as const,
+        parentBookAccountKey: "income"
+      }
+    ]) {
+      await sdk.books.defineAccount({ operation, bookId: "book_primary", ...account });
+    }
+    await sdk.books.mapAccount({
+      operation,
+      bookId: "book_primary",
+      sourceId: "source_1",
+      accountId: "account_income",
+      bookAccountKey: "service_revenue"
+    });
+
+    const draft = await sdk.invoices.createDraft({
+      operation,
+      idempotencyKey: "draft-1001",
+      customerId: "customer_1",
+      receivableAccount: { accountId: "account_ar" },
+      documentNumber: "INV-1001",
+      documentDate: "2026-08-01",
+      dueDate: "2026-08-31",
+      revenueLines: [{
+        accountId: "account_income",
+        amount: "25.00",
+        quantity: "2.5",
+        unitAmount: "10.00"
+      }]
+    });
+    const issued = await sdk.invoices.issue({
+      operation,
+      invoiceDraftId: draft.invoiceDraftId,
+      expectedVersion: draft.version,
+      idempotencyKey: "invoice-1001"
+    });
+    const payment = await sdk.commands.customerPayments.record({
+      operation,
+      idempotencyKey: "payment-1001",
+      date: "2026-08-05",
+      customerId: "customer_1",
+      amount: "25.00",
+      cashAccount: { accountId: "account_cash" },
+      receivableAccount: { accountId: "account_ar" }
+    });
+    await pool.query(
+      `insert into erp_financials.transaction_match_candidates (
+  match_candidate_id, tenant_id, source_id, match_kind, origin_transaction_id, target_transaction_id,
+  matcher_version, score, suggested_application_amount, currency_code, status, evidence, created_at, expires_at
+) values ($1, 'tenant_1', 'source_1', 'customer_payment_to_invoice', $2, $3, 'integration-v1', 1, 25, 'USD',
+  'suggested', '[{"criterion":"party","matched":true,"weight":"1","score":"1"}]'::jsonb,
+  '2026-08-06T00:00:00Z', '2026-09-01T00:00:00Z')`,
+      ["candidate_sdk_1", payment.journal.transactionId, issued.transactionId]
+    );
+    const applied = await sdk.paymentMatching.acceptAndApply({
+      operation,
+      matchCandidateId: "candidate_sdk_1",
+      sourceDocumentId: payment.documentId,
+      targetDocumentId: issued.invoiceDocumentId,
+      amount: "25.00",
+      applicationDate: "2026-08-06",
+      expectedSourceVersion: payment.version,
+      expectedTargetVersion: 1,
+      idempotencyKey: "apply-1001",
+      method: "manual"
+    });
+    expect(applied.application).toMatchObject({ status: "applied", appliedAmount: "25.00" });
+
+    const bankLine = await sdk.bankReconciliation.ingest({
+      operation,
+      externalLineId: "bank-line-1001",
+      bankAccountId: "account_cash",
+      postedDate: "2026-08-05",
+      amount: "25.00"
+    });
+    await expect(sdk.bankReconciliation.match({
+      operation,
+      bankStatementLineId: bankLine.bankStatementLineId,
+      transactionId: payment.journal.transactionId,
+      expectedVersion: bankLine.version,
+      idempotencyKey: "bank-match-1001",
+      method: "manual"
+    })).resolves.toMatchObject({ status: "matched", matchedAmount: "25.00" });
+
+    const invoice = await sdk.queries.getInvoice(issued.invoiceDocumentId, "2026-08-12");
+    expect(invoice).toMatchObject({ status: "paid", openAmount: "0.00", originalAmount: "25.00" });
+    expect(invoice.lines).toEqual([expect.objectContaining({ quantity: "2.5", unitAmount: "10.00", amount: "25.00" })]);
+    await expect(sdk.queries.getInvoiceSummary({ asOfDate: "2026-08-12" })).resolves.toMatchObject({
+      outstandingAmount: "0.00",
+      outstandingInvoiceCount: 0,
+      unsentDraftCount: 0,
+      collectedAmount: "25.00",
+      settledInvoiceCount: 1
+    });
+    await expect(sdk.queries.getPaymentSummary({
+      periodStart: "2026-08-01",
+      periodEnd: "2026-08-31"
+    })).resolves.toMatchObject({
+      receivedAmount: "25.00",
+      receivedPaymentCount: 1,
+      matchedPaymentCount: 1,
+      automaticallyMatchedPaymentCount: 0,
+      automaticMatchRatePercent: "0.00",
+      unappliedAmount: "0.00",
+      awaitingBankReviewCount: 0
+    });
+    await expect(sdk.queries.getGeneralLedgerSummary({
+      periodStart: "2026-08-01",
+      periodEnd: "2026-08-31"
+    })).resolves.toMatchObject({
+      postingCount: 4,
+      totalDebits: "50.00",
+      totalCredits: "50.00",
+      difference: "0.00"
+    });
+    const statement = await sdk.queries.getFinancialStatement({
+      reportName: "profit_and_loss",
+      periodStart: "2026-08-01",
+      periodEnd: "2026-08-31"
+    });
+    expect(statement.lines).toEqual([
+      expect.objectContaining({ bookAccountKey: "income", directAmount: "0.00", amount: "25.00" }),
+      expect.objectContaining({ bookAccountKey: "service_revenue", directAmount: "25.00", amount: "25.00" })
+    ]);
+    await expect(sdk.queries.getBankReconciliationSummary()).resolves.toMatchObject({ matchedCount: 1 });
+
+    const delivered: string[] = [];
+    const runtimeResult = await sdk.createRuntime({
+      onEvent: (event) => {
+        delivered.push(event.outboxEventId);
+        return Promise.resolve();
+      }
+    }).runOnce({ limit: 500 });
+    expect(runtimeResult).toMatchObject({ claimed: delivered.length, published: delivered.length, failed: 0 });
+    expect(delivered.length).toBeGreaterThan(0);
+  });
 });
 
 class PgQueryClient implements PostgresQueryClient {
@@ -386,7 +556,8 @@ values ('source_1', 'tenant_1', 'native_erp', 'test', 'source:1', 'active'),
 insert into erp_financials.company_sources values ('company_source_1', 'tenant_1', 'company_1', 'source_1', now());
 insert into erp_financials.accounts (account_id, tenant_id, source_id, source_account_id, name, type, classification, active)
 values ('account_cash', 'tenant_1', 'source_1', 'cash', 'Cash', 'asset', 'asset', true),
-       ('account_ar', 'tenant_1', 'source_1', 'ar', 'Receivable', 'asset', 'asset', true);
+       ('account_ar', 'tenant_1', 'source_1', 'ar', 'Receivable', 'asset', 'asset', true),
+       ('account_income', 'tenant_1', 'source_1', 'income', 'Service Revenue', 'income', 'income', true);
 insert into erp_financials.parties (party_id, tenant_id, source_id, source_party_id, party_type, display_name, active)
 values ('customer_1', 'tenant_1', 'source_1', 'customer:1', 'customer', 'Customer One', true),
        ('customer_2', 'tenant_1', 'source_1', 'customer:2', 'customer', 'Customer Two', true);
@@ -400,6 +571,17 @@ insert into erp_financials.transaction_lines (
   transaction_line_id, tenant_id, source_id, transaction_id, line_number, account_id, amount, dimension_refs
 ) values ('line_1', 'tenant_1', 'source_1', 'journal_1', 1, 'account_cash', 10, '[]'::jsonb);
 `);
+}
+
+function sdkOperation() {
+  return {
+    actorRef: "user:accountant",
+    approverRef: "user:controller",
+    requestId: "request:sdk-integration",
+    correlationId: "correlation:sdk-integration",
+    reasonCode: "sdk_integration_test",
+    occurredAt: "2026-08-12T11:59:00.000Z"
+  } as const;
 }
 
 async function seedSubledgerDocuments(pool: Pool): Promise<void> {

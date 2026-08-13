@@ -53,8 +53,8 @@ describe("Postgres storage adapter", () => {
     const result = await installPostgresSchema(client, POSTGRES_CANONICAL_SCHEMA_MANIFEST, { dryRun: true });
 
     expect(result.executed).toBe(false);
-    expect(result.manifestVersion).toBe("2026-08-12.subledger-v1");
-    expect(result.schemaVersion).toBe(13);
+    expect(result.manifestVersion).toBe("2026-08-12.sdk-v1-foundation");
+    expect(result.schemaVersion).toBe(14);
     expect(result.statements[0]).toBe('create schema if not exists "erp_financials";');
     expect(result.statements.some((statement) => statement.includes('"rollup_buckets"'))).toBe(true);
     expect(result.statements.some((statement) => statement.includes('"report_freshness"'))).toBe(true);

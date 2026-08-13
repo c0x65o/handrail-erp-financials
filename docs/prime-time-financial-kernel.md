@@ -5,6 +5,12 @@ applications. It owns the hard financial invariants and durable Postgres
 contracts. A host owns authentication, authorization policy, UI, workflow
 presentation, database credentials, scheduling, and provider credentials.
 
+New applications should configure `createErpFinancialsSdk(...)` from
+`@handrail/erp-financials/sdk`. The lower-level `createErpFinancials(...)`
+example below remains valid for advanced journal/subledger integrations. The
+complete book, invoice, matching, reconciliation, query, error, and runtime
+contract is in [sdk-v1-contract.md](sdk-v1-contract.md).
+
 ## Required production setup
 
 1. Run the package migration registry through one transaction runner. Do not
@@ -115,6 +121,11 @@ because it has no ordered history.
 All monetary inputs are fixed-scale decimal strings. The package does not use
 binary floating-point arithmetic for journal validation.
 
+Pre-v1 supports one base currency per reporting book and rejects any command
+currency that differs. This is an explicit safety boundary until exchange-rate,
+revaluation, realized gain/loss, and settlement-rounding behavior is delivered
+as one complete multi-currency contract.
+
 ## Host responsibilities
 
 The host must authorize the actor before calling the package, provide an
@@ -135,4 +146,6 @@ ERP_FINANCIALS_TEST_DATABASE_URL=postgresql://.../erp_financials_test_local \
 
 It covers blank install, legacy v6 upgrade, rollback, migration locking,
 scoped constraints, posted-fact immutability, subledger balance triggers,
-repeatable-read snapshot behavior, and an important scoped query plan.
+repeatable-read snapshot behavior, an important scoped query plan, and a full
+host-facing SDK flow through book setup, invoice/payment posting, atomic
+matching, bank reconciliation, screen summaries, rollups, and outbox delivery.

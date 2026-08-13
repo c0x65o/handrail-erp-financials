@@ -145,7 +145,12 @@ export type TransactionMatchDecision = SourceScopedRecord & {
 
 export type PaymentApplicationStatus = "proposed" | "posted" | "voided";
 
-/** Allocation of one customer payment to one invoice. */
+/**
+ * Allocation of one customer payment to one invoice.
+ *
+ * Compatibility shape for imported/legacy facts. New native writes use
+ * atomic `subledger_applications` through the SDK.
+ */
 export type PaymentApplication = SourceScopedRecord & {
   readonly paymentApplicationId: PaymentApplicationId;
   readonly paymentTransactionId: TransactionId;

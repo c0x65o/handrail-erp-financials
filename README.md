@@ -25,11 +25,43 @@ or define new QuickBooks credential environment variables.
 npm install
 ```
 
-The published package entry point is `@handrail/erp-financials`; local
-development builds emit ESM JavaScript and TypeScript declarations to `dist/`.
-Consumers must import from that root entry point only. Subpath imports such as
-`@handrail/erp-financials/quickbooks/*`, copied package shims, and host-local
-re-exports are not supported compatibility surfaces.
+The preferred new-host entry point is `@handrail/erp-financials/sdk`. The root
+`@handrail/erp-financials` entry point remains the compatibility and advanced
+kernel surface. Local builds emit ESM JavaScript and TypeScript declarations to
+`dist/`. Undeclared subpaths, direct `src/`/`dist/` imports, copied package shims,
+and host-local financial reimplementations are not supported surfaces.
+
+```ts
+import { createErpFinancialsSdk } from "@handrail/erp-financials/sdk";
+
+const sdk = createErpFinancialsSdk({
+  database,
+  tenantId: "tenant_1",
+  companyId: "company_1",
+  bookId: "primary_book",
+  writeSourceId: "native_erp",
+  currencyCode: "USD"
+});
+
+const dashboard = await sdk.queries.getDashboardSummary({
+  periodStart: "2026-01-01",
+  asOfDate: "2026-08-12"
+});
+
+// Page cards come from the same financial read boundary; routes do not sum a
+// paginated table or issue host-local financial SQL.
+const invoiceCards = await sdk.queries.getInvoiceSummary({ asOfDate: "2026-08-12" });
+const paymentCards = await sdk.queries.getPaymentSummary({
+  periodStart: "2026-08-01",
+  periodEnd: "2026-08-31"
+});
+const ledgerCards = await sdk.queries.getGeneralLedgerSummary({
+  periodStart: "2026-08-01",
+  periodEnd: "2026-08-31"
+});
+```
+
+Advanced compatibility APIs remain available from the root:
 
 ```ts
 import {
@@ -86,8 +118,9 @@ source-adapter boundaries.
 
 ## Reusable Account And Journal Service
 
-Host applications that create native accounts and journal entries should use
-`createErpFinancials(...)` instead of coordinating individual canonical writes.
+New host applications should use `createErpFinancialsSdk(...)`. Advanced or
+existing integrations that only need native accounts and journal entries may
+use `createErpFinancials(...)` instead of coordinating individual canonical writes.
 The host supplies its Postgres pool or transaction runner once; the service
 validates the complete account hierarchy, enforces balanced and active-account
 journal postings, creates stable canonical ids, persists every ledger row
@@ -241,16 +274,20 @@ The production accounting integration contract is in
 For the worker-facing QuickBooks SDK/service to host-app storage contract, see
 [docs/storage-host-app-handoff.md](docs/storage-host-app-handoff.md).
 
-## Only Supported Adoption API
+## Supported Adoption APIs
 
-Host apps adopting ERP Financials should treat the root
-`@handrail/erp-financials` package entry point as the complete public adoption
-contract. The package manifest intentionally exposes no supported subpath
-exports; direct imports from `src/`, `dist/`, provider-specific copied package
-folders, or app-local compatibility shims are unsupported.
+New hosts should treat `@handrail/erp-financials/sdk` as the stable, compact
+application contract. The root entry point is supported for compatibility,
+provider adapters, storage, migrations, workers, health, and other advanced
+kernel use. Direct imports from `src/`, `dist/`, undeclared provider-specific
+subpaths, copied package folders, or app-local compatibility shims are unsupported.
 
 The supported adoption surfaces are:
 
+- Cohesive SDK: `createErpFinancialsSdk`, reporting books and their authoritative
+  chart, invoice lifecycle, atomic match-and-apply, bank reconciliation,
+  book-aware query/read models, stable typed errors, outbox delivery, and
+  `createRuntime`. See [docs/sdk-v1-contract.md](docs/sdk-v1-contract.md).
 - Canonical schema, migration, and health:
   `POSTGRES_MIGRATIONS`, `planPostgresMigrations`,
   `migratePostgresSchema`, `validatePostgresMigrationHistory`,

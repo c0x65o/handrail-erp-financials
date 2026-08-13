@@ -23,6 +23,7 @@ import {
   createFutureErpRollupAndLateArrivalWorker,
   createFutureErpSnapshotRefreshAndFreshnessWorker,
   createErpFinancials,
+  createErpFinancialsSdk,
   createHandrailQuickBooksFullSyncServiceHandler,
   createHandrailQuickBooksSyncClient,
   createPostgresStorageAdapter,
@@ -78,13 +79,17 @@ describe("package boundary", () => {
     expect(boundary.sourceAdapterBoundary).toContain("canonical accounting facts");
   });
 
-  it("keeps root package exports as the only public package entry point", () => {
+  it("keeps one compact SDK subpath beside the compatible root entry point", () => {
     const packageManifest = readPackageManifest();
 
     expect(packageManifest.exports).toEqual({
       ".": {
         types: "./dist/index.d.ts",
         import: "./dist/index.js"
+      },
+      "./sdk": {
+        types: "./dist/sdk.d.ts",
+        import: "./dist/sdk.js"
       }
     });
   });
@@ -103,6 +108,7 @@ describe("package boundary", () => {
       createFutureErpCanonicalFactPersistenceWorker,
       persistFutureErpCanonicalFacts,
       createErpFinancials,
+      createErpFinancialsSdk,
       createPostgresTransactionRunner,
       mapHandrailQuickBooksSdkResourcesToCanonicalFacts,
       mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts,

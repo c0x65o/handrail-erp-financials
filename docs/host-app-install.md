@@ -28,18 +28,21 @@ For safe retry cadence, deterministic evidence fields, fixture smoke
 interpretation, drilldown health failure handling, and escalation boundaries,
 use [operations-runbook.md](operations-runbook.md).
 
-## Only supported adoption API
+## Supported adoption APIs
 
-Host apps and the future Handrail capability must import ERP Financials through
-the root `@handrail/erp-financials` entry point only. The package manifest
-intentionally publishes no supported subpath exports. Imports from package
-subpaths, copied package folders, generated `dist/` internals, `src` internals,
-or host-app compatibility shims are unsupported.
+New host apps should import the cohesive contract from
+`@handrail/erp-financials/sdk`. Migration, storage, provider adapters, workers,
+health, and compatibility APIs remain available from the root
+`@handrail/erp-financials` entry point. The package manifest publishes no other
+supported subpaths. Imports from undeclared package subpaths, copied package
+folders, generated `dist/` internals, `src` internals, or host-app compatibility
+shims are unsupported.
 
 Host apps should call these exported `@handrail/erp-financials` APIs directly:
 
 | Contract area | Exported API |
 | --- | --- |
+| New ERP/FRM host façade | `createErpFinancialsSdk` from `@handrail/erp-financials/sdk`; use `books`, `invoices`, `paymentMatching`, `bankReconciliation`, `queries`, `outbox`, `createRuntime`, and the advanced `commands` escape hatch |
 | Canonical schema, migration, and health | `POSTGRES_MIGRATIONS`, `planPostgresMigrations`, `migratePostgresSchema`, `validatePostgresMigrationHistory`, `POSTGRES_CANONICAL_SCHEMA_MANIFEST`, `createPostgresStorageAdapter(...).validateSchema()`, `validatePostgresSchema`, `checkErpFinancialsInstallHealth`, `validateFutureErpCanonicalSchemaPreflight`, `preflightFutureErpInstallHealth`, `createFutureErpInstallHealthPreflightWorker` |
 | Storage adapter and persistence | `createPostgresStorageAdapter`, `createFutureErpCanonicalFactPersistenceWorker`, `persistFutureErpCanonicalFacts` |
 | Native financial operations | `createErpFinancials`; use `accounts`, `journalEntries`, `fiscalPeriods`, receivable/payable/cash document services, and `paymentApplications` with a `FinancialOperationContext` on every mutation |
@@ -51,11 +54,12 @@ Host apps should call these exported `@handrail/erp-financials` APIs directly:
 | Fixture smoke | `runErpFinancialsFixtureSmokeHealth` |
 | Drilldown health | `checkErpFinancialsFreshnessAndDrilldownHealth`, `assertSafeDrilldownRef`, `assertSafeSourcePayloadRef` |
 
-Host apps should not bypass `createPostgresStorageAdapter` or the persistence
-workers for canonical financial fact writes except through explicit
-package-compatible migrations or audited backfills. Normal report reads should
-use canonical report snapshots, rollups, freshness rows, and safe drilldown
-refs produced by this package.
+Host apps should not bypass the SDK, `createPostgresStorageAdapter`, or the
+persistence workers for financial fact writes except through explicit
+package-compatible migrations or audited backfills. New operational ERP screens
+should use the SDK's book-aware query and summary APIs. Snapshot/report-center
+flows should use canonical report snapshots, rollups, freshness rows, and safe
+drilldown refs produced by this package.
 
 The schedule descriptor is executable package code plus exported request/result
 types. It lets a host app or separately approved platform capability register

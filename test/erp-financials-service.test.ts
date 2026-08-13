@@ -897,6 +897,7 @@ class ServiceTestClient implements PostgresQueryClient {
   journalLinks: Record<string, unknown>[] = [];
   subledgerDocuments: Record<string, unknown>[] = [];
   subledgerApplications: Record<string, unknown>[] = [];
+  financialOutbox: Record<string, unknown>[] = [];
   readonly lifecycleEvents = new Map<string, Record<string, unknown>>();
   failInsertTable?: string;
 
@@ -910,10 +911,10 @@ class ServiceTestClient implements PostgresQueryClient {
       storedJournals: structuredClone([...this.storedJournals.entries()]),
       storedPostings: structuredClone(this.storedPostings),
       lifecycleEvents: structuredClone([...this.lifecycleEvents.entries()]),
-      journalLinks: structuredClone(this.journalLinks)
-      ,
+      journalLinks: structuredClone(this.journalLinks),
       subledgerDocuments: structuredClone(this.subledgerDocuments),
-      subledgerApplications: structuredClone(this.subledgerApplications)
+      subledgerApplications: structuredClone(this.subledgerApplications),
+      financialOutbox: structuredClone(this.financialOutbox)
     };
   }
 
@@ -927,6 +928,7 @@ class ServiceTestClient implements PostgresQueryClient {
     this.journalLinks = snapshot.journalLinks;
     this.subledgerDocuments = snapshot.subledgerDocuments;
     this.subledgerApplications = snapshot.subledgerApplications;
+    this.financialOutbox = snapshot.financialOutbox;
   }
 
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
@@ -937,6 +939,51 @@ class ServiceTestClient implements PostgresQueryClient {
 
     if (sql.includes('from "erp_financials"."company_sources"')) {
       return Promise.resolve({ rows: [{ company_source_id: "company_source_service" }] as unknown as readonly Row[] });
+    }
+
+    if (sql.includes('insert into "erp_financials"."financial_outbox"')) {
+      const row: Record<string, unknown> = {
+        outbox_event_id: params[0],
+        tenant_id: params[1],
+        company_id: params[2],
+        book_id: params[3] ?? null,
+        source_id: params[4],
+        event_type: params[5],
+        aggregate_type: params[6],
+        aggregate_id: params[7],
+        idempotency_key: params[8],
+        payload: params[9],
+        status: "pending",
+        attempt_count: 0,
+        available_at: params[10],
+        lease_expires_at: null,
+        last_error: null,
+        created_at: params[10],
+        published_at: null
+      };
+      const existing = this.financialOutbox.find(
+        (event) =>
+          event.tenant_id === row.tenant_id &&
+          event.company_id === row.company_id &&
+          event.source_id === row.source_id &&
+          event.idempotency_key === row.idempotency_key
+      );
+      if (existing !== undefined) {
+        return Promise.resolve({ rows: [], rowCount: 0 });
+      }
+      this.financialOutbox.push(row);
+      return Promise.resolve({ rows: [{ outbox_event_id: row.outbox_event_id }] as unknown as readonly Row[], rowCount: 1 });
+    }
+
+    if (sql.includes('from "erp_financials"."financial_outbox"')) {
+      const row = this.financialOutbox.find(
+        (event) =>
+          event.tenant_id === params[0] &&
+          event.company_id === params[1] &&
+          event.source_id === params[2] &&
+          event.idempotency_key === params[3]
+      );
+      return Promise.resolve({ rows: (row === undefined ? [] : [row]) as unknown as readonly Row[] });
     }
 
     if (sql.includes('from "erp_financials"."parties"')) {

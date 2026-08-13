@@ -29,8 +29,8 @@ const MIGRATION_LEDGER_UPGRADE_SQL = readFileSync(
 
 describe("canonical schema manifest", () => {
   it("is versioned and covers the documented canonical entities", () => {
-    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.manifestVersion).toBe("2026-08-12.subledger-v1");
-    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion).toBe(13);
+    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.manifestVersion).toBe("2026-08-12.sdk-v1-foundation");
+    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion).toBe(14);
 
     const tableNames = POSTGRES_CANONICAL_SCHEMA_MANIFEST.tables.map((table) => table.name);
 
@@ -62,7 +62,19 @@ describe("canonical schema manifest", () => {
       "report_freshness",
       "report_snapshots",
       "report_snapshot_lines",
-      "report_snapshot_totals"
+      "report_snapshot_totals",
+      "reporting_books",
+      "reporting_book_sources",
+      "reporting_book_accounts",
+      "reporting_book_account_mappings",
+      "financial_outbox",
+      "invoice_drafts",
+      "invoice_draft_lines",
+      "subledger_document_lines",
+      "subledger_document_delivery_events",
+      "invoice_voids",
+      "bank_statement_lines",
+      "bank_reconciliation_matches"
     ]);
   });
 
@@ -225,7 +237,8 @@ describe("canonical schema manifest", () => {
       [9, 10],
       [10, 11],
       [11, 12],
-      [12, 13]
+      [12, 13],
+      [13, 14]
     ]);
     expect(renderPostgresSchemaSql()).toContain('create table if not exists "erp_financials"."schema_migrations"');
     expect(FUTURE_ERP_CANONICAL_SCHEMA_MIGRATION_SQL).not.toMatch(

@@ -5,6 +5,7 @@ import {
   assertFinancialOperationContext,
   assertIndependentApproval
 } from "./financial-lifecycle.js";
+import { ErpFinancialsError } from "./sdk-errors.js";
 
 import type { FinancialOperationContext } from "./financial-lifecycle.js";
 import type { IsoDate, IsoDateTime, JsonValue } from "./canonical-model.js";
@@ -114,27 +115,29 @@ type FiscalPeriodRow = Record<string, unknown> & {
   readonly close_event_id?: unknown;
 };
 
-export class FiscalPeriodValidationError extends Error {
+export class FiscalPeriodValidationError extends ErpFinancialsError {
   constructor(message: string) {
-    super(message);
+    super("invalid_input", message);
     this.name = "FiscalPeriodValidationError";
     Object.setPrototypeOf(this, FiscalPeriodValidationError.prototype);
   }
 }
 
-export class FiscalPeriodConcurrencyError extends Error {
+export class FiscalPeriodConcurrencyError extends ErpFinancialsError {
   constructor(message: string) {
-    super(message);
+    super("optimistic_concurrency_conflict", message, { retryable: true });
     this.name = "FiscalPeriodConcurrencyError";
     Object.setPrototypeOf(this, FiscalPeriodConcurrencyError.prototype);
   }
 }
 
-export class PostingDateLockedError extends Error {
+export class PostingDateLockedError extends ErpFinancialsError {
   readonly postingDate: IsoDate;
 
   constructor(postingDate: IsoDate, reason: string) {
-    super(`Posting date ${postingDate} is locked: ${reason}`);
+    super(reason.includes("closing") ? "fiscal_period_closing" : "fiscal_period_closed", `Posting date ${postingDate} is locked: ${reason}`, {
+      details: { postingDate, reason }
+    });
     this.name = "PostingDateLockedError";
     this.postingDate = postingDate;
     Object.setPrototypeOf(this, PostingDateLockedError.prototype);

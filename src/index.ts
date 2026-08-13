@@ -67,6 +67,17 @@ export {
   createErpFinancials,
   createPostgresTransactionRunner
 } from "./erp-financials-service.js";
+export { createErpFinancialsSdk } from "./sdk.js";
+export { ErpFinancialsError, erpFinancialsError, isErpFinancialsError } from "./sdk-errors.js";
+export { normalizeCommercialDocumentLine } from "./commercial-lines.js";
+export { createReportingBookService } from "./reporting-books.js";
+export { createFinancialOutboxService } from "./financial-outbox.js";
+export { createFinancialRuntime } from "./financial-runtime.js";
+export { createFinancialReadModels } from "./sdk-read-models.js";
+export { createInvoiceWorkflow } from "./invoice-workflow.js";
+export { createPaymentMatchingService } from "./payment-matching.js";
+export { createBankReconciliationService } from "./bank-reconciliation.js";
+export { ERP_FINANCIALS_SDK_ACCEPTANCE_FIXTURE } from "./sdk-fixtures.js";
 export {
   FinancialLifecycleIdempotencyConflictError,
   appendFinancialLifecycleEvent,
@@ -237,6 +248,68 @@ export type {
   FinancialLifecycleScope,
   FinancialOperationContext
 } from "./financial-lifecycle.js";
+export type { CreateErpFinancialsSdkInput, ErpFinancialsSdk } from "./sdk.js";
+export type { ErpFinancialsErrorCode, ErpFinancialsErrorDetails } from "./sdk-errors.js";
+export type { CommercialDocumentLineInput, NormalizedCommercialDocumentLine } from "./commercial-lines.js";
+export type {
+  BindReportingBookSourceInput,
+  DefineReportingBookAccountInput,
+  DefineReportingBookInput,
+  MapReportingBookAccountInput,
+  ReportingBook,
+  ReportingBookAccount,
+  ReportingBookAccountMapping,
+  ReportingBookResolvedScope,
+  ReportingBookService,
+  ReportingBookSource,
+  ReportingBookSourceRole,
+  ReportingBookStatus
+} from "./reporting-books.js";
+export type { FinancialOutboxEvent, FinancialOutboxService, FinancialOutboxStatus } from "./financial-outbox.js";
+export type { FinancialRuntime, FinancialRuntimeHandlers, FinancialRuntimeRunResult } from "./financial-runtime.js";
+export type {
+  AgingReport,
+  AgingRow,
+  BankReconciliationListItem,
+  BankReconciliationSummary,
+  ChartOfAccountsItem,
+  CommercialDocumentLineReadModel,
+  FinancialDashboardSummary,
+  FinancialStatement,
+  FinancialStatementLine,
+  FinancialStatementName,
+  FinancialReadModels,
+  GeneralLedgerLine,
+  GeneralLedgerSummary,
+  InvoiceDetail,
+  InvoiceListItem,
+  InvoiceListStatus,
+  InvoiceSummary,
+  Page,
+  PageRequest,
+  PaymentListItem,
+  PaymentSummary
+} from "./sdk-read-models.js";
+export type {
+  InvoiceDraft,
+  InvoiceDraftStatus,
+  InvoiceWorkflow,
+  IssueInvoiceDraftInput,
+  IssueInvoiceDraftResult,
+  RecordInvoiceDeliveryInput,
+  SaveInvoiceDraftInput,
+  UpdateInvoiceDraftInput,
+  VoidIssuedInvoiceInput,
+  VoidIssuedInvoiceResult
+} from "./invoice-workflow.js";
+export type { AcceptPaymentMatchInput, AcceptPaymentMatchResult, PaymentMatchingService } from "./payment-matching.js";
+export type {
+  BankReconciliationMatchResult,
+  BankReconciliationService,
+  BankStatementLineResult,
+  IngestBankStatementLineInput,
+  MatchBankStatementLineInput
+} from "./bank-reconciliation.js";
 export type {
   BeginFiscalPeriodCloseInput,
   CloseFiscalPeriodInput,

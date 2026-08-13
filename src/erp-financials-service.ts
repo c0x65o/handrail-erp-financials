@@ -7,6 +7,9 @@ import { createPostgresStorageAdapter } from "./postgres-storage.js";
 import { appendFinancialLifecycleEvent, assertFinancialOperationContext } from "./financial-lifecycle.js";
 import { assertIndependentApproval } from "./financial-lifecycle.js";
 import { assertPostingDateAllowed, createFiscalPeriodService } from "./fiscal-periods.js";
+import { ErpFinancialsError } from "./sdk-errors.js";
+import { appendFinancialOutboxEvent } from "./financial-outbox.js";
+import { normalizeCommercialDocumentLine } from "./commercial-lines.js";
 
 import type {
   Account,
@@ -20,6 +23,7 @@ import type {
   IsoCurrencyCode,
   IsoDate,
   IsoDateTime,
+  JsonValue,
   LedgerPosting,
   SafeSourcePayloadRef,
   TransactionLine
@@ -27,6 +31,8 @@ import type {
 import type { PostgresQueryClient } from "./postgres-storage.js";
 import type { FinancialOperationContext } from "./financial-lifecycle.js";
 import type { FiscalPeriodService } from "./fiscal-periods.js";
+import type { ErpFinancialsErrorCode, ErpFinancialsErrorDetails } from "./sdk-errors.js";
+import type { CommercialDocumentLineInput, NormalizedCommercialDocumentLine } from "./commercial-lines.js";
 
 export const JOURNAL_ENTRY_POSTED_STALE_REASON = "journal_entry_posted";
 
@@ -61,7 +67,14 @@ export type CreateErpFinancialsInput = {
   readonly tenantId: string;
   readonly companyId: string;
   readonly sourceId: string;
+  readonly bookId?: string;
   readonly currencyCode: IsoCurrencyCode;
+  /**
+   * V1 deliberately supports one base currency per service scope. Foreign
+   * currency needs explicit exchange-rate, revaluation, and realized-gain/loss
+   * behavior and is rejected until that complete contract is available.
+   */
+  readonly currencyPolicy?: "single_currency";
   readonly accountingBasis?: AccountingBasis;
   readonly postingPolicy?: "enforce_fiscal_periods" | "legacy_unrestricted";
   readonly now?: () => IsoDateTime;
@@ -178,10 +191,7 @@ export type SubledgerDocumentType =
   | "deposit"
   | "transfer";
 
-export type SubledgerAmountLine = ErpFinancialsAccountReference & {
-  readonly amount: DecimalString;
-  readonly description?: string;
-};
+export type SubledgerAmountLine = ErpFinancialsAccountReference & CommercialDocumentLineInput;
 
 type SubledgerDocumentInputCommon = {
   readonly operation: FinancialOperationContext;
@@ -206,12 +216,25 @@ export type RecordCustomerPaymentInput = SubledgerDocumentInputCommon & {
   readonly receivableAccount: ErpFinancialsAccountReference;
 };
 
-export type IssueCreditMemoInput = SubledgerDocumentInputCommon & {
+type IssueCreditMemoCommon = SubledgerDocumentInputCommon & {
   readonly customerId: string;
-  readonly amount: DecimalString;
-  readonly revenueAccount: ErpFinancialsAccountReference;
   readonly receivableAccount: ErpFinancialsAccountReference;
 };
+
+export type IssueCreditMemoInput = IssueCreditMemoCommon &
+  (
+    | {
+        /** Prefer revenueLines so tax, item, dimensions, and account provenance are preserved. */
+        readonly amount: DecimalString;
+        readonly revenueAccount: ErpFinancialsAccountReference;
+        readonly revenueLines?: never;
+      }
+    | {
+        readonly revenueLines: readonly SubledgerAmountLine[];
+        readonly amount?: never;
+        readonly revenueAccount?: never;
+      }
+  );
 
 export type IssueRefundInput = SubledgerDocumentInputCommon & {
   readonly customerId: string;
@@ -260,7 +283,7 @@ export type SubledgerDocumentResult = {
   readonly documentType: SubledgerDocumentType;
   readonly originalAmount: DecimalString;
   readonly openAmount: DecimalString;
-  readonly documentStatus: "open" | "settled";
+  readonly documentStatus: "open" | "partially_applied" | "settled" | "voided";
   readonly version: number;
   readonly journal: PostJournalEntryResult;
 };
@@ -280,6 +303,13 @@ export type ApplySubledgerPaymentInput = {
   readonly applicationDate: IsoDate;
   readonly expectedSourceVersion: number;
   readonly expectedTargetVersion: number;
+  readonly match?: {
+    readonly matchCandidateId: string;
+    readonly matchDecisionId: string;
+    readonly method: "automatic" | "manual";
+    readonly score: DecimalString;
+    readonly evidence?: JsonValue;
+  };
 };
 
 export type EndSubledgerApplicationInput = {
@@ -296,6 +326,10 @@ export type SubledgerApplicationResult = {
   readonly targetDocumentId: string;
   readonly appliedAmount: DecimalString;
   readonly currencyCode: IsoCurrencyCode;
+  readonly matchCandidateId?: string;
+  readonly matchDecisionId?: string;
+  readonly matchMethod?: "automatic" | "manual";
+  readonly matchScore?: DecimalString;
   readonly lifecycleEventId: string;
 };
 
@@ -328,19 +362,27 @@ export type ErpFinancials = {
   };
 };
 
-export class ErpFinancialsValidationError extends Error {
-  constructor(message: string) {
-    super(message);
+export class ErpFinancialsValidationError extends ErpFinancialsError {
+  constructor(
+    message: string,
+    code: ErpFinancialsErrorCode = "invalid_input",
+    details: ErpFinancialsErrorDetails = {}
+  ) {
+    super(code, message, { details });
     this.name = "ErpFinancialsValidationError";
     Object.setPrototypeOf(this, ErpFinancialsValidationError.prototype);
   }
 }
 
-export class ErpFinancialsIdempotencyConflictError extends Error {
+export class ErpFinancialsIdempotencyConflictError extends ErpFinancialsError {
   readonly idempotencyKey: string;
 
   constructor(idempotencyKey: string) {
-    super(`Journal entry idempotency key ${idempotencyKey} is already associated with different content or status`);
+    super(
+      "idempotency_conflict",
+      `Financial operation idempotency key ${idempotencyKey} is already associated with different content or status`,
+      { details: { idempotencyKey } }
+    );
     this.name = "ErpFinancialsIdempotencyConflictError";
     this.idempotencyKey = idempotencyKey;
     Object.setPrototypeOf(this, ErpFinancialsIdempotencyConflictError.prototype);
@@ -352,7 +394,9 @@ type ServiceContext = {
   readonly tenantId: string;
   readonly companyId: string;
   readonly sourceId: string;
+  readonly bookId?: string;
   readonly currencyCode: IsoCurrencyCode;
+  readonly currencyPolicy: "single_currency";
   readonly accountingBasis: AccountingBasis;
   readonly now: () => IsoDateTime;
   readonly postingPolicy: "enforce_fiscal_periods" | "legacy_unrestricted";
@@ -523,6 +567,16 @@ async function upsertAccountTree(
         snapshotsMarkedStale
       }
     });
+    await appendServiceOutboxEvent(client, context, {
+      eventType: "account_hierarchy.changed",
+      aggregateType: "account_hierarchy",
+      aggregateId: context.sourceId,
+      idempotencyKey: `account-hierarchy:${input.operation.requestId}`,
+      payload: {
+        accountIds: accounts.map((account) => account.accountId),
+        snapshotsMarkedStale
+      }
+    });
 
     return {
       accounts,
@@ -616,6 +670,19 @@ async function executePostJournalEntryInTransaction(
       currencyCode: journal.currencyCode
     });
     const lifecycle = await appendJournalPostedLifecycleEvent(client, context, input.operation, journal, identities);
+    await appendServiceOutboxEvent(client, context, {
+      eventType: "ledger.posted",
+      aggregateType: journal.lifecycleAggregateType,
+      aggregateId: identities.transactionId,
+      idempotencyKey: `ledger-posted:${journal.sourceTransactionType}:${journal.idempotencyKey}`,
+      payload: {
+        accountingBasis: journal.accountingBasis,
+        currencyCode: journal.currencyCode,
+        postingDate: journal.date,
+        postingIds: identities.postingIds,
+        transactionId: identities.transactionId
+      }
+    });
 
     return {
       status: "posted",
@@ -641,25 +708,30 @@ type SubledgerDocumentWrite = {
   readonly documentStartsOpen: boolean;
   readonly metadata: Readonly<Record<string, string | number | boolean | null>>;
   readonly journalLines: readonly PostJournalEntryLineInput[];
+  readonly documentLines?: readonly (ErpFinancialsAccountReference & NormalizedCommercialDocumentLine)[];
   readonly memo?: string;
   readonly operation: FinancialOperationContext;
 };
 
 async function createInvoice(context: ServiceContext, input: CreateInvoiceInput): Promise<SubledgerDocumentResult> {
-  const amount = sumSubledgerLines(input.revenueLines, "revenueLines");
+  const revenueLines = normalizeSubledgerLines(input.revenueLines, "revenueLines");
+  const amount = sumSubledgerLines(revenueLines, "revenueLines");
   return createSubledgerDocument(context, {
     ...commonSubledgerDocument(context, input, "invoice", amount, true),
     dueDate: input.dueDate,
     partyId: input.customerId,
     journalLines: [
       { ...input.receivableAccount, debit: amount, partyId: input.customerId },
-      ...input.revenueLines.map((line) => ({
+      ...revenueLines.map((line) => ({
         ...accountReferenceOnly(line),
         credit: line.amount,
         partyId: input.customerId,
-        ...(line.description === undefined ? {} : { description: line.description })
+        ...(line.itemId === undefined ? {} : { itemId: line.itemId }),
+        ...(line.description === undefined ? {} : { description: line.description }),
+        dimensionRefs: line.dimensionRefs
       }))
-    ]
+    ],
+    documentLines: revenueLines
   });
 }
 
@@ -682,14 +754,37 @@ async function issueCreditMemo(
   context: ServiceContext,
   input: IssueCreditMemoInput
 ): Promise<SubledgerDocumentResult> {
-  const amount = normalizedPositiveMoney(input.amount, "amount");
+  const revenueLineInput: readonly SubledgerAmountLine[] | undefined = input.revenueLines;
+  const legacyAmount: DecimalString | undefined = input.amount;
+  const legacyRevenueAccount: ErpFinancialsAccountReference | undefined = input.revenueAccount;
+  const revenueLines = revenueLineInput === undefined
+    ? undefined
+    : normalizeSubledgerLines(revenueLineInput, "revenueLines");
+  const amount = revenueLines === undefined && legacyAmount !== undefined
+    ? normalizedPositiveMoney(legacyAmount, "amount")
+    : revenueLines === undefined
+      ? (() => { throw new ErpFinancialsValidationError("Credit memo requires amount or revenueLines"); })()
+      : sumSubledgerLines(revenueLines, "revenueLines");
+  const revenueJournalLines: readonly PostJournalEntryLineInput[] = revenueLines === undefined
+    ? legacyRevenueAccount === undefined
+      ? (() => { throw new ErpFinancialsValidationError("Credit memo amount requires revenueAccount"); })()
+      : [{ ...legacyRevenueAccount, debit: amount, partyId: input.customerId }]
+    : revenueLines.map((line): PostJournalEntryLineInput => ({
+        ...accountReferenceOnly(line),
+        debit: line.amount,
+        partyId: input.customerId,
+        ...(line.itemId === undefined ? {} : { itemId: line.itemId }),
+        ...(line.description === undefined ? {} : { description: line.description }),
+        dimensionRefs: line.dimensionRefs
+      }));
   return createSubledgerDocument(context, {
     ...commonSubledgerDocument(context, input, "credit_memo", amount, true),
     partyId: input.customerId,
     journalLines: [
-      { ...input.revenueAccount, debit: amount, partyId: input.customerId },
+      ...revenueJournalLines,
       { ...input.receivableAccount, credit: amount, partyId: input.customerId }
-    ]
+    ],
+    ...(revenueLines === undefined ? {} : { documentLines: revenueLines })
   });
 }
 
@@ -709,20 +804,24 @@ async function createVendorBill(
   context: ServiceContext,
   input: CreateVendorBillInput
 ): Promise<SubledgerDocumentResult> {
-  const amount = sumSubledgerLines(input.expenseLines, "expenseLines");
+  const expenseLines = normalizeSubledgerLines(input.expenseLines, "expenseLines");
+  const amount = sumSubledgerLines(expenseLines, "expenseLines");
   return createSubledgerDocument(context, {
     ...commonSubledgerDocument(context, input, "vendor_bill", amount, true),
     dueDate: input.dueDate,
     partyId: input.vendorId,
     journalLines: [
-      ...input.expenseLines.map((line) => ({
+      ...expenseLines.map((line) => ({
         ...accountReferenceOnly(line),
         debit: line.amount,
         partyId: input.vendorId,
-        ...(line.description === undefined ? {} : { description: line.description })
+        ...(line.itemId === undefined ? {} : { itemId: line.itemId }),
+        ...(line.description === undefined ? {} : { description: line.description }),
+        dimensionRefs: line.dimensionRefs
       })),
       { ...input.payableAccount, credit: amount, partyId: input.vendorId }
-    ]
+    ],
+    documentLines: expenseLines
   });
 }
 
@@ -794,12 +893,14 @@ function commonSubledgerDocument(
   assertFinancialOperationContext(input.operation);
   assertNonEmpty(input.idempotencyKey, "idempotencyKey");
   assertIsoDate(input.date, "date");
+  const currencyCode = input.currencyCode ?? context.currencyCode;
+  assertCurrencyAllowed(context, currencyCode);
   return {
     documentType,
     idempotencyKey: input.idempotencyKey,
     date: input.date,
     ...(input.documentNumber === undefined ? {} : { documentNumber: input.documentNumber }),
-    currencyCode: input.currencyCode ?? context.currencyCode,
+    currencyCode,
     amount,
     documentStartsOpen,
     metadata: {},
@@ -872,12 +973,16 @@ returning *`,
         documentStatus,
         input.idempotencyKey,
         posted.lifecycleEventId,
-        input.metadata,
+        JSON.stringify(input.metadata),
         context.now()
       ]
     );
     const inserted = insert.rows[0];
     if (inserted !== undefined) {
+      if (input.documentLines !== undefined) {
+        await writeSubledgerDocumentLines(client, context, documentId, input.documentLines);
+      }
+      await appendSubledgerDocumentOutboxEvent(client, context, input, documentId, posted.transactionId);
       return documentResult(inserted, posted);
     }
     const existing = await loadSubledgerDocumentByIdempotencyKey(client, context, input.idempotencyKey);
@@ -894,8 +999,63 @@ returning *`,
     ) {
       throw new ErpFinancialsIdempotencyConflictError(input.idempotencyKey);
     }
+    await appendSubledgerDocumentOutboxEvent(client, context, input, documentId, posted.transactionId);
     return documentResult(existing, { ...posted, status: "already_posted" });
   });
+}
+
+async function appendSubledgerDocumentOutboxEvent(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  input: SubledgerDocumentWrite,
+  documentId: string,
+  transactionId: string
+): Promise<void> {
+  await appendServiceOutboxEvent(client, context, {
+    eventType: `subledger_document.${input.documentType}.posted`,
+    aggregateType: "subledger_document",
+    aggregateId: documentId,
+    idempotencyKey: `subledger-document:${input.idempotencyKey}:outbox:posted`,
+    payload: { documentId, documentType: input.documentType, transactionId }
+  });
+}
+
+async function writeSubledgerDocumentLines(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  documentId: string,
+  lines: readonly (ErpFinancialsAccountReference & NormalizedCommercialDocumentLine)[]
+): Promise<void> {
+  for (const [index, line] of lines.entries()) {
+    const lineNumber = index + 1;
+    await client.query(
+      `insert into "erp_financials"."subledger_document_lines" (
+  "subledger_document_line_id", "tenant_id", "company_id", "source_id", "subledger_document_id", "line_number",
+  "account_id", "item_id", "description", "quantity", "unit_amount", "discount_amount", "tax_code", "tax_amount",
+  "service_period_start", "service_period_end", "dimension_refs", "line_amount"
+) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+      [
+        scopedRecordId(context, "subledger_document_line", `${documentId}:${String(lineNumber)}`),
+        context.tenantId,
+        context.companyId,
+        context.sourceId,
+        documentId,
+        lineNumber,
+        resolveAccountId(context, line),
+        line.itemId,
+        line.description,
+        line.quantity,
+        line.unitAmount,
+        line.discountAmount,
+        line.taxCode,
+        line.taxAmount,
+        line.servicePeriodStart,
+        line.servicePeriodEnd,
+        JSON.stringify(line.dimensionRefs),
+        line.amount
+      ]
+    );
+  }
 }
 
 async function applySubledgerPayment(
@@ -908,6 +1068,7 @@ async function applySubledgerPayment(
   assertSubledgerApplicationType(input.applicationType);
   const amount = normalizedPositiveMoney(input.amount, "amount");
   assertIsoDate(input.applicationDate, "applicationDate");
+  assertSubledgerMatchInput(input.match);
   const applicationId = scopedRecordId(context, "subledger_application", input.idempotencyKey);
   return context.database.transaction(async (client) => {
     await acquireTransactionLock(
@@ -931,6 +1092,9 @@ async function applySubledgerPayment(
       input.targetDocumentId
     ]);
     assertSubledgerApplicationDocuments(input, source, target, amount);
+    if (input.match !== undefined) {
+      await assertAcceptedSubledgerMatch(client, context, { ...input, match: input.match }, source, target);
+    }
     const lifecycle = await appendFinancialLifecycleEvent(client, {
       tenantId: context.tenantId,
       companyId: context.companyId,
@@ -946,15 +1110,24 @@ async function applySubledgerPayment(
         applicationType: input.applicationType,
         appliedAmount: amount,
         sourceDocumentId: input.sourceDocumentId,
-        targetDocumentId: input.targetDocumentId
+        targetDocumentId: input.targetDocumentId,
+        ...(input.match === undefined
+          ? {}
+          : {
+              matchCandidateId: input.match.matchCandidateId,
+              matchDecisionId: input.match.matchDecisionId,
+              matchMethod: input.match.method,
+              matchScore: input.match.score
+            })
       }
     });
     const inserted = await client.query(
       `insert into "erp_financials"."subledger_applications" (
   "subledger_application_id", "tenant_id", "company_id", "source_id", "application_type", "source_document_id",
   "target_document_id", "applied_amount", "currency_code", "application_date", "status", "version",
-  "idempotency_key", "applied_event_id", "ended_event_id", "created_at", "updated_at"
-) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'applied', 1, $11, $12, null, $13, $13)
+  "idempotency_key", "applied_event_id", "ended_event_id", "match_candidate_id", "match_decision_id", "match_method",
+  "match_score", "match_evidence", "created_at", "updated_at"
+) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'applied', 1, $11, $12, null, $13, $14, $15, $16, $17, $18, $18)
 returning *`,
       [
         applicationId,
@@ -969,6 +1142,11 @@ returning *`,
         input.applicationDate,
         input.idempotencyKey,
         lifecycle.eventId,
+        input.match?.matchCandidateId,
+        input.match?.matchDecisionId,
+        input.match?.method,
+        input.match?.score,
+        input.match?.evidence === undefined ? undefined : JSON.stringify(input.match.evidence),
         context.now()
       ]
     );
@@ -976,6 +1154,19 @@ returning *`,
     if (row === undefined) {
       throw new Error("Subledger application insert did not return its row");
     }
+    await appendServiceOutboxEvent(client, context, {
+      eventType: "subledger_application.applied",
+      aggregateType: "subledger_application",
+      aggregateId: applicationId,
+      idempotencyKey: `subledger-application:${input.idempotencyKey}:outbox:applied`,
+      payload: {
+        amount,
+        applicationId,
+        applicationType: input.applicationType,
+        sourceDocumentId: input.sourceDocumentId,
+        targetDocumentId: input.targetDocumentId
+      }
+    });
     return applicationResult(row, "applied");
   });
 }
@@ -1000,7 +1191,11 @@ for update`,
     );
     const current = currentResult.rows[0];
     if (current === undefined) {
-      throw new ErpFinancialsValidationError(`Subledger application ${input.applicationId} does not exist in this scope`);
+      throw new ErpFinancialsValidationError(
+        `Subledger application ${input.applicationId} does not exist in this scope`,
+        "missing_document",
+        { applicationId: input.applicationId }
+      );
     }
     const currentStatus = storedString(current.status, "status");
     if (currentStatus === status) {
@@ -1011,8 +1206,10 @@ for update`,
     }
     const currentVersion = storedInteger(current.version, "version");
     if (currentVersion !== input.expectedVersion) {
-      throw new ErpFinancialsValidationError(
-        `Subledger application expected version ${String(input.expectedVersion)}, found ${String(currentVersion)}`
+      throw new ErpFinancialsError(
+        "optimistic_concurrency_conflict",
+        `Subledger application expected version ${String(input.expectedVersion)}, found ${String(currentVersion)}`,
+        { retryable: true, details: { actualVersion: currentVersion, expectedVersion: input.expectedVersion } }
       );
     }
     const lifecycle = await appendFinancialLifecycleEvent(client, {
@@ -1047,8 +1244,18 @@ returning *`,
     );
     const row = updated.rows[0];
     if (row === undefined) {
-      throw new ErpFinancialsValidationError("Subledger application changed concurrently");
+      throw new ErpFinancialsError("optimistic_concurrency_conflict", "Subledger application changed concurrently", {
+        retryable: true,
+        details: { applicationId: input.applicationId }
+      });
     }
+    await appendServiceOutboxEvent(client, context, {
+      eventType: `subledger_application.${status}`,
+      aggregateType: "subledger_application",
+      aggregateId: input.applicationId,
+      idempotencyKey: `subledger-application:${input.applicationId}:outbox:${status}:v${String(currentVersion)}`,
+      payload: { applicationId: input.applicationId, priorVersion: currentVersion, status }
+    });
     return applicationResult(row, status);
   });
 }
@@ -1072,7 +1279,9 @@ for key share`,
   const party = result.rows[0];
   if (party === undefined || party.active !== true || party.party_type !== expectedPartyType) {
     throw new ErpFinancialsValidationError(
-      `${documentType} requires an active ${expectedPartyType} in the current tenant/source scope`
+      `${documentType} requires an active ${expectedPartyType} in the current tenant/source scope`,
+      "missing_party",
+      { partyId }
     );
   }
 }
@@ -1128,7 +1337,10 @@ for update`,
   const source = byId.get(ids[0]);
   const target = byId.get(ids[1]);
   if (source === undefined || target === undefined) {
-    throw new ErpFinancialsValidationError("Both subledger application documents must exist in the current scope");
+    throw new ErpFinancialsValidationError(
+      "Both subledger application documents must exist in the current scope",
+      "missing_document"
+    );
   }
   return [source, target];
 }
@@ -1155,10 +1367,16 @@ function assertSubledgerApplicationDocuments(
     throw new ErpFinancialsValidationError("Application documents must use the same currency");
   }
   if (storedInteger(source.version, "source.version") !== input.expectedSourceVersion) {
-    throw new ErpFinancialsValidationError("Source document version changed concurrently");
+    throw new ErpFinancialsError("optimistic_concurrency_conflict", "Source document version changed concurrently", {
+      retryable: true,
+      details: { documentId: input.sourceDocumentId, expectedVersion: input.expectedSourceVersion }
+    });
   }
   if (storedInteger(target.version, "target.version") !== input.expectedTargetVersion) {
-    throw new ErpFinancialsValidationError("Target document version changed concurrently");
+    throw new ErpFinancialsError("optimistic_concurrency_conflict", "Target document version changed concurrently", {
+      retryable: true,
+      details: { documentId: input.targetDocumentId, expectedVersion: input.expectedTargetVersion }
+    });
   }
   const amountMinor = parsePositiveMoney(amount, "amount");
   if (
@@ -1167,6 +1385,89 @@ function assertSubledgerApplicationDocuments(
   ) {
     throw new ErpFinancialsValidationError("Application amount exceeds an available document balance");
   }
+}
+
+function assertSubledgerMatchInput(match: ApplySubledgerPaymentInput["match"]): void {
+  if (match === undefined) return;
+  assertNonEmpty(match.matchCandidateId, "match.matchCandidateId");
+  assertNonEmpty(match.matchDecisionId, "match.matchDecisionId");
+  const method: unknown = match.method;
+  if (method !== "automatic" && method !== "manual") {
+    throw new ErpFinancialsValidationError("match.method must be automatic or manual");
+  }
+  if (!/^(?:0(?:\.\d{1,6})?|1(?:\.0{1,6})?)$/u.test(match.score)) {
+    throw new ErpFinancialsValidationError("match.score must be between 0 and 1 with at most six fractional digits");
+  }
+  if (match.evidence !== undefined) {
+    assertNoCredentialKeys(match.evidence);
+    if (Buffer.byteLength(JSON.stringify(match.evidence), "utf8") > 4096) {
+      throw new ErpFinancialsValidationError("match.evidence exceeds 4096 bytes");
+    }
+  }
+}
+
+async function assertAcceptedSubledgerMatch(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  input: ApplySubledgerPaymentInput & { readonly match: NonNullable<ApplySubledgerPaymentInput["match"]> },
+  source: Readonly<Record<string, unknown>>,
+  target: Readonly<Record<string, unknown>>
+): Promise<void> {
+  const result = await client.query(
+    `select candidate."match_kind", candidate."origin_transaction_id", candidate."target_transaction_id", candidate."score" as "candidate_score",
+  candidate."suggested_application_amount",
+  candidate."currency_code", candidate."status" as "candidate_status", candidate."expires_at",
+  decision."decision", decision."method", decision."evidence" as "decision_evidence"
+from "erp_financials"."transaction_match_candidates" candidate
+join "erp_financials"."transaction_match_decisions" decision
+  on decision."tenant_id" = candidate."tenant_id" and decision."source_id" = candidate."source_id"
+ and decision."match_candidate_id" = candidate."match_candidate_id"
+where candidate."tenant_id" = $1 and candidate."source_id" = $2 and candidate."match_candidate_id" = $3
+  and decision."match_decision_id" = $4
+for key share of candidate, decision`,
+    [context.tenantId, context.sourceId, input.match.matchCandidateId, input.match.matchDecisionId]
+  );
+  const row = result.rows[0];
+  if (row === undefined) {
+    throw new ErpFinancialsValidationError("Accepted match candidate and decision do not exist in this scope", "missing_document");
+  }
+  const expectedKind =
+    input.applicationType === "customer_payment_to_invoice"
+      ? "customer_payment_to_invoice"
+      : input.applicationType === "bill_payment_to_bill"
+        ? "vendor_payment_to_bill"
+        : undefined;
+  if (expectedKind === undefined) {
+    throw new ErpFinancialsValidationError("Credit applications cannot reference a payment match candidate");
+  }
+  const candidateStatus = storedString(row.candidate_status, "candidate_status");
+  if (
+    storedString(row.match_kind, "match_kind") !== expectedKind ||
+    storedString(row.origin_transaction_id, "origin_transaction_id") !== storedString(source.transaction_id, "source.transaction_id") ||
+    storedString(row.target_transaction_id, "target_transaction_id") !== storedString(target.transaction_id, "target.transaction_id") ||
+    storedString(row.currency_code, "currency_code") !== storedString(source.currency_code, "source.currency_code") ||
+    normalizedPositiveMoney(
+      storedDecimal(row.suggested_application_amount, "suggested_application_amount"),
+      "suggested_application_amount"
+    ) !== normalizedPositiveMoney(input.amount, "amount") ||
+    storedString(row.decision, "decision") !== "accepted" ||
+    storedString(row.method, "method") !== input.match.method ||
+    !unitDecimalsEqual(storedDecimal(row.candidate_score, "candidate_score"), input.match.score) ||
+    stableJson(storedJson(row.decision_evidence)) !== stableJson(input.match.evidence ?? null) ||
+    ["rejected", "expired", "superseded"].includes(candidateStatus)
+  ) {
+    throw new ErpFinancialsValidationError("Match evidence is not valid for these application documents", "scope_mismatch");
+  }
+  const expiresAt = row.expires_at instanceof Date ? row.expires_at.toISOString() : storedOptionalString(row.expires_at);
+  if (expiresAt !== undefined && expiresAt.slice(0, 10) < input.applicationDate) {
+    throw new ErpFinancialsValidationError("Match candidate expired before the application date", "terminal_state_conflict");
+  }
+  await client.query(
+    `update "erp_financials"."transaction_match_candidates"
+set "status" = 'accepted'
+where "tenant_id" = $1 and "source_id" = $2 and "match_candidate_id" = $3 and "status" in ('suggested', 'accepted')`,
+    [context.tenantId, context.sourceId, input.match.matchCandidateId]
+  );
 }
 
 function assertSameSubledgerApplication(
@@ -1181,7 +1482,14 @@ function assertSameSubledgerApplication(
     existing.source_document_id !== input.sourceDocumentId ||
     existing.target_document_id !== input.targetDocumentId ||
     storedMoney(existing.applied_amount, "applied_amount") !== amount ||
-    storedDate(existing.application_date, "application_date") !== input.applicationDate
+    storedDate(existing.application_date, "application_date") !== input.applicationDate ||
+    storedOptionalString(existing.match_candidate_id) !== input.match?.matchCandidateId ||
+    storedOptionalString(existing.match_decision_id) !== input.match?.matchDecisionId ||
+    storedOptionalString(existing.match_method) !== input.match?.method ||
+    (existing.match_score === null || existing.match_score === undefined
+      ? undefined
+      : storedDecimal(existing.match_score, "match_score")) !== input.match?.score ||
+    stableJson(existing.match_evidence ?? null) !== stableJson(input.match?.evidence ?? null)
   ) {
     throw new ErpFinancialsIdempotencyConflictError(input.idempotencyKey);
   }
@@ -1189,7 +1497,7 @@ function assertSameSubledgerApplication(
 
 function documentResult(row: Record<string, unknown>, journal: PostJournalEntryResult): SubledgerDocumentResult {
   const documentStatus = storedString(row.status, "status");
-  if (documentStatus !== "open" && documentStatus !== "settled") {
+  if (!["open", "partially_applied", "settled", "voided"].includes(documentStatus)) {
     throw new Error(`New subledger document has unexpected status ${documentStatus}`);
   }
   return {
@@ -1198,7 +1506,7 @@ function documentResult(row: Record<string, unknown>, journal: PostJournalEntryR
     documentType: storedString(row.document_type, "document_type") as SubledgerDocumentType,
     originalAmount: storedMoney(row.original_amount, "original_amount"),
     openAmount: storedMoney(row.open_amount, "open_amount"),
-    documentStatus,
+    documentStatus: documentStatus as SubledgerDocumentResult["documentStatus"],
     version: storedInteger(row.version, "version"),
     journal
   };
@@ -1208,6 +1516,12 @@ function applicationResult(
   row: Record<string, unknown>,
   status: SubledgerApplicationResult["status"]
 ): SubledgerApplicationResult {
+  const matchCandidateId = storedOptionalString(row.match_candidate_id);
+  const matchDecisionId = storedOptionalString(row.match_decision_id);
+  const matchMethod = storedOptionalString(row.match_method) as "automatic" | "manual" | undefined;
+  const matchScore = row.match_score === null || row.match_score === undefined
+    ? undefined
+    : storedDecimal(row.match_score, "match_score");
   return {
     status,
     applicationId: storedString(row.subledger_application_id, "subledger_application_id"),
@@ -1216,11 +1530,34 @@ function applicationResult(
     targetDocumentId: storedString(row.target_document_id, "target_document_id"),
     appliedAmount: storedMoney(row.applied_amount, "applied_amount"),
     currencyCode: storedString(row.currency_code, "currency_code"),
+    ...(matchCandidateId === undefined ? {} : { matchCandidateId }),
+    ...(matchDecisionId === undefined ? {} : { matchDecisionId }),
+    ...(matchMethod === undefined ? {} : { matchMethod }),
+    ...(matchScore === undefined ? {} : { matchScore }),
     lifecycleEventId: storedString(
       row.ended_event_id ?? row.applied_event_id,
       row.ended_event_id == null ? "applied_event_id" : "ended_event_id"
     )
   };
+}
+
+function storedDecimal(value: unknown, field: string): DecimalString {
+  const decimal = typeof value === "number" ? String(value) : storedString(value, field);
+  if (!/^-?\d+(?:\.\d+)?$/u.test(decimal)) throw new Error(`Stored field ${field} must be a decimal`);
+  return decimal;
+}
+
+function storedJson(value: unknown): JsonValue {
+  if (value === null || value === undefined) return null;
+  return (typeof value === "string" ? JSON.parse(value) : value) as JsonValue;
+}
+
+function unitDecimalsEqual(left: DecimalString, right: DecimalString): boolean {
+  const scaled = (value: string): bigint => {
+    const [whole = "0", fraction = ""] = value.split(".");
+    return BigInt(whole) * 1_000_000n + BigInt(fraction.padEnd(6, "0").slice(0, 6));
+  };
+  return scaled(left) === scaled(right);
 }
 
 function subledgerTransactionType(documentType: SubledgerDocumentType): string {
@@ -1236,8 +1573,21 @@ function sumSubledgerLines(lines: readonly SubledgerAmountLine[], field: string)
   );
 }
 
+function normalizeSubledgerLines(
+  lines: readonly SubledgerAmountLine[],
+  field: string
+): readonly (ErpFinancialsAccountReference & NormalizedCommercialDocumentLine)[] {
+  if (lines.length === 0) {
+    throw new ErpFinancialsValidationError(`${field} must contain at least one line`);
+  }
+  return lines.map((line, index) => ({
+    ...accountReferenceOnly(line),
+    ...normalizeCommercialDocumentLine(line, `${field}[${String(index)}]`)
+  }));
+}
+
 function accountReferenceOnly(line: SubledgerAmountLine): ErpFinancialsAccountReference {
-  return "accountKey" in line ? { accountKey: line.accountKey } : { accountId: line.accountId };
+  return line.accountKey !== undefined ? { accountKey: line.accountKey } : { accountId: line.accountId };
 }
 
 function normalizedPositiveMoney(value: DecimalString, field: string): DecimalString {
@@ -1661,6 +2011,16 @@ function serviceContext(input: CreateErpFinancialsInput): ServiceContext {
   assertNonEmpty(input.companyId, "companyId");
   assertNonEmpty(input.sourceId, "sourceId");
   assertNonEmpty(input.currencyCode, "currencyCode");
+  if (!/^[A-Z]{3}$/u.test(input.currencyCode)) {
+    throw new ErpFinancialsValidationError("currencyCode must be a three-letter uppercase ISO currency code");
+  }
+  const currencyPolicy: unknown = input.currencyPolicy;
+  if (currencyPolicy !== undefined && currencyPolicy !== "single_currency") {
+    throw new ErpFinancialsValidationError(
+      `Unsupported currency policy ${typeof currencyPolicy === "string" ? currencyPolicy : "non-string value"}`,
+      "unsupported_operation"
+    );
+  }
   const accountingBasis = input.accountingBasis ?? "accrual";
   assertAccountingBasis(accountingBasis);
 
@@ -1671,7 +2031,9 @@ function serviceContext(input: CreateErpFinancialsInput): ServiceContext {
     tenantId: input.tenantId,
     companyId: input.companyId,
     sourceId: input.sourceId,
+    ...(input.bookId === undefined ? {} : { bookId: input.bookId }),
     currencyCode: input.currencyCode,
+    currencyPolicy: input.currencyPolicy ?? "single_currency",
     accountingBasis,
     now: input.now ?? (() => new Date().toISOString()),
     postingPolicy: input.postingPolicy ?? "enforce_fiscal_periods"
@@ -1806,11 +2168,14 @@ function normalizeJournalEntry(context: ServiceContext, input: InternalPostJourn
   const creditMinor = lines.reduce((sum, line) => sum + line.creditMinor, 0n);
   if (debitMinor !== creditMinor) {
     throw new ErpFinancialsValidationError(
-      `Journal entry is unbalanced: debits ${formatMoney(debitMinor)}, credits ${formatMoney(creditMinor)}`
+      `Journal entry is unbalanced: debits ${formatMoney(debitMinor)}, credits ${formatMoney(creditMinor)}`,
+      "posting_unbalanced",
+      { totalCredits: formatMoney(creditMinor), totalDebits: formatMoney(debitMinor) }
     );
   }
 
   const currencyCode = input.currencyCode ?? context.currencyCode;
+  assertCurrencyAllowed(context, currencyCode);
   const accountingBasis = input.accountingBasis ?? context.accountingBasis;
   const sourceTransactionType =
     input.nativeTransactionType ?? (input.adjustment === true ? "JournalEntryAdjustment" : "JournalEntry");
@@ -2021,6 +2386,27 @@ async function acquireTransactionLock(client: PostgresQueryClient, lockKey: stri
   await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [lockKey]);
 }
 
+async function appendServiceOutboxEvent(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  input: {
+    readonly eventType: string;
+    readonly aggregateType: string;
+    readonly aggregateId: string;
+    readonly idempotencyKey: string;
+    readonly payload: import("./canonical-model.js").JsonValue;
+  }
+): Promise<string> {
+  return appendFinancialOutboxEvent(client, {
+    tenantId: context.tenantId,
+    companyId: context.companyId,
+    ...(context.bookId === undefined ? {} : { bookId: context.bookId }),
+    sourceId: context.sourceId,
+    ...input,
+    availableAt: context.now()
+  });
+}
+
 async function assertCompanySourceScope(client: PostgresQueryClient, context: ServiceContext): Promise<void> {
   const result = await client.query<{ readonly company_source_id: string }>(
     `select "company_source_id"
@@ -2031,7 +2417,9 @@ for key share`,
   );
   if (result.rows[0] === undefined) {
     throw new ErpFinancialsValidationError(
-      `Company ${context.companyId} is not bound to source ${context.sourceId} for tenant ${context.tenantId}`
+      `Company ${context.companyId} is not bound to source ${context.sourceId} for tenant ${context.tenantId}`,
+      "scope_mismatch",
+      { companyId: context.companyId, sourceId: context.sourceId }
     );
   }
 }
@@ -2138,7 +2526,11 @@ function assertJournalAccounts(accounts: readonly Account[], requestedAccountIds
   const accountsById = new Map(accounts.map((account) => [account.accountId, account]));
   const missing = requestedAccountIds.filter((accountId) => !accountsById.has(accountId));
   if (missing.length > 0) {
-    throw new ErpFinancialsValidationError(`Journal entry references missing accounts: ${missing.join(", ")}`);
+    throw new ErpFinancialsValidationError(
+      `Journal entry references missing accounts: ${missing.join(", ")}`,
+      "missing_account",
+      { accountIds: missing.join(",") }
+    );
   }
 
   const inactive = requestedAccountIds.filter((accountId) => accountsById.get(accountId)?.active === false);
@@ -2227,6 +2619,17 @@ function assertIsoDate(value: string, field: string): void {
 function assertAccountingBasis(value: string): void {
   if (!ACCOUNTING_BASES.has(value)) {
     throw new ErpFinancialsValidationError(`Unsupported accountingBasis ${value}`);
+  }
+}
+
+function assertCurrencyAllowed(context: ServiceContext, currencyCode: string): void {
+  assertNonEmpty(currencyCode, "currencyCode");
+  if (currencyCode !== context.currencyCode) {
+    throw new ErpFinancialsValidationError(
+      `Currency ${currencyCode} is not supported by single-currency financial scope ${context.currencyCode}`,
+      "currency_not_supported",
+      { baseCurrencyCode: context.currencyCode, currencyCode }
+    );
   }
 }
 

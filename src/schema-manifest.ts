@@ -53,8 +53,8 @@ export type PostgresTableManifest = {
 };
 
 export type PostgresSchemaManifest = {
-  readonly manifestVersion: "2026-08-12.subledger-v1";
-  readonly schemaVersion: 13;
+  readonly manifestVersion: "2026-08-12.sdk-v1-foundation";
+  readonly schemaVersion: 14;
   readonly dialect: "postgres";
   readonly namespace: "erp_financials";
   readonly requiredTriggers: readonly PostgresTriggerManifest[];
@@ -144,8 +144,8 @@ const table = (
 });
 
 export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
-  manifestVersion: "2026-08-12.subledger-v1",
-  schemaVersion: 13,
+  manifestVersion: "2026-08-12.sdk-v1-foundation",
+  schemaVersion: 14,
   dialect: "postgres",
   namespace: "erp_financials",
   requiredTriggers: [
@@ -234,6 +234,113 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
       timing: "before",
       events: ["delete"],
       functionName: "reject_subledger_application_delete"
+    },
+    {
+      name: "subledger_applications_match_evidence_immutable",
+      table: "subledger_applications",
+      timing: "before",
+      events: ["update"],
+      functionName: "guard_subledger_application_match_evidence"
+    },
+    {
+      name: "reporting_book_sources_no_primary_overlap",
+      table: "reporting_book_sources",
+      timing: "before",
+      events: ["insert", "update"],
+      updateColumns: ["tenant_id", "company_id", "book_id", "source_role", "effective_from", "effective_through"],
+      functionName: "reject_overlapping_primary_book_source"
+    },
+    {
+      name: "transaction_match_decisions_immutable",
+      table: "transaction_match_decisions",
+      timing: "before",
+      events: ["update", "delete"],
+      functionName: "reject_sdk_immutable_mutation"
+    },
+    {
+      name: "subledger_document_lines_immutable",
+      table: "subledger_document_lines",
+      timing: "before",
+      events: ["update", "delete"],
+      functionName: "reject_sdk_immutable_mutation"
+    },
+    {
+      name: "subledger_document_delivery_events_immutable",
+      table: "subledger_document_delivery_events",
+      timing: "before",
+      events: ["update", "delete"],
+      functionName: "reject_sdk_immutable_mutation"
+    },
+    {
+      name: "invoice_voids_immutable",
+      table: "invoice_voids",
+      timing: "before",
+      events: ["update", "delete"],
+      functionName: "reject_sdk_immutable_mutation"
+    },
+    {
+      name: "invoice_drafts_guard",
+      table: "invoice_drafts",
+      timing: "before",
+      events: ["insert", "update", "delete"],
+      functionName: "guard_invoice_draft_mutation"
+    },
+    {
+      name: "invoice_draft_lines_guard",
+      table: "invoice_draft_lines",
+      timing: "before",
+      events: ["insert", "update", "delete"],
+      functionName: "guard_invoice_draft_line_mutation"
+    },
+    {
+      name: "bank_statement_lines_guard",
+      table: "bank_statement_lines",
+      timing: "before",
+      events: ["insert", "update", "delete"],
+      functionName: "guard_bank_statement_line_mutation"
+    },
+    {
+      name: "bank_reconciliation_matches_guard",
+      table: "bank_reconciliation_matches",
+      timing: "before",
+      events: ["insert", "update", "delete"],
+      functionName: "guard_bank_reconciliation_match_mutation"
+    },
+    {
+      name: "reporting_book_sources_identity_immutable",
+      table: "reporting_book_sources",
+      timing: "before",
+      events: ["update"],
+      functionName: "guard_reporting_book_source_mutation"
+    },
+    {
+      name: "financial_outbox_guard",
+      table: "financial_outbox",
+      timing: "before",
+      events: ["update", "delete"],
+      functionName: "guard_financial_outbox_mutation"
+    },
+    {
+      name: "reporting_book_accounts_validate_hierarchy",
+      table: "reporting_book_accounts",
+      timing: "before",
+      events: ["insert", "update"],
+      updateColumns: ["tenant_id", "company_id", "book_id", "book_account_key", "classification", "parent_book_account_key"],
+      functionName: "validate_reporting_book_account_hierarchy"
+    },
+    {
+      name: "reporting_books_identity_immutable",
+      table: "reporting_books",
+      timing: "before",
+      events: ["update"],
+      functionName: "guard_reporting_book_identity"
+    },
+    {
+      name: "reporting_book_account_mappings_validate",
+      table: "reporting_book_account_mappings",
+      timing: "before",
+      events: ["insert", "update"],
+      functionName: "validate_reporting_book_account_mapping"
     }
   ],
   tables: [
@@ -1139,6 +1246,11 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         text("idempotency_key"),
         text("applied_event_id"),
         text("ended_event_id", true),
+        text("match_candidate_id", true),
+        text("match_decision_id", true),
+        text("match_method", true),
+        numeric("match_score", true),
+        jsonb("match_evidence", 4096, true),
         timestamp("created_at"),
         timestamp("updated_at")
       ],
@@ -1171,6 +1283,18 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
           name: "subledger_applications_timestamp_check",
           sql: "updated_at >= created_at"
         },
+        {
+          name: "subledger_applications_match_method_check",
+          sql: "match_method is null or match_method in ('automatic', 'manual')"
+        },
+        {
+          name: "subledger_applications_match_score_check",
+          sql: "match_score is null or (match_score >= 0 and match_score <= 1)"
+        },
+        {
+          name: "subledger_applications_match_shape_check",
+          sql: "num_nonnulls(match_candidate_id, match_decision_id, match_method, match_score) in (0, 4) and (match_candidate_id is not null or match_evidence is null)"
+        },
         foreignKey(
           "subledger_applications_source_document_scope_fk",
           ["tenant_id", "company_id", "source_id", "source_document_id"],
@@ -1194,6 +1318,18 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
           ["tenant_id", "company_id", "source_id", "ended_event_id"],
           "financial_lifecycle_events",
           ["tenant_id", "company_id", "source_id", "event_id"]
+        ),
+        foreignKey(
+          "subledger_applications_match_candidate_scope_fk",
+          ["tenant_id", "source_id", "match_candidate_id"],
+          "transaction_match_candidates",
+          ["tenant_id", "source_id", "match_candidate_id"]
+        ),
+        foreignKey(
+          "subledger_applications_match_candidate_decision_scope_fk",
+          ["tenant_id", "source_id", "match_candidate_id", "match_decision_id"],
+          "transaction_match_decisions",
+          ["tenant_id", "source_id", "match_candidate_id", "match_decision_id"]
         )
       ],
       [
@@ -1406,6 +1542,17 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
           name: "transaction_match_decisions_identity_uidx",
           columns: ["tenant_id", "source_id", "match_decision_id"],
           unique: true
+        },
+        {
+          name: "transaction_match_decisions_candidate_identity_uidx",
+          columns: ["tenant_id", "source_id", "match_candidate_id", "match_decision_id"],
+          unique: true
+        },
+        {
+          name: "transaction_match_decisions_terminal_uidx",
+          columns: ["tenant_id", "source_id", "match_candidate_id"],
+          unique: true,
+          whereSql: `"decision" = any (array['accepted'::text, 'rejected'::text])`
         },
         {
           name: "transaction_match_decisions_candidate_idx",
@@ -1837,9 +1984,754 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
           unique: true
         }
       ]
-    )
+    ),
+    ...sdkV1Tables()
   ]
 } as const;
+
+function sdkV1Tables(): readonly PostgresTableManifest[] {
+  return [
+    table(
+      "reporting_books",
+      "Financial reporting books decouple one reporting ledger from the provenance sources that contribute facts.",
+      [
+        id("tenant_id"),
+        id("company_id"),
+        id("book_id"),
+        text("name"),
+        text("base_currency_code"),
+        text("accounting_basis"),
+        text("status"),
+        timestamp("created_at"),
+        timestamp("updated_at")
+      ],
+      [
+        { name: "reporting_books_basis_check", sql: "accounting_basis in ('accrual', 'cash', 'modified_cash')" },
+        { name: "reporting_books_status_check", sql: "status in ('active', 'archived')" },
+        { name: "reporting_books_timestamp_check", sql: "updated_at >= created_at" },
+        foreignKey(
+          "reporting_books_company_scope_fk",
+          ["tenant_id", "company_id"],
+          "accounting_companies",
+          ["tenant_id", "company_id"]
+        )
+      ],
+      [
+        { name: "reporting_books_scope_uidx", columns: ["tenant_id", "company_id", "book_id"], unique: true },
+        { name: "reporting_books_name_uidx", columns: ["tenant_id", "company_id", "name"], unique: true },
+        {
+          name: "reporting_books_currency_scope_uidx",
+          columns: ["tenant_id", "company_id", "book_id", "base_currency_code"],
+          unique: true
+        }
+      ],
+      false
+    ),
+    table(
+      "reporting_book_sources",
+      "Effective-dated provenance sources that contribute to a reporting book.",
+      [
+        id("book_source_id"),
+        text("tenant_id"),
+        text("company_id"),
+        text("book_id"),
+        text("source_id"),
+        text("source_role"),
+        date("effective_from", true),
+        date("effective_through", true),
+        timestamp("created_at")
+      ],
+      [
+        { name: "reporting_book_sources_role_check", sql: "source_role in ('historical', 'active', 'adjustment')" },
+        {
+          name: "reporting_book_sources_window_check",
+          sql: "effective_from is null or effective_through is null or effective_from <= effective_through"
+        },
+        foreignKey(
+          "reporting_book_sources_book_scope_fk",
+          ["tenant_id", "company_id", "book_id"],
+          "reporting_books",
+          ["tenant_id", "company_id", "book_id"]
+        ),
+        foreignKey(
+          "reporting_book_sources_company_source_scope_fk",
+          ["tenant_id", "company_id", "source_id"],
+          "company_sources",
+          ["tenant_id", "company_id", "source_id"]
+        )
+      ],
+      [
+        {
+          name: "reporting_book_sources_identity_uidx",
+          columns: ["tenant_id", "company_id", "book_id", "source_id"],
+          unique: true
+        },
+        {
+          name: "reporting_book_sources_window_idx",
+          columns: ["tenant_id", "company_id", "book_id", "effective_from", "effective_through"]
+        }
+      ]
+    ),
+    table(
+      "reporting_book_accounts",
+      "The authoritative cross-source chart of accounts and hierarchy owned by a reporting book.",
+      [
+        id("book_account_id"),
+        text("tenant_id"),
+        text("company_id"),
+        text("book_id"),
+        text("book_account_key"),
+        text("account_number", true),
+        text("name"),
+        text("classification"),
+        text("account_type", true),
+        text("account_subtype", true),
+        text("parent_book_account_key", true),
+        text("currency_code", true),
+        bool("active"),
+        timestamp("created_at"),
+        timestamp("updated_at")
+      ],
+      [
+        {
+          name: "reporting_book_accounts_classification_check",
+          sql: "classification in ('asset', 'liability', 'equity', 'income', 'cost_of_goods_sold', 'expense', 'other_income', 'other_expense')"
+        },
+        {
+          name: "reporting_book_accounts_no_self_parent_check",
+          sql: "parent_book_account_key is null or parent_book_account_key <> book_account_key"
+        },
+        { name: "reporting_book_accounts_timestamp_check", sql: "updated_at >= created_at" },
+        foreignKey(
+          "reporting_book_accounts_book_scope_fk",
+          ["tenant_id", "company_id", "book_id"],
+          "reporting_books",
+          ["tenant_id", "company_id", "book_id"]
+        ),
+        foreignKey(
+          "reporting_book_accounts_book_currency_scope_fk",
+          ["tenant_id", "company_id", "book_id", "currency_code"],
+          "reporting_books",
+          ["tenant_id", "company_id", "book_id", "base_currency_code"]
+        )
+      ],
+      [
+        {
+          name: "reporting_book_accounts_key_uidx",
+          columns: ["tenant_id", "company_id", "book_id", "book_account_key"],
+          unique: true
+        },
+        {
+          name: "reporting_book_accounts_scope_uidx",
+          columns: ["tenant_id", "company_id", "book_id", "book_account_id"],
+          unique: true
+        },
+        {
+          name: "reporting_book_accounts_parent_idx",
+          columns: ["tenant_id", "company_id", "book_id", "parent_book_account_key"]
+        }
+      ],
+      false
+    ),
+    table(
+      "reporting_book_account_mappings",
+      "Maps source-scoped accounts onto stable reporting-book account keys for cross-source continuity.",
+      [
+        id("book_account_mapping_id"),
+        text("tenant_id"),
+        text("company_id"),
+        text("book_id"),
+        text("source_id"),
+        text("account_id"),
+        text("book_account_key"),
+        timestamp("created_at"),
+        timestamp("updated_at")
+      ],
+      [
+        { name: "reporting_book_account_mappings_timestamp_check", sql: "updated_at >= created_at" },
+        foreignKey(
+          "reporting_book_account_mappings_book_scope_fk",
+          ["tenant_id", "company_id", "book_id"],
+          "reporting_books",
+          ["tenant_id", "company_id", "book_id"]
+        ),
+        foreignKey(
+          "reporting_book_account_mappings_book_source_scope_fk",
+          ["tenant_id", "company_id", "book_id", "source_id"],
+          "reporting_book_sources",
+          ["tenant_id", "company_id", "book_id", "source_id"]
+        ),
+        foreignKey(
+          "reporting_book_account_mappings_account_scope_fk",
+          ["tenant_id", "source_id", "account_id"],
+          "accounts",
+          ["tenant_id", "source_id", "account_id"]
+        ),
+        foreignKey(
+          "reporting_book_account_mappings_book_account_scope_fk",
+          ["tenant_id", "company_id", "book_id", "book_account_key"],
+          "reporting_book_accounts",
+          ["tenant_id", "company_id", "book_id", "book_account_key"]
+        )
+      ],
+      [
+        {
+          name: "reporting_book_account_mappings_source_uidx",
+          columns: ["tenant_id", "company_id", "book_id", "source_id", "account_id"],
+          unique: true
+        },
+        {
+          name: "reporting_book_account_mappings_book_key_idx",
+          columns: ["tenant_id", "company_id", "book_id", "book_account_key"]
+        }
+      ]
+    ),
+    table(
+      "financial_outbox",
+      "Durable transactionally-enqueued work for rollup, snapshot, freshness, and host integration processing.",
+      [
+        id("outbox_event_id"),
+        text("tenant_id"),
+        text("company_id"),
+        text("book_id", true),
+        text("source_id"),
+        text("event_type"),
+        text("aggregate_type"),
+        text("aggregate_id"),
+        text("idempotency_key"),
+        jsonb("payload", 4096, false),
+        text("status"),
+        integer("attempt_count"),
+        timestamp("available_at"),
+        timestamp("lease_expires_at", true),
+        text("last_error", true),
+        timestamp("created_at"),
+        timestamp("published_at", true)
+      ],
+      [
+        { name: "financial_outbox_status_check", sql: "status in ('pending', 'processing', 'published', 'failed')" },
+        { name: "financial_outbox_attempt_check", sql: "attempt_count >= 0" },
+        {
+          name: "financial_outbox_published_check",
+          sql: "(status = 'published' and published_at is not null) or (status <> 'published' and published_at is null)"
+        },
+        foreignKey(
+          "financial_outbox_company_source_scope_fk",
+          ["tenant_id", "company_id", "source_id"],
+          "company_sources",
+          ["tenant_id", "company_id", "source_id"]
+        ),
+        foreignKey(
+          "financial_outbox_book_scope_fk",
+          ["tenant_id", "company_id", "book_id"],
+          "reporting_books",
+          ["tenant_id", "company_id", "book_id"]
+        ),
+        foreignKey(
+          "financial_outbox_book_source_scope_fk",
+          ["tenant_id", "company_id", "book_id", "source_id"],
+          "reporting_book_sources",
+          ["tenant_id", "company_id", "book_id", "source_id"]
+        )
+      ],
+      [
+        {
+          name: "financial_outbox_idempotency_uidx",
+          columns: ["tenant_id", "company_id", "source_id", "idempotency_key"],
+          unique: true
+        },
+        {
+          name: "financial_outbox_delivery_idx",
+          columns: ["status", "available_at", "lease_expires_at", "created_at"]
+        }
+      ]
+    ),
+    table(
+      "invoice_drafts",
+      "Versioned invoice drafts that are edited before immutable posting and retain their issued-document link.",
+      [
+        id("invoice_draft_id"),
+        text("tenant_id"),
+        text("company_id"),
+        text("book_id"),
+        text("source_id"),
+        text("customer_id"),
+        text("receivable_account_id"),
+        text("document_number", true),
+        date("document_date"),
+        date("due_date"),
+        text("currency_code"),
+        text("memo", true),
+        text("status"),
+        integer("version"),
+        text("idempotency_key"),
+        text("issue_idempotency_key", true),
+        text("issued_document_id", true),
+        jsonb("metadata", 4096, false),
+        timestamp("created_at"),
+        timestamp("updated_at")
+      ],
+      [
+        { name: "invoice_drafts_status_check", sql: "status in ('draft', 'issued', 'voided')" },
+        { name: "invoice_drafts_version_check", sql: "version >= 1" },
+        { name: "invoice_drafts_due_date_check", sql: "due_date >= document_date" },
+        {
+          name: "invoice_drafts_issued_check",
+          sql: "(status = 'issued' and issued_document_id is not null and issue_idempotency_key is not null) or (status <> 'issued' and issued_document_id is null and issue_idempotency_key is null)"
+        },
+        { name: "invoice_drafts_metadata_shape_check", sql: "jsonb_typeof(metadata) = 'object'" },
+        { name: "invoice_drafts_timestamp_check", sql: "updated_at >= created_at" },
+        foreignKey(
+          "invoice_drafts_book_scope_fk",
+          ["tenant_id", "company_id", "book_id"],
+          "reporting_books",
+          ["tenant_id", "company_id", "book_id"]
+        ),
+        foreignKey(
+          "invoice_drafts_book_source_scope_fk",
+          ["tenant_id", "company_id", "book_id", "source_id"],
+          "reporting_book_sources",
+          ["tenant_id", "company_id", "book_id", "source_id"]
+        ),
+        foreignKey(
+          "invoice_drafts_customer_scope_fk",
+          ["tenant_id", "source_id", "customer_id"],
+          "parties",
+          ["tenant_id", "source_id", "party_id"]
+        ),
+        foreignKey(
+          "invoice_drafts_receivable_account_scope_fk",
+          ["tenant_id", "source_id", "receivable_account_id"],
+          "accounts",
+          ["tenant_id", "source_id", "account_id"]
+        ),
+        foreignKey(
+          "invoice_drafts_issued_document_scope_fk",
+          ["tenant_id", "company_id", "source_id", "issued_document_id"],
+          "subledger_documents",
+          ["tenant_id", "company_id", "source_id", "subledger_document_id"]
+        )
+      ],
+      [
+        {
+          name: "invoice_drafts_idempotency_uidx",
+          columns: ["tenant_id", "company_id", "book_id", "idempotency_key"],
+          unique: true
+        },
+        {
+          name: "invoice_drafts_scope_uidx",
+          columns: ["tenant_id", "company_id", "book_id", "invoice_draft_id"],
+          unique: true
+        },
+        {
+          name: "invoice_drafts_source_scope_uidx",
+          columns: ["tenant_id", "company_id", "book_id", "source_id", "invoice_draft_id"],
+          unique: true
+        },
+        {
+          name: "invoice_drafts_list_idx",
+          columns: ["tenant_id", "company_id", "book_id", "status", "document_date", "invoice_draft_id"]
+        }
+      ]
+    ),
+    ...sdkV1LineTables(),
+    ...sdkV1BankTables()
+  ];
+}
+
+function sdkV1LineTables(): readonly PostgresTableManifest[] {
+  const amountConstraints = (prefix: string): readonly PostgresConstraintManifest[] => [
+    { name: `${prefix}_number_check`, sql: "line_number > 0" },
+    {
+      name: `${prefix}_amount_check`,
+      sql: "quantity > 0 and unit_amount >= 0 and discount_amount >= 0 and tax_amount >= 0 and line_amount > 0"
+    },
+    {
+      name: `${prefix}_scale_check`,
+      sql: "scale(quantity) <= 4 and scale(unit_amount) <= 2 and scale(discount_amount) <= 2 and scale(tax_amount) <= 2 and scale(line_amount) <= 2"
+    },
+    {
+      name: `${prefix}_arithmetic_check`,
+      sql: "discount_amount <= round(quantity * unit_amount, 2) and line_amount = round(quantity * unit_amount, 2) - discount_amount + tax_amount"
+    },
+    {
+      name: `${prefix}_dimension_refs_shape_check`,
+      sql: "jsonb_typeof(dimension_refs) = 'array'"
+    }
+  ];
+  const lineColumns = (): readonly PostgresColumnManifest[] => [
+    integer("line_number"),
+    text("account_id"),
+    text("item_id", true),
+    text("description", true),
+    numeric("quantity"),
+    numeric("unit_amount"),
+    numeric("discount_amount"),
+    text("tax_code", true),
+    numeric("tax_amount"),
+    date("service_period_start", true),
+    date("service_period_end", true),
+    jsonb("dimension_refs", 4096, false),
+    numeric("line_amount")
+  ];
+  return [
+    table(
+      "invoice_draft_lines",
+      "Commercial invoice detail retained while an invoice is editable.",
+      [
+        id("invoice_draft_line_id"),
+        text("tenant_id"),
+        text("company_id"),
+        text("book_id"),
+        text("source_id"),
+        text("invoice_draft_id"),
+        ...lineColumns()
+      ],
+      [
+        ...amountConstraints("invoice_draft_lines"),
+        {
+          name: "invoice_draft_lines_service_period_check",
+          sql: "service_period_start is null or service_period_end is null or service_period_start <= service_period_end"
+        },
+        foreignKey(
+          "invoice_draft_lines_draft_scope_fk",
+          ["tenant_id", "company_id", "book_id", "source_id", "invoice_draft_id"],
+          "invoice_drafts",
+          ["tenant_id", "company_id", "book_id", "source_id", "invoice_draft_id"]
+        ),
+        foreignKey(
+          "invoice_draft_lines_account_scope_fk",
+          ["tenant_id", "source_id", "account_id"],
+          "accounts",
+          ["tenant_id", "source_id", "account_id"]
+        ),
+        foreignKey(
+          "invoice_draft_lines_item_scope_fk",
+          ["tenant_id", "source_id", "item_id"],
+          "items",
+          ["tenant_id", "source_id", "item_id"]
+        )
+      ],
+      [
+        {
+          name: "invoice_draft_lines_order_uidx",
+          columns: ["tenant_id", "company_id", "book_id", "invoice_draft_id", "line_number"],
+          unique: true
+        }
+      ]
+    ),
+    table(
+      "subledger_document_lines",
+      "Immutable commercial detail for posted invoices and other native subledger documents.",
+      [
+        id("subledger_document_line_id"),
+        text("tenant_id"),
+        text("company_id"),
+        text("source_id"),
+        text("subledger_document_id"),
+        ...lineColumns()
+      ],
+      [
+        ...amountConstraints("subledger_document_lines"),
+        foreignKey(
+          "subledger_document_lines_document_scope_fk",
+          ["tenant_id", "company_id", "source_id", "subledger_document_id"],
+          "subledger_documents",
+          ["tenant_id", "company_id", "source_id", "subledger_document_id"]
+        ),
+        foreignKey(
+          "subledger_document_lines_account_scope_fk",
+          ["tenant_id", "source_id", "account_id"],
+          "accounts",
+          ["tenant_id", "source_id", "account_id"]
+        ),
+        foreignKey(
+          "subledger_document_lines_item_scope_fk",
+          ["tenant_id", "source_id", "item_id"],
+          "items",
+          ["tenant_id", "source_id", "item_id"]
+        )
+      ],
+      [
+        {
+          name: "subledger_document_lines_order_uidx",
+          columns: ["tenant_id", "company_id", "source_id", "subledger_document_id", "line_number"],
+          unique: true
+        }
+      ]
+    ),
+    table(
+      "subledger_document_delivery_events",
+      "Append-only sent, delivered, and failed delivery evidence for posted subledger documents.",
+      [
+        id("delivery_event_id"),
+        text("tenant_id"),
+        text("company_id"),
+        text("source_id"),
+        text("subledger_document_id"),
+        text("delivery_status"),
+        text("channel"),
+        text("recipient_ref", true),
+        text("lifecycle_event_id"),
+        timestamp("occurred_at")
+      ],
+      [
+        {
+          name: "subledger_document_delivery_events_status_check",
+          sql: "delivery_status in ('sent', 'delivered', 'failed')"
+        },
+        foreignKey(
+          "subledger_document_delivery_events_document_scope_fk",
+          ["tenant_id", "company_id", "source_id", "subledger_document_id"],
+          "subledger_documents",
+          ["tenant_id", "company_id", "source_id", "subledger_document_id"]
+        ),
+        foreignKey(
+          "subledger_document_delivery_events_event_scope_fk",
+          ["tenant_id", "company_id", "source_id", "lifecycle_event_id"],
+          "financial_lifecycle_events",
+          ["tenant_id", "company_id", "source_id", "event_id"]
+        )
+      ],
+      [
+        {
+          name: "subledger_document_delivery_events_scope_uidx",
+          columns: ["tenant_id", "company_id", "source_id", "delivery_event_id"],
+          unique: true
+        },
+        {
+          name: "subledger_document_delivery_events_document_idx",
+          columns: ["tenant_id", "company_id", "source_id", "subledger_document_id", "occurred_at"]
+        }
+      ]
+    ),
+    table(
+      "invoice_voids",
+      "Immutable links proving that an open invoice was fully offset by an SDK credit and atomic application.",
+      [
+        id("invoice_void_id"),
+        text("tenant_id"),
+        text("company_id"),
+        text("book_id"),
+        text("source_id"),
+        text("invoice_document_id"),
+        text("credit_document_id"),
+        text("application_id"),
+        text("idempotency_key"),
+        text("lifecycle_event_id"),
+        timestamp("created_at")
+      ],
+      [
+        foreignKey(
+          "invoice_voids_book_scope_fk",
+          ["tenant_id", "company_id", "book_id"],
+          "reporting_books",
+          ["tenant_id", "company_id", "book_id"]
+        ),
+        foreignKey(
+          "invoice_voids_book_source_scope_fk",
+          ["tenant_id", "company_id", "book_id", "source_id"],
+          "reporting_book_sources",
+          ["tenant_id", "company_id", "book_id", "source_id"]
+        ),
+        foreignKey(
+          "invoice_voids_invoice_scope_fk",
+          ["tenant_id", "company_id", "source_id", "invoice_document_id"],
+          "subledger_documents",
+          ["tenant_id", "company_id", "source_id", "subledger_document_id"]
+        ),
+        foreignKey(
+          "invoice_voids_credit_scope_fk",
+          ["tenant_id", "company_id", "source_id", "credit_document_id"],
+          "subledger_documents",
+          ["tenant_id", "company_id", "source_id", "subledger_document_id"]
+        ),
+        foreignKey(
+          "invoice_voids_application_scope_fk",
+          ["tenant_id", "company_id", "source_id", "application_id"],
+          "subledger_applications",
+          ["tenant_id", "company_id", "source_id", "subledger_application_id"]
+        ),
+        foreignKey(
+          "invoice_voids_event_scope_fk",
+          ["tenant_id", "company_id", "source_id", "lifecycle_event_id"],
+          "financial_lifecycle_events",
+          ["tenant_id", "company_id", "source_id", "event_id"]
+        )
+      ],
+      [
+        {
+          name: "invoice_voids_invoice_uidx",
+          columns: ["tenant_id", "company_id", "book_id", "invoice_document_id"],
+          unique: true
+        },
+        {
+          name: "invoice_voids_idempotency_uidx",
+          columns: ["tenant_id", "company_id", "book_id", "idempotency_key"],
+          unique: true
+        }
+      ]
+    )
+  ];
+}
+
+function sdkV1BankTables(): readonly PostgresTableManifest[] {
+  return [
+    table(
+      "bank_statement_lines",
+      "Idempotent bank-feed lines with explicit review state and safe provider provenance.",
+      [
+        id("bank_statement_line_id"),
+        text("tenant_id"),
+        text("company_id"),
+        text("book_id"),
+        text("source_id"),
+        text("bank_account_id"),
+        text("external_line_id"),
+        date("posted_date"),
+        numeric("amount"),
+        text("currency_code"),
+        text("description", true),
+        text("reference", true),
+        text("status"),
+        integer("version"),
+        jsonb("source_payload_ref", 4096, true),
+        timestamp("created_at"),
+        timestamp("updated_at")
+      ],
+      [
+        { name: "bank_statement_lines_amount_check", sql: "amount <> 0 and scale(amount) <= 2" },
+        { name: "bank_statement_lines_status_check", sql: "status in ('unmatched', 'matched', 'ignored')" },
+        { name: "bank_statement_lines_version_check", sql: "version >= 1" },
+        {
+          name: "bank_statement_lines_source_payload_ref_shape_check",
+          sql: "source_payload_ref is null or jsonb_typeof(source_payload_ref) = 'object'"
+        },
+        { name: "bank_statement_lines_timestamp_check", sql: "updated_at >= created_at" },
+        foreignKey(
+          "bank_statement_lines_book_scope_fk",
+          ["tenant_id", "company_id", "book_id"],
+          "reporting_books",
+          ["tenant_id", "company_id", "book_id"]
+        ),
+        foreignKey(
+          "bank_statement_lines_book_source_scope_fk",
+          ["tenant_id", "company_id", "book_id", "source_id"],
+          "reporting_book_sources",
+          ["tenant_id", "company_id", "book_id", "source_id"]
+        ),
+        foreignKey(
+          "bank_statement_lines_bank_account_scope_fk",
+          ["tenant_id", "source_id", "bank_account_id"],
+          "accounts",
+          ["tenant_id", "source_id", "account_id"]
+        )
+      ],
+      [
+        {
+          name: "bank_statement_lines_external_uidx",
+          columns: ["tenant_id", "company_id", "book_id", "external_line_id"],
+          unique: true
+        },
+        {
+          name: "bank_statement_lines_scope_uidx",
+          columns: ["tenant_id", "company_id", "book_id", "bank_statement_line_id"],
+          unique: true
+        },
+        {
+          name: "bank_statement_lines_source_scope_uidx",
+          columns: ["tenant_id", "company_id", "book_id", "source_id", "bank_statement_line_id"],
+          unique: true
+        },
+        {
+          name: "bank_statement_lines_review_idx",
+          columns: ["tenant_id", "company_id", "book_id", "status", "posted_date"]
+        }
+      ]
+    ),
+    table(
+      "bank_reconciliation_matches",
+      "Versioned manual or automatic matches from bank lines to canonical transactions.",
+      [
+        id("bank_reconciliation_match_id"),
+        text("tenant_id"),
+        text("company_id"),
+        text("book_id"),
+        text("source_id"),
+        text("bank_statement_line_id"),
+        text("transaction_id"),
+        numeric("matched_amount"),
+        text("method"),
+        text("status"),
+        integer("version"),
+        text("idempotency_key"),
+        text("lifecycle_event_id"),
+        timestamp("created_at"),
+        timestamp("updated_at")
+      ],
+      [
+        { name: "bank_reconciliation_matches_amount_check", sql: "matched_amount > 0" },
+        { name: "bank_reconciliation_matches_method_check", sql: "method in ('automatic', 'manual')" },
+        { name: "bank_reconciliation_matches_status_check", sql: "status in ('matched', 'unmatched', 'voided')" },
+        { name: "bank_reconciliation_matches_version_check", sql: "version >= 1" },
+        { name: "bank_reconciliation_matches_timestamp_check", sql: "updated_at >= created_at" },
+        foreignKey(
+          "bank_reconciliation_matches_book_scope_fk",
+          ["tenant_id", "company_id", "book_id"],
+          "reporting_books",
+          ["tenant_id", "company_id", "book_id"]
+        ),
+        foreignKey(
+          "bank_reconciliation_matches_book_source_scope_fk",
+          ["tenant_id", "company_id", "book_id", "source_id"],
+          "reporting_book_sources",
+          ["tenant_id", "company_id", "book_id", "source_id"]
+        ),
+        foreignKey(
+          "bank_reconciliation_matches_line_scope_fk",
+          ["tenant_id", "company_id", "book_id", "source_id", "bank_statement_line_id"],
+          "bank_statement_lines",
+          ["tenant_id", "company_id", "book_id", "source_id", "bank_statement_line_id"]
+        ),
+        foreignKey(
+          "bank_reconciliation_matches_transaction_scope_fk",
+          ["tenant_id", "source_id", "transaction_id"],
+          "transactions",
+          ["tenant_id", "source_id", "transaction_id"]
+        ),
+        foreignKey(
+          "bank_reconciliation_matches_event_scope_fk",
+          ["tenant_id", "company_id", "source_id", "lifecycle_event_id"],
+          "financial_lifecycle_events",
+          ["tenant_id", "company_id", "source_id", "event_id"]
+        )
+      ],
+      [
+        {
+          name: "bank_reconciliation_matches_idempotency_uidx",
+          columns: ["tenant_id", "company_id", "book_id", "idempotency_key"],
+          unique: true
+        },
+        {
+          name: "bank_reconciliation_matches_active_line_uidx",
+          columns: ["tenant_id", "company_id", "book_id", "bank_statement_line_id"],
+          unique: true,
+          whereSql: `"status" = 'matched'::text`
+        },
+        {
+          name: "bank_reconciliation_matches_active_transaction_uidx",
+          columns: ["tenant_id", "source_id", "transaction_id"],
+          unique: true,
+          whereSql: `"status" = 'matched'::text`
+        },
+        {
+          name: "bank_reconciliation_matches_transaction_idx",
+          columns: ["tenant_id", "source_id", "transaction_id", "status"]
+        }
+      ]
+    )
+  ];
+}
 
 export const DISALLOWED_CREDENTIAL_COLUMN_PATTERNS: readonly RegExp[] = [
   /token/i,

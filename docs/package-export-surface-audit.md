@@ -21,11 +21,11 @@ Checked surfaces:
   checks.
 - Safe source payload refs and compact drilldown refs.
 
-The package manifest exposes only the root package entry point:
-`@handrail/erp-financials`. Public compatibility therefore depends on
-`src/index.ts` re-exporting consumer-facing values and types. Subpath imports,
-copied package shims, generated `dist/` internals, and `src/` internals are not
-supported adoption APIs.
+The package manifest exposes the compatible root entry point and one compact
+new-host entry point: `@handrail/erp-financials/sdk`. Public compatibility still
+depends on `src/index.ts` retaining existing consumer-facing values and types.
+Undeclared subpath imports, copied package shims, generated `dist/` internals,
+and `src/` internals are not supported adoption APIs.
 
 ## Linked Repo Availability
 
@@ -54,6 +54,10 @@ referenced public import is missing from the package root.
 
 The in-repo Future ERP consumer type fixture and package-boundary test cover
 these required supported adoption surfaces from the package root:
+
+- Cohesive new-host SDK: `createErpFinancialsSdk`, reporting books, book-owned
+  chart accounts, invoice lifecycle, atomic payment matching, bank
+  reconciliation, book-aware read models, typed errors, and outbox runtime.
 
 - Canonical schema, migration, and health:
   `POSTGRES_MIGRATIONS`, `planPostgresMigrations`,

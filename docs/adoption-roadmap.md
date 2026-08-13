@@ -3,6 +3,21 @@
 This roadmap turns the first Future ERP implementation into a reusable package
 without over-abstracting before the first real app proves the domain model.
 
+## Current pre-v1 position
+
+The repository-owned work described by phases 1 through 5 and the reusable
+reporting work in phase 7 now has a packaged implementation: schema migrations,
+canonical facts, effective-dated reporting books, a book-owned chart, source
+mappings, journal/subledger commands, invoice lifecycle, atomic matching,
+bank reconciliation, book-aware statements/dashboard/aging/list reads,
+transactional outbox runtime, workers, fixtures, health, and focused tests.
+
+The next milestone is first-application adoption through
+`@handrail/erp-financials/sdk`. Any missing financial edge case found there
+belongs in this package rather than a host-local SQL or arithmetic layer. Phase
+6 remains an owner/platform capability decision, and deployment/runtime
+registration remain external operations.
+
 ## Phase 1: Prove in Future ERP
 
 Goal: make the first ERP app work end to end while keeping the extraction seam
