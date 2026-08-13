@@ -12,23 +12,34 @@ import {
   createFutureErpQuickBooksIncrementalSyncWorker,
   createFutureErpRollupAndLateArrivalWorker,
   createFutureErpSnapshotRefreshAndFreshnessWorker,
+  createErpFinancials,
+  createFiscalCloseEvidenceChecksum,
   createHandrailQuickBooksFullSyncServiceHandler,
   createHandrailQuickBooksSyncClient,
   createPostgresStorageAdapter,
+  createPostgresTransactionRunner,
   createSnapshotRefreshContract,
   fetchFutureErpQuickBooksProviderReportParitySnapshot,
   mapHandrailQuickBooksSdkResourcesToCanonicalFacts,
   mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts,
   mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts,
+  migratePostgresSchema,
+  planPostgresMigrations,
   persistFutureErpCanonicalFacts,
   reconcileReportFreshness,
   validateAccountHierarchy,
-  validateFutureErpCanonicalSchemaPreflight
+  validateFutureErpCanonicalSchemaPreflight,
+  validatePostgresMigrationHistory
 } from "@handrail/erp-financials";
 import type {
   Account,
   AccountHierarchyDiagnostic,
   CanonicalAccountingFactSet,
+  CreateErpFinancialsInput,
+  ErpFinancials,
+  FinancialOperationContext,
+  FiscalCloseEvidence,
+  FiscalCloseEvidenceMaterial,
   FutureErpCanonicalFactPersistenceWorker,
   FutureErpCanonicalReportGenerationRequest,
   FutureErpCanonicalReportGenerationResult,
@@ -64,17 +75,25 @@ import type {
   NormalizedQuickBooksProviderReportName,
   NormalizedQuickBooksProviderReportResult,
   NormalizedQuickBooksResourceSet,
+  PostgresMigrationPlan,
   QuickBooksContractSmokeHarnessResult,
   ReportFreshnessRow,
   ReportSnapshot,
   RollupBucket,
   PostgresQueryClient,
   ReportBuilderInput,
-  SnapshotRefreshContractInput
+  SnapshotRefreshContractInput,
+  SubledgerApplicationResult
 } from "@handrail/erp-financials";
 
 export const futureErpResolvedFinancialImports = {
   createPostgresStorageAdapter,
+  createPostgresTransactionRunner,
+  planPostgresMigrations,
+  migratePostgresSchema,
+  validatePostgresMigrationHistory,
+  createErpFinancials,
+  createFiscalCloseEvidenceChecksum,
   validateFutureErpCanonicalSchemaPreflight,
   createFutureErpCanonicalFactPersistenceWorker,
   persistFutureErpCanonicalFacts,
@@ -174,4 +193,11 @@ export type FutureErpResolvedFinancialWorkflowTypes = {
   readonly reportSnapshot: ReportSnapshot;
   readonly reportFreshnessRow: ReportFreshnessRow;
   readonly rollupBucket: RollupBucket;
+  readonly financialsInput: CreateErpFinancialsInput;
+  readonly financials: ErpFinancials;
+  readonly financialOperation: FinancialOperationContext;
+  readonly fiscalCloseEvidence: FiscalCloseEvidence;
+  readonly fiscalCloseEvidenceMaterial: FiscalCloseEvidenceMaterial;
+  readonly migrationPlan: PostgresMigrationPlan;
+  readonly subledgerApplication: SubledgerApplicationResult;
 };

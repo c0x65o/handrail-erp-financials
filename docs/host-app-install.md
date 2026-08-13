@@ -40,9 +40,9 @@ Host apps should call these exported `@handrail/erp-financials` APIs directly:
 
 | Contract area | Exported API |
 | --- | --- |
-| Canonical schema, install, and health | `POSTGRES_CANONICAL_SCHEMA_MANIFEST`, `renderPostgresSchemaSql`, `createPostgresStorageAdapter(...).installSchema()`, `createPostgresStorageAdapter(...).validateSchema()`, `validatePostgresSchema`, `checkErpFinancialsInstallHealth`, `validateFutureErpCanonicalSchemaPreflight`, `preflightFutureErpInstallHealth`, `createFutureErpInstallHealthPreflightWorker` |
+| Canonical schema, migration, and health | `POSTGRES_MIGRATIONS`, `planPostgresMigrations`, `migratePostgresSchema`, `validatePostgresMigrationHistory`, `POSTGRES_CANONICAL_SCHEMA_MANIFEST`, `createPostgresStorageAdapter(...).validateSchema()`, `validatePostgresSchema`, `checkErpFinancialsInstallHealth`, `validateFutureErpCanonicalSchemaPreflight`, `preflightFutureErpInstallHealth`, `createFutureErpInstallHealthPreflightWorker` |
 | Storage adapter and persistence | `createPostgresStorageAdapter`, `createFutureErpCanonicalFactPersistenceWorker`, `persistFutureErpCanonicalFacts` |
-| Native account trees and journal entries | `createErpFinancials`; pass a standard Postgres pool or configure the host transaction runner once, then use `accounts.upsertTree(...)` and `journalEntries.post(...)` |
+| Native financial operations | `createErpFinancials`; use `accounts`, `journalEntries`, `fiscalPeriods`, receivable/payable/cash document services, and `paymentApplications` with a `FinancialOperationContext` on every mutation |
 | Posting rules and transaction matching | `evaluatePostingRules`, `PostingRule`, `PostingRuleEvaluationInput`, `TransactionMatchCandidate`, `TransactionMatchDecision`, `PaymentApplication`, `createPostgresStorageAdapter(...).upsertPostingRules()`, `createPostgresStorageAdapter(...).upsertTransactionMatchCandidates()`, `createPostgresStorageAdapter(...).recordTransactionMatchDecisions()`, `createPostgresStorageAdapter(...).upsertPaymentApplications()` |
 | QuickBooks normalized mapping | `HandrailQuickBooksSdkResourcesAdapterInput`, `mapHandrailQuickBooksSdkResourcesToCanonicalFacts`, `mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts`, `mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts` |
 | QuickBooks sync worker contracts | `createFutureErpQuickBooksFullSyncWorker`, `createFutureErpQuickBooksIncrementalSyncWorker`, `NormalizedQuickBooksFullSyncRequestEnvelope`, `NormalizedQuickBooksFullSyncResponseEnvelope`, `NormalizedQuickBooksIncrementalSyncRequestEnvelope`, `NormalizedQuickBooksIncrementalSyncResponseEnvelope`, `createHandrailQuickBooksFullSyncServiceHandler`, `createHandrailQuickBooksSyncClient`, `HandrailQuickBooksSyncClient`, `HandrailQuickBooksSyncClientTransport` |
@@ -168,38 +168,44 @@ npm run health:smoke
 health APIs without live QuickBooks credentials, production data, deployment
 state, or external provider calls.
 
-## 2. Install the canonical schema
+## 2. Migrate the canonical schema
 
-Host apps own their database credentials and migration framework. This package
-exports the versioned Postgres schema manifest and deterministic SQL renderer:
+Host apps own their database credentials. The package owns the ordered,
+checksummed financial schema upgrade path:
 
 ```ts
 import {
-  POSTGRES_CANONICAL_SCHEMA_MANIFEST,
-  renderPostgresSchemaSql
+  createPostgresTransactionRunner,
+  migratePostgresSchema
 } from "@handrail/erp-financials";
 
-const statements = renderPostgresSchemaSql(POSTGRES_CANONICAL_SCHEMA_MANIFEST);
+const database = createPostgresTransactionRunner(postgresPool);
+const result = await migratePostgresSchema(database, {
+  appliedByRef: "deployment:future-erp-2026-08-12"
+});
 ```
 
-For Future ERP, this package also ships the equivalent checked-in migration at
-`migrations/future-erp/20260620000000_create_erp_financials_canonical_schema.sql`.
-Copy its statements into the host app's migration framework without adding
-provider credential or raw provider payload columns.
-
-Commit those statements through the host app migration system, or use the
-storage adapter during development to produce the same install plan:
+The migration runner obtains a Postgres advisory transaction lock, adopts a
+supported unversioned legacy baseline, records immutable checksums in
+`erp_financials.schema_migrations`, runs the remaining path atomically, and
+validates the final manifest. Use a read-only deployment preview when needed:
 
 ```ts
-import { createPostgresStorageAdapter } from "@handrail/erp-financials";
+import { planPostgresMigrations } from "@handrail/erp-financials";
 
-const storage = createPostgresStorageAdapter(postgresClient);
-const installPlan = await storage.installSchema({ dryRun: true });
+const plan = await database.transaction((client) =>
+  planPostgresMigrations(client)
+);
 ```
 
-`installSchema({ dryRun: true })` must be the default validation path for blank
-apps and production audits because it does not mutate the database. Direct
-execution should happen only through the host app's explicit migration flow.
+`renderPostgresSchemaSql(...)` and `storage.installSchema({ dryRun: true })`
+remain deterministic development/compatibility surfaces. They do not carry
+ordered history or lifecycle triggers and must not replace
+`migratePostgresSchema(...)` in production. Never edit or copy a previously
+released migration; add a new registry entry.
+
+See [prime-time-financial-kernel.md](prime-time-financial-kernel.md) for fiscal,
+audit, journal lifecycle, subledger, and real-Postgres acceptance contracts.
 
 ## 3. Validate the installed schema
 

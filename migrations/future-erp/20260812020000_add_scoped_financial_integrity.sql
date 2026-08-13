@@ -11,7 +11,7 @@ insert into "erp_financials"."company_sources" (
   "company_source_id", "tenant_id", "company_id", "source_id", "created_at"
 )
 select
-  'company_source_' || md5(scope."tenant_id" || chr(0) || scope."company_id" || chr(0) || scope."source_id"),
+  'company_source_' || md5(scope."tenant_id" || chr(31) || scope."company_id" || chr(31) || scope."source_id"),
   scope."tenant_id",
   scope."company_id",
   scope."source_id",
@@ -181,7 +181,10 @@ language plpgsql
 as $posted_journal_guard$
 begin
   if old."status" = 'posted'
-    and old."source_transaction_type" = 'JournalEntry'
+    and (
+      old."source_transaction_type" in ('JournalEntry', 'JournalEntryAdjustment')
+      or old."source_transaction_type" like 'Subledger:%'
+    )
     and (tg_op = 'DELETE' or new is distinct from old)
   then
     raise exception 'posted journal entries are immutable; create a linked reversal or replacement';
@@ -204,7 +207,11 @@ as $posted_journal_child_guard$
 declare
   parent_is_posted_journal boolean;
 begin
-  select transactions."status" = 'posted' and transactions."source_transaction_type" = 'JournalEntry'
+  select transactions."status" = 'posted'
+    and (
+      transactions."source_transaction_type" in ('JournalEntry', 'JournalEntryAdjustment')
+      or transactions."source_transaction_type" like 'Subledger:%'
+    )
   into parent_is_posted_journal
   from "erp_financials"."transactions" transactions
   where transactions."tenant_id" = old."tenant_id"

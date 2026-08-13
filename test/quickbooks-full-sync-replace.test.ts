@@ -54,6 +54,9 @@ class ReplaceRecordingStorage {
   upsertAccountingSource(): Promise<number> {
     return Promise.resolve(1);
   }
+  upsertCompanySourceBinding(): Promise<number> {
+    return Promise.resolve(1);
+  }
   upsertImportBatch(): Promise<number> {
     return Promise.resolve(1);
   }
@@ -173,6 +176,7 @@ describe("full sync ledger fact replacement", () => {
     const storage = {
       upsertAccountingCompany: recording.upsertAccountingCompany.bind(recording),
       upsertAccountingSource: recording.upsertAccountingSource.bind(recording),
+      upsertCompanySourceBinding: recording.upsertCompanySourceBinding.bind(recording),
       upsertImportBatch: recording.upsertImportBatch.bind(recording),
       upsertSyncCheckpoint: recording.upsertSyncCheckpoint.bind(recording),
       upsertAccounts: recording.upsertAccounts.bind(recording),

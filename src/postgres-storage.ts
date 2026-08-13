@@ -60,7 +60,11 @@ import {
   assertManifestHasNoCredentialColumns,
   renderPostgresSchemaSql
 } from "./schema-manifest.js";
-import type { PostgresColumnManifest, PostgresSchemaManifest, PostgresTableManifest } from "./schema-manifest.js";
+import type {
+  PostgresSchemaManifest,
+  PostgresTableManifest,
+  PostgresTriggerManifest
+} from "./schema-manifest.js";
 import type {
   StandardReportAccountingMethod,
   StandardReportDisplayColumnsBy,
@@ -102,8 +106,10 @@ export type PostgresSchemaValidationIssueKind =
   | "incompatible_column_nullability"
   | "incompatible_index_definition"
   | "incompatible_constraint_definition"
+  | "incompatible_trigger_definition"
   | "missing_index"
   | "missing_constraint"
+  | "missing_trigger"
   | "credential_column"
   | "missing_fixture_support";
 
@@ -348,17 +354,19 @@ export type MarkReportSnapshotsStaleForAccountHierarchyChangesInput = {
 type Row = Readonly<Record<string, unknown>>;
 
 type CatalogRow = {
-  readonly object_type: "schema" | "table" | "column" | "index" | "constraint";
+  readonly object_type: "schema" | "table" | "column" | "index" | "constraint" | "trigger";
   readonly table_name: string | null;
   readonly object_name: string;
   readonly data_type?: string | null;
   readonly is_nullable?: string | null;
   readonly definition?: string | null;
+  readonly enabled?: boolean | null;
 };
 
 const FIXTURE_SUPPORT_TABLES = [
   "accounting_companies",
   "accounting_sources",
+  "company_sources",
   "import_batches",
   "sync_checkpoints",
   "accounts",
@@ -699,7 +707,7 @@ export async function validatePostgresSchema(
         });
       } else if (
         catalogIndex.definition != null &&
-        !indexDefinitionMatches(catalogIndex.definition, index.columns, index.unique === true)
+        !indexDefinitionMatches(catalogIndex.definition, index.columns, index.unique === true, index.whereSql)
       ) {
         issues.push({
           kind: "incompatible_index_definition",
@@ -735,6 +743,29 @@ export async function validatePostgresSchema(
           message: `incompatible foreign-key definition for ${manifest.namespace}.${table.name}.${constraint.name}`
         });
       }
+    }
+  }
+
+  for (const trigger of manifest.requiredTriggers) {
+    const catalogTrigger = catalogByKey.get(`trigger::${trigger.table}.${trigger.name}`);
+    if (catalogTrigger === undefined) {
+      issues.push({
+        kind: "missing_trigger",
+        table: trigger.table,
+        objectName: trigger.name,
+        message: `missing trigger ${manifest.namespace}.${trigger.table}.${trigger.name}`
+      });
+    } else if (
+      catalogTrigger.enabled !== true ||
+      catalogTrigger.definition == null ||
+      !triggerDefinitionMatches(catalogTrigger.definition, manifest.namespace, trigger)
+    ) {
+      issues.push({
+        kind: "incompatible_trigger_definition",
+        table: trigger.table,
+        objectName: trigger.name,
+        message: `incompatible or disabled trigger ${manifest.namespace}.${trigger.table}.${trigger.name}`
+      });
     }
   }
 
@@ -2451,32 +2482,40 @@ on conflict (${conflictColumns.map(quoteIdentifier).join(", ")}) ${updateSql}`;
 
 async function readCatalogRows(client: PostgresQueryClient, namespace: string): Promise<readonly CatalogRow[]> {
   const result = await client.query<CatalogRow>(
-    `select 'schema'::text as object_type, null::text as table_name, schema_name as object_name, null::text as data_type, null::text as is_nullable, null::text as definition
+    `select 'schema'::text as object_type, null::text as table_name, schema_name as object_name, null::text as data_type, null::text as is_nullable, null::text as definition, null::boolean as enabled
 from information_schema.schemata
 where schema_name = $1
 union all
-select 'table'::text as object_type, table_name, table_name as object_name, null::text as data_type, null::text as is_nullable, null::text as definition
+select 'table'::text as object_type, table_name, table_name as object_name, null::text as data_type, null::text as is_nullable, null::text as definition, null::boolean as enabled
 from information_schema.tables
 where table_schema = $1 and table_type = 'BASE TABLE'
 union all
-select 'column'::text as object_type, table_name, column_name as object_name, data_type, is_nullable, null::text as definition
+select 'column'::text as object_type, table_name, column_name as object_name, data_type, is_nullable, null::text as definition, null::boolean as enabled
 from information_schema.columns
 where table_schema = $1
 union all
-select 'index'::text as object_type, tablename as table_name, indexname as object_name, null::text as data_type, null::text as is_nullable, indexdef as definition
+select 'index'::text as object_type, tablename as table_name, indexname as object_name, null::text as data_type, null::text as is_nullable, indexdef as definition, null::boolean as enabled
 from pg_indexes
 where schemaname = $1
 union all
-select 'constraint'::text as object_type, conrelid::regclass::text as table_name, conname as object_name, null::text as data_type, null::text as is_nullable, pg_get_constraintdef(oid, true) as definition
+select 'constraint'::text as object_type, conrelid::regclass::text as table_name, conname as object_name, null::text as data_type, null::text as is_nullable, pg_get_constraintdef(oid, true) as definition, null::boolean as enabled
 from pg_constraint
-where connamespace = $1::regnamespace`,
+where connamespace = $1::regnamespace
+union all
+select 'trigger'::text as object_type, relation.relname as table_name, trigger.tgname as object_name,
+  null::text as data_type, null::text as is_nullable, pg_get_triggerdef(trigger.oid, true) as definition,
+  trigger.tgenabled <> 'D' as enabled
+from pg_trigger trigger
+join pg_class relation on relation.oid = trigger.tgrelid
+join pg_namespace namespace on namespace.oid = relation.relnamespace
+where namespace.nspname = $1 and not trigger.tgisinternal`,
     [namespace]
   );
 
   return result.rows;
 }
 
-function normalizePostgresType(dataType: string): PostgresColumnManifest["type"] | string {
+function normalizePostgresType(dataType: string): string {
   return dataType === "timestamp with time zone" ? "timestamptz" : dataType;
 }
 
@@ -2485,8 +2524,8 @@ function catalogKey(row: CatalogRow): string {
     return `column::${String(row.table_name)}.${row.object_name}`;
   }
 
-  if (row.object_type === "constraint") {
-    return `constraint::${unqualifiedTableName(String(row.table_name))}.${row.object_name}`;
+  if (row.object_type === "constraint" || row.object_type === "trigger") {
+    return `${row.object_type}::${unqualifiedTableName(String(row.table_name))}.${row.object_name}`;
   }
 
   return `${row.object_type}::${row.object_name}`;
@@ -2505,7 +2544,8 @@ function expectedConstraintNames(table: PostgresTableManifest): readonly string[
 function indexDefinitionMatches(
   definition: string,
   expectedColumns: readonly string[],
-  expectedUnique: boolean
+  expectedUnique: boolean,
+  expectedWhereSql?: string
 ): boolean {
   const actualUnique = /\bcreate\s+unique\s+index\b/i.test(definition);
   const columnsMatch = /\(([^()]*)\)\s*(?:where\b.*)?$/i.exec(definition);
@@ -2515,8 +2555,20 @@ function indexDefinitionMatches(
   const actualColumns = columnsMatch[1]
     .split(",")
     .map((column) => column.trim().replaceAll('"', "").split(/\s+/u)[0]);
-  return actualColumns.length === expectedColumns.length &&
+  const columnsCompatible = actualColumns.length === expectedColumns.length &&
     actualColumns.every((column, index) => column === expectedColumns[index]);
+  if (!columnsCompatible) {
+    return false;
+  }
+  const actualWhereSql = /\bwhere\s+(.+)$/iu.exec(definition)?.[1];
+  if (expectedWhereSql === undefined) {
+    return actualWhereSql === undefined;
+  }
+  return actualWhereSql !== undefined && normalizeIndexPredicate(actualWhereSql) === normalizeIndexPredicate(expectedWhereSql);
+}
+
+function normalizeIndexPredicate(predicate: string): string {
+  return predicate.toLowerCase().replaceAll('"', "").replace(/[\s()]/gu, "");
 }
 
 function normalizeForeignKeyDefinition(definition: string): string {
@@ -2526,6 +2578,32 @@ function normalizeForeignKeyDefinition(definition: string): string {
     .replace(/\s+/gu, "")
     .replace(/\bonupdatenoaction\b/gu, "")
     .replace(/\bondeletenoaction\b/gu, "");
+}
+
+function triggerDefinitionMatches(
+  definition: string,
+  namespace: string,
+  expected: PostgresTriggerManifest
+): boolean {
+  const normalized = definition.toLowerCase().replaceAll('"', "").replace(/\s+/gu, " ").trim();
+  const prefix = `create trigger ${expected.name} ${expected.timing}`;
+  const tableClause = ` on ${namespace}.${expected.table} `;
+  if (
+    !normalized.startsWith(prefix) ||
+    !normalized.includes(tableClause) ||
+    !normalized.includes(`execute function ${namespace}.${expected.functionName}()`)
+  ) {
+    return false;
+  }
+  const eventClause = normalized.slice(prefix.length, normalized.indexOf(tableClause)).trim();
+  const expectedEventClause = expected.events
+    .map((event) =>
+      event === "update" && expected.updateColumns !== undefined
+        ? `update of ${expected.updateColumns.join(", ")}`
+        : event
+    )
+    .join(" or ");
+  return eventClause.split(" or ").sort().join(" or ") === expectedEventClause.split(" or ").sort().join(" or ");
 }
 
 function companyRow(company: AccountingCompany): Row {

@@ -42,6 +42,7 @@ describe("Future ERP canonical fact persistence", () => {
     expect(storage.calls.map((call) => call.method)).toEqual([
       "upsertAccountingCompany",
       "upsertAccountingSource",
+      "upsertCompanySourceBinding",
       "upsertImportBatch",
       "upsertSyncCheckpoint",
       "upsertAccounts",
@@ -122,7 +123,9 @@ describe("Future ERP canonical fact persistence", () => {
     expect(conflictTargetFor(client.calls, "transactions")).toBe(
       '"tenant_id", "source_id", "source_transaction_type", "source_transaction_id"'
     );
-    expect(conflictTargetFor(client.calls, "transaction_lines")).toBe('"tenant_id", "transaction_id", "line_number"');
+    expect(conflictTargetFor(client.calls, "transaction_lines")).toBe(
+      '"tenant_id", "source_id", "transaction_id", "line_number"'
+    );
     expect(conflictTargetFor(client.calls, "ledger_postings")).toBe(
       '"tenant_id", "source_id", "accounting_basis", "source_posting_id"'
     );
@@ -154,6 +157,10 @@ class RecordingFactStorage implements FutureErpCanonicalFactPersistenceStorage {
 
   upsertAccountingSource(): Promise<number> {
     return this.record("upsertAccountingSource", 1);
+  }
+
+  upsertCompanySourceBinding(): Promise<number> {
+    return this.record("upsertCompanySourceBinding", 1);
   }
 
   upsertImportBatch(): Promise<number> {

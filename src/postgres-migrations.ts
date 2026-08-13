@@ -56,7 +56,9 @@ export type MigratePostgresSchemaResult = PostgresMigrationPlan & {
 };
 
 export type PostgresMigrationHistoryIssueKind =
+  | "unversioned_schema"
   | "unknown_migration"
+  | "definition_mismatch"
   | "checksum_mismatch"
   | "non_contiguous_history"
   | "version_ahead_of_package";
@@ -104,6 +106,22 @@ const migrationFiles = {
   ),
   scopedIntegrityV9: new URL(
     "../migrations/future-erp/20260812020000_add_scoped_financial_integrity.sql",
+    import.meta.url
+  ),
+  auditLifecycleV10: new URL(
+    "../migrations/future-erp/20260812030000_add_financial_lifecycle_events.sql",
+    import.meta.url
+  ),
+  fiscalControlsV11: new URL(
+    "../migrations/future-erp/20260812040000_add_fiscal_period_controls.sql",
+    import.meta.url
+  ),
+  journalLifecycleV12: new URL(
+    "../migrations/future-erp/20260812050000_add_journal_lifecycle_links.sql",
+    import.meta.url
+  ),
+  atomicSubledgersV13: new URL(
+    "../migrations/future-erp/20260812060000_add_atomic_subledgers.sql",
     import.meta.url
   )
 } as const;
@@ -154,6 +172,34 @@ export const POSTGRES_MIGRATIONS: readonly PostgresMigrationDefinition[] = [
     8,
     9,
     migrationFiles.scopedIntegrityV9
+  ),
+  migration(
+    "20260812030000_add_financial_lifecycle_events",
+    "Add immutable financial authorization and lifecycle events",
+    9,
+    10,
+    migrationFiles.auditLifecycleV10
+  ),
+  migration(
+    "20260812040000_add_fiscal_period_controls",
+    "Add fiscal periods, posting locks, and close controls",
+    10,
+    11,
+    migrationFiles.fiscalControlsV11
+  ),
+  migration(
+    "20260812050000_add_journal_lifecycle_links",
+    "Add immutable journal reversal and replacement links",
+    11,
+    12,
+    migrationFiles.journalLifecycleV12
+  ),
+  migration(
+    "20260812060000_add_atomic_subledgers",
+    "Add atomic subledger documents and applications",
+    12,
+    13,
+    migrationFiles.atomicSubledgersV13
   )
 ] as const;
 
@@ -163,6 +209,10 @@ export async function planPostgresMigrations(
 ): Promise<PostgresMigrationPlan> {
   assertMigrationRegistry(POSTGRES_MIGRATIONS);
   const appliedMigrations = await loadAppliedMigrationsIfPresent(client);
+  const historyValidation = validateMigrationRows(appliedMigrations, POSTGRES_MIGRATIONS);
+  if (!historyValidation.compatible) {
+    throw migrationHistoryDriftError(historyValidation.issues);
+  }
   const detectedVersion =
     appliedMigrations.length === 0 ? await detectLegacySchemaVersion(client) : latestAppliedVersion(appliedMigrations);
   const targetVersion = options.targetVersion ?? POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion;
@@ -199,7 +249,16 @@ export async function migratePostgresSchema(
     let adoptedBaselineVersion: number | undefined;
 
     if (appliedMigrations.length === 0 && initialVersion > 0) {
-      if (initialVersion !== 6 && initialVersion !== 7 && initialVersion !== 8 && initialVersion !== 9) {
+      if (
+        initialVersion !== 6 &&
+        initialVersion !== 7 &&
+        initialVersion !== 8 &&
+        initialVersion !== 9 &&
+        initialVersion !== 10 &&
+        initialVersion !== 11 &&
+        initialVersion !== 12 &&
+        initialVersion !== 13
+      ) {
         throw new PostgresMigrationError(
           "unsupported_legacy_schema",
           `Cannot adopt unversioned ERP Financials schema version ${String(initialVersion)}`
@@ -212,10 +271,7 @@ export async function migratePostgresSchema(
 
     const historyValidation = validateMigrationRows(appliedMigrations, POSTGRES_MIGRATIONS);
     if (!historyValidation.compatible) {
-      throw new PostgresMigrationError(
-        "migration_history_drift",
-        historyValidation.issues.map((issue) => issue.message).join("; ")
-      );
+      throw migrationHistoryDriftError(historyValidation.issues);
     }
 
     const currentVersion = appliedMigrations.length === 0 ? initialVersion : latestAppliedVersion(appliedMigrations);
@@ -231,12 +287,14 @@ export async function migratePostgresSchema(
       );
     }
 
-    const schemaValidation = await validatePostgresSchema(client);
-    if (!schemaValidation.compatible) {
-      throw new PostgresMigrationError(
-        "schema_validation_failed",
-        schemaValidationMessage(schemaValidation.issues)
-      );
+    if (targetVersion === POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion) {
+      const schemaValidation = await validatePostgresSchema(client);
+      if (!schemaValidation.compatible) {
+        throw new PostgresMigrationError(
+          "schema_validation_failed",
+          schemaValidationMessage(schemaValidation.issues)
+        );
+      }
     }
 
     return {
@@ -257,7 +315,26 @@ export async function validatePostgresMigrationHistory(
 ): Promise<PostgresMigrationHistoryValidation> {
   assertMigrationRegistry(POSTGRES_MIGRATIONS);
   const appliedMigrations = await loadAppliedMigrationsIfPresent(client);
-  return validateMigrationRows(appliedMigrations, POSTGRES_MIGRATIONS);
+  const validation = validateMigrationRows(appliedMigrations, POSTGRES_MIGRATIONS);
+  if (appliedMigrations.length > 0) {
+    return validation;
+  }
+  const detectedVersion = await detectLegacySchemaVersion(client);
+  if (detectedVersion === 0) {
+    return validation;
+  }
+  return {
+    ...validation,
+    compatible: false,
+    currentVersion: detectedVersion,
+    issues: [
+      {
+        kind: "unversioned_schema",
+        migrationId: `unversioned:v${String(detectedVersion)}`,
+        message: `ERP Financials schema v${String(detectedVersion)} exists without migration history; run migratePostgresSchema to adopt it`
+      }
+    ]
+  };
 }
 
 function validateMigrationRows(
@@ -279,6 +356,18 @@ function validateMigrationRows(
     expectedFromVersion = applied.toVersion;
 
     if (applied.baseline) {
+      const expectedBaselineId = `baseline:v${String(applied.toVersion)}`;
+      if (
+        applied.migrationId !== expectedBaselineId ||
+        applied.fromVersion !== 0 ||
+        applied.checksum !== sha256(`${expectedBaselineId}:${namespace}`)
+      ) {
+        issues.push({
+          kind: "definition_mismatch",
+          migrationId: applied.migrationId,
+          message: `Baseline migration ${applied.migrationId} does not match its immutable package identity`
+        });
+      }
       continue;
     }
     const definition = registryById.get(applied.migrationId);
@@ -295,6 +384,17 @@ function validateMigrationRows(
         kind: "checksum_mismatch",
         migrationId: applied.migrationId,
         message: `Applied migration ${applied.migrationId} checksum does not match the immutable package migration`
+      });
+    }
+    if (
+      definition.fromVersion !== applied.fromVersion ||
+      definition.toVersion !== applied.toVersion ||
+      definition.name !== applied.name
+    ) {
+      issues.push({
+        kind: "definition_mismatch",
+        migrationId: applied.migrationId,
+        message: `Applied migration ${applied.migrationId} version bounds or name do not match the package registry`
       });
     }
   }
@@ -318,18 +418,41 @@ function validateMigrationRows(
   };
 }
 
+function migrationHistoryDriftError(
+  issues: readonly PostgresMigrationHistoryIssue[]
+): PostgresMigrationError {
+  return new PostgresMigrationError(
+    "migration_history_drift",
+    issues.map((issue) => issue.message).join("; ")
+  );
+}
+
 function assertMigrationRegistry(registry: readonly PostgresMigrationDefinition[]): void {
   const ids = new Set<string>();
   const fromVersions = new Set<number>();
+  const toVersions = new Set<number>();
+  let expectedFromVersion = 0;
   for (const entry of registry) {
-    if (ids.has(entry.migrationId) || fromVersions.has(entry.fromVersion)) {
+    if (ids.has(entry.migrationId) || fromVersions.has(entry.fromVersion) || toVersions.has(entry.toVersion)) {
       throw new PostgresMigrationError("invalid_registry", `Duplicate migration path entry ${entry.migrationId}`);
     }
-    if (entry.fromVersion < 0 || entry.toVersion <= entry.fromVersion || !/^[a-f0-9]{64}$/.test(entry.checksum)) {
+    if (
+      entry.fromVersion !== expectedFromVersion ||
+      entry.toVersion <= entry.fromVersion ||
+      !/^[a-f0-9]{64}$/.test(entry.checksum)
+    ) {
       throw new PostgresMigrationError("invalid_registry", `Invalid migration definition ${entry.migrationId}`);
     }
     ids.add(entry.migrationId);
     fromVersions.add(entry.fromVersion);
+    toVersions.add(entry.toVersion);
+    expectedFromVersion = entry.toVersion;
+  }
+  if (expectedFromVersion !== POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion) {
+    throw new PostgresMigrationError(
+      "invalid_registry",
+      `Migration registry ends at v${String(expectedFromVersion)} instead of canonical schema v${String(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion)}`
+    );
   }
 }
 
@@ -394,7 +517,21 @@ order by table_name, column_name`,
       [namespace]
     );
     if (v9Columns.rows.length === 5 && (await relationExists(client, `${namespace}.company_sources`))) {
-      return 9;
+      if (!(await relationExists(client, `${namespace}.financial_lifecycle_events`))) {
+        return 9;
+      }
+      const hasFiscalControls = (await relationExists(client, `${namespace}.fiscal_periods`)) &&
+        (await relationExists(client, `${namespace}.accounting_book_controls`))
+      if (!hasFiscalControls) {
+        return 10;
+      }
+      if (!(await relationExists(client, `${namespace}.journal_entry_links`))) {
+        return 11;
+      }
+      return (await relationExists(client, `${namespace}.subledger_documents`)) &&
+        (await relationExists(client, `${namespace}.subledger_applications`))
+        ? 13
+        : 12;
     }
     // An empty ledger can exist after an interrupted/manual bootstrap. The
     // ledger itself is the v8 change, but without a durable migration row we
@@ -426,7 +563,7 @@ async function relationExists(client: PostgresQueryClient, relation: string): Pr
 }
 
 async function loadAppliedMigrations(client: PostgresQueryClient): Promise<readonly AppliedPostgresMigration[]> {
-  const result = await client.query<Record<string, unknown>>(
+  const result = await client.query(
     `select "migration_id", "from_version", "to_version", "name", "checksum", "manifest_version", "execution_ms", "applied_by_ref", "applied_at"
 from "${namespace}"."schema_migrations"
 order by "to_version", "migration_id"`
@@ -457,7 +594,7 @@ async function recordMigration(
   executionMs: number,
   appliedByRef: string
 ): Promise<AppliedPostgresMigration> {
-  const result = await client.query<Record<string, unknown>>(
+  const result = await client.query(
     `insert into "${namespace}"."schema_migrations" (
   "migration_id", "from_version", "to_version", "name", "checksum", "manifest_version", "execution_ms", "applied_by_ref"
 ) values ($1, $2, $3, $4, $5, $6, $7, $8)

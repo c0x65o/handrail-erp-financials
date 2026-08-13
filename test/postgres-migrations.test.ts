@@ -5,7 +5,8 @@ import {
   POSTGRES_MIGRATIONS,
   PostgresMigrationError,
   migratePostgresSchema,
-  planPostgresMigrations
+  planPostgresMigrations,
+  validatePostgresMigrationHistory
 } from "../src/index.js";
 
 import type {
@@ -17,11 +18,13 @@ import type {
 } from "../src/index.js";
 
 type CatalogRow = {
-  readonly object_type: "schema" | "table" | "column" | "index" | "constraint";
+  readonly object_type: "schema" | "table" | "column" | "index" | "constraint" | "trigger";
   readonly table_name: string | null;
   readonly object_name: string;
   readonly data_type?: string | null;
   readonly is_nullable?: string | null;
+  readonly definition?: string | null;
+  readonly enabled?: boolean | null;
 };
 
 type DatabaseState = {
@@ -36,7 +39,11 @@ describe("Postgres schema migrations", () => {
       [0, 6],
       [6, 7],
       [7, 8],
-      [8, 9]
+      [8, 9],
+      [9, 10],
+      [10, 11],
+      [11, 12],
+      [12, 13]
     ]);
     expect(POSTGRES_MIGRATIONS.every((entry) => /^[a-f0-9]{64}$/.test(entry.checksum))).toBe(true);
     expect(new Set(POSTGRES_MIGRATIONS.map((entry) => entry.migrationId)).size).toBe(
@@ -50,7 +57,7 @@ describe("Postgres schema migrations", () => {
     const plan = await planPostgresMigrations(client);
 
     expect(plan.currentVersion).toBe(0);
-    expect(plan.targetVersion).toBe(9);
+    expect(plan.targetVersion).toBe(13);
     expect(plan.requiresBaselineAdoption).toBe(false);
     expect(plan.pendingMigrations).toEqual(POSTGRES_MIGRATIONS);
     expect(client.calls.some((call) => call.includes("pg_advisory_xact_lock"))).toBe(false);
@@ -64,15 +71,19 @@ describe("Postgres schema migrations", () => {
     const result = await migratePostgresSchema(runner, { appliedByRef: "deploy:future-erp:42" });
 
     expect(result.currentVersion).toBe(0);
-    expect(result.targetVersion).toBe(9);
+    expect(result.targetVersion).toBe(13);
     expect(result.adoptedBaselineVersion).toBeUndefined();
     expect(result.applied.map((entry) => [entry.fromVersion, entry.toVersion])).toEqual([
       [0, 6],
       [6, 7],
       [7, 8],
-      [8, 9]
+      [8, 9],
+      [9, 10],
+      [10, 11],
+      [11, 12],
+      [12, 13]
     ]);
-    expect(client.state.version).toBe(9);
+    expect(client.state.version).toBe(13);
     expect(client.state.ledger.map((entry) => entry.migrationId)).toEqual(
       POSTGRES_MIGRATIONS.map((entry) => entry.migrationId)
     );
@@ -104,7 +115,17 @@ describe("Postgres schema migrations", () => {
 
     expect(plan.currentVersion).toBe(7);
     expect(plan.requiresBaselineAdoption).toBe(true);
-    expect(plan.pendingMigrations.map((entry) => entry.toVersion)).toEqual([8, 9]);
+    expect(plan.pendingMigrations.map((entry) => entry.toVersion)).toEqual([8, 9, 10, 11, 12, 13]);
+  });
+
+  it("reports an existing unversioned schema as requiring baseline adoption", async () => {
+    const client = new MigrationClient({ version: 6, ledgerExists: false, ledger: [] });
+
+    await expect(validatePostgresMigrationHistory(client)).resolves.toMatchObject({
+      compatible: false,
+      currentVersion: 6,
+      issues: [{ kind: "unversioned_schema", migrationId: "unversioned:v6" }]
+    });
   });
 
   it("fails closed on checksum drift and rolls back the transaction", async () => {
@@ -127,6 +148,25 @@ describe("Postgres schema migrations", () => {
     expect(runner.rollbacks).toBe(1);
     expect(client.state.version).toBe(6);
     expect(client.state.ledger).toHaveLength(1);
+  });
+
+  it("fails a read-only plan when stored migration identity metadata drifts", async () => {
+    const firstMigration = POSTGRES_MIGRATIONS[0];
+    if (firstMigration === undefined) {
+      throw new Error("migration fixture requires a bootstrap migration");
+    }
+    const client = new MigrationClient({
+      version: 7,
+      ledgerExists: true,
+      ledger: [appliedRow(firstMigration, { toVersion: 7, name: "tampered migration name" })]
+    });
+
+    await expect(planPostgresMigrations(client)).rejects.toMatchObject({
+      code: "migration_history_drift"
+    } satisfies Partial<PostgresMigrationError>);
+    const validation = await validatePostgresMigrationHistory(client);
+    expect(validation.compatible).toBe(false);
+    expect(validation.issues.some((issue) => issue.kind === "definition_mismatch")).toBe(true);
   });
 
   it("rolls back schema and ledger changes when an upgrade statement fails", async () => {
@@ -179,7 +219,7 @@ class MigrationClient implements PostgresQueryClient {
   ): Promise<PostgresQueryResult<Row>> {
     this.calls.push(sql);
 
-    if (sql.includes("pg_advisory_xact_lock")) {
+    if (sql.startsWith("select pg_advisory_xact_lock")) {
       return this.result<Row>([]);
     }
 
@@ -192,6 +232,14 @@ class MigrationClient implements PostgresQueryClient {
             ? this.state.ledgerExists
             : relation === "erp_financials.company_sources"
               ? this.state.version >= 9
+              : relation === "erp_financials.financial_lifecycle_events"
+                ? this.state.version >= 10
+                : relation === "erp_financials.fiscal_periods" || relation === "erp_financials.accounting_book_controls"
+                  ? this.state.version >= 11
+                  : relation === "erp_financials.journal_entry_links"
+                    ? this.state.version >= 12
+                    : relation === "erp_financials.subledger_documents" || relation === "erp_financials.subledger_applications"
+                      ? this.state.version >= 13
             : false;
       return this.result<Row>([{ relation_name: exists ? relation : null }]);
     }
@@ -334,6 +382,17 @@ function catalogRowsForManifest(manifest: PostgresSchemaManifest): readonly Cata
         table_name: table.name,
         object_name: constraintName
       }))
-    ])
+    ]),
+    ...manifest.requiredTriggers.map((trigger) => ({
+      object_type: "trigger" as const,
+      table_name: trigger.table,
+      object_name: trigger.name,
+      enabled: true,
+      definition: `create trigger ${trigger.name} ${trigger.timing} ${trigger.events
+        .map((event) => event === "update" && trigger.updateColumns !== undefined
+          ? `update of ${trigger.updateColumns.join(", ")}`
+          : event)
+        .join(" or ")} on ${manifest.namespace}.${trigger.table} for each row execute function ${manifest.namespace}.${trigger.functionName}()`
+    }))
   ];
 }

@@ -68,6 +68,20 @@ export {
   createPostgresTransactionRunner
 } from "./erp-financials-service.js";
 export {
+  FinancialLifecycleIdempotencyConflictError,
+  appendFinancialLifecycleEvent,
+  assertFinancialOperationContext,
+  assertIndependentApproval
+} from "./financial-lifecycle.js";
+export {
+  FiscalPeriodConcurrencyError,
+  FiscalPeriodValidationError,
+  PostingDateLockedError,
+  assertPostingDateAllowed,
+  createFiscalCloseEvidenceChecksum,
+  createFiscalPeriodService
+} from "./fiscal-periods.js";
+export {
   CORE_ERP_PERSISTENCE_EVIDENCE_DEFAULT_CHANGED_RESOURCE_LIMIT,
   CORE_ERP_PERSISTENCE_EVIDENCE_DEFAULT_DRILLDOWN_POSTING_LIMIT,
   CORE_ERP_PERSISTENCE_EVIDENCE_DEFAULT_FRESHNESS_ROW_LIMIT,
@@ -218,6 +232,28 @@ export type {
   PostgresMigrationTransactionRunner
 } from "./postgres-migrations.js";
 export type {
+  AppendFinancialLifecycleEventInput,
+  FinancialLifecycleEventResult,
+  FinancialLifecycleScope,
+  FinancialOperationContext
+} from "./financial-lifecycle.js";
+export type {
+  BeginFiscalPeriodCloseInput,
+  CloseFiscalPeriodInput,
+  DefineFiscalPeriodInput,
+  FiscalCloseEvidence,
+  FiscalCloseEvidenceMaterial,
+  FiscalPeriodResult,
+  FiscalPeriodScope,
+  FiscalPeriodService,
+  FiscalPeriodServiceContext,
+  FiscalPeriodStatus,
+  FiscalPeriodTransactionRunner,
+  PostingLockDateResult,
+  ReopenFiscalPeriodInput,
+  SetPostingLockDateInput
+} from "./fiscal-periods.js";
+export type {
   Account,
   AccountClassification,
   AccountStatus,
@@ -348,7 +384,8 @@ export type {
   PostgresConstraintManifest,
   PostgresIndexManifest,
   PostgresSchemaManifest,
-  PostgresTableManifest
+  PostgresTableManifest,
+  PostgresTriggerManifest
 } from "./schema-manifest.js";
 export type {
   FixtureLoadResult,
@@ -425,6 +462,10 @@ export type {
 } from "./canonical-fact-persistence.js";
 export type {
   CreateErpFinancialsInput,
+  CreateInvoiceInput,
+  CreateVendorBillInput,
+  ApplySubledgerPaymentInput,
+  EndSubledgerApplicationInput,
   ErpFinancials,
   ErpFinancialsAccountDefinition,
   ErpFinancialsAccountReference,
@@ -433,10 +474,25 @@ export type {
   ErpFinancialsPostgresPool,
   ErpFinancialsPostgresTransactionClient,
   ErpFinancialsTransactionRunner,
+  JournalEntryLifecycleResult,
   JournalEntryWriteCounts,
+  IssueCreditMemoInput,
+  IssueRefundInput,
   PostJournalEntryInput,
   PostJournalEntryLineInput,
   PostJournalEntryResult,
+  ReplaceJournalEntryInput,
+  RecordBillPaymentInput,
+  RecordCustomerPaymentInput,
+  RecordDepositInput,
+  RecordTransferInput,
+  RecordWriteOffInput,
+  ReverseJournalEntryInput,
+  SubledgerAmountLine,
+  SubledgerApplicationResult,
+  SubledgerApplicationType,
+  SubledgerDocumentResult,
+  SubledgerDocumentType,
   UpsertAccountTreeInput,
   UpsertAccountTreeResult
 } from "./erp-financials-service.js";

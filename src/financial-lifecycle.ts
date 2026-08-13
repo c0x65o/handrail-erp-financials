@@ -43,7 +43,15 @@ type StoredLifecycleRow = Record<string, unknown> & {
   readonly aggregate_type?: unknown;
   readonly aggregate_id?: unknown;
   readonly event_type?: unknown;
+  readonly actor_ref?: unknown;
+  readonly approver_ref?: unknown;
+  readonly request_id?: unknown;
+  readonly correlation_id?: unknown;
+  readonly reason_code?: unknown;
+  readonly reason_detail?: unknown;
+  readonly occurred_at?: unknown;
   readonly payload_checksum?: unknown;
+  readonly prior_event_id?: unknown;
 };
 
 export class FinancialLifecycleIdempotencyConflictError extends Error {
@@ -136,7 +144,8 @@ returning "event_id", "aggregate_type", "aggregate_id", "event_type", "payload_c
   }
 
   const existing = await client.query<StoredLifecycleRow>(
-    `select "event_id", "aggregate_type", "aggregate_id", "event_type", "payload_checksum"
+    `select "event_id", "aggregate_type", "aggregate_id", "event_type", "actor_ref", "approver_ref",
+  "request_id", "correlation_id", "reason_code", "reason_detail", "occurred_at", "payload_checksum", "prior_event_id"
 from "erp_financials"."financial_lifecycle_events"
 where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3 and "idempotency_key" = $4
 for key share`,
@@ -149,11 +158,28 @@ for key share`,
     row.aggregate_type !== input.aggregateType ||
     row.aggregate_id !== input.aggregateId ||
     row.event_type !== input.eventType ||
-    row.payload_checksum !== payloadChecksum
+    row.actor_ref !== input.operation.actorRef ||
+    normalizeNullable(row.approver_ref) !== normalizeNullable(input.operation.approverRef) ||
+    row.request_id !== input.operation.requestId ||
+    row.correlation_id !== input.operation.correlationId ||
+    row.reason_code !== input.operation.reasonCode ||
+    normalizeNullable(row.reason_detail) !== normalizeNullable(input.operation.reasonDetail) ||
+    normalizeDateTime(row.occurred_at) !== normalizeDateTime(input.operation.occurredAt) ||
+    row.payload_checksum !== payloadChecksum ||
+    normalizeNullable(row.prior_event_id) !== normalizeNullable(input.priorEventId)
   ) {
     throw new FinancialLifecycleIdempotencyConflictError(input.idempotencyKey);
   }
   return { eventId, status: "already_recorded", payloadChecksum };
+}
+
+function normalizeNullable(value: unknown): string | null | undefined {
+  return value === undefined || value === null ? null : typeof value === "string" ? value : undefined;
+}
+
+function normalizeDateTime(value: unknown): string | undefined {
+  const parsed = value instanceof Date ? value : typeof value === "string" ? new Date(value) : undefined;
+  return parsed === undefined || Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
 }
 
 function lifecycleEventId(input: AppendFinancialLifecycleEventInput, payloadChecksum: string): string {

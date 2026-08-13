@@ -50,6 +50,7 @@ type ReplaySnapshotLine = {
 type ReplayWriteMethod =
   | "upsertAccountingCompany"
   | "upsertAccountingSource"
+  | "upsertCompanySourceBinding"
   | "upsertImportBatch"
   | "upsertSyncCheckpoint"
   | "upsertAccounts"
@@ -65,6 +66,7 @@ type ReplayWriteMethod =
 type ReplayWriteEntity =
   | "companies"
   | "sources"
+  | "company_sources"
   | "import_batches"
   | "checkpoints"
   | "accounts"
@@ -87,6 +89,7 @@ type QueryCall = {
 const EXPECTED_REPLAY_WRITE_ENTITIES: readonly ReplayWriteEntity[] = [
   "companies",
   "sources",
+  "company_sources",
   "import_batches",
   "checkpoints",
   "accounts",
@@ -243,6 +246,7 @@ describe("Future ERP QuickBooks sandbox replay orchestration", () => {
     expect(firstQueryTables).toEqual([
       "accounting_companies",
       "accounting_sources",
+      "company_sources",
       "import_batches",
       "sync_checkpoints",
       "accounts",
@@ -261,17 +265,14 @@ describe("Future ERP QuickBooks sandbox replay orchestration", () => {
         "report_freshness"
       ])
     ]);
-    expect(insertedRowsForTable(firstQueryCalls, "import_batches")).toEqual([
-      expect.objectContaining({
-        import_batch_id: first.importBatchId,
-        status: "completed",
-        source_object_counts: expect.objectContaining({
-          accounts: 2,
-          journalEntries: 1,
-          ledgerPostings: 2
-        })
-      })
-    ]);
+    const importBatchRows = insertedRowsForTable(firstQueryCalls, "import_batches");
+    expect(importBatchRows).toHaveLength(1);
+    expect(importBatchRows[0]).toMatchObject({ import_batch_id: first.importBatchId, status: "completed" });
+    expect(requiredRecord(importBatchRows[0]?.source_object_counts, "source_object_counts")).toMatchObject({
+      accounts: 2,
+      journalEntries: 1,
+      ledgerPostings: 2
+    });
     expect(insertedRowsForTable(firstQueryCalls, "sync_checkpoints")).toEqual([
       expect.objectContaining({
         checkpoint_id: first.checkpointId,
@@ -282,45 +283,39 @@ describe("Future ERP QuickBooks sandbox replay orchestration", () => {
         status: "current"
       })
     ]);
-    expect(insertedRowsForTable(firstQueryCalls, "ledger_postings")).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          import_batch_id: first.importBatchId,
-          checkpoint_id: first.checkpointId,
-          source_payload_ref: expect.objectContaining({
-            storageRef: expect.stringMatching(/^quickbooks-sdk:\/\/sandbox\/realm\/realm_qbo_sync_fixture\//)
-          })
-        })
-      ])
-    );
-    expect(insertedRowsForTable(firstQueryCalls, "report_freshness")).toEqual(
-      expect.arrayContaining(
-        REPORT_NAMES.map((reportName) =>
-          expect.objectContaining({
-            freshness_id: first.freshnessIds[reportName],
-            report_name: reportName,
-            status: "fresh",
-            import_batch_id: first.importBatchId,
-            checkpoint_id: first.checkpointId
-          })
-        )
-      )
-    );
-    expect(insertedRowsForTable(firstQueryCalls, "report_snapshots")).toEqual(
-      expect.arrayContaining(
-        REPORT_NAMES.map((reportName) =>
-          expect.objectContaining({
-            report_snapshot_id: first.snapshotIds[reportName],
-            report_name: reportName,
-            freshness: expect.objectContaining({
-              status: "fresh",
-              importBatchId: first.importBatchId,
-              checkpointId: first.checkpointId
-            })
-          })
-        )
-      )
-    );
+    const postingRows = insertedRowsForTable(firstQueryCalls, "ledger_postings");
+    expect(
+      postingRows.some((row) => {
+        const sourcePayloadRef = requiredRecord(row.source_payload_ref, "source_payload_ref");
+        return (
+          row.import_batch_id === first.importBatchId &&
+          row.checkpoint_id === first.checkpointId &&
+          typeof sourcePayloadRef.storageRef === "string" &&
+          /^quickbooks-sdk:\/\/sandbox\/realm\/realm_qbo_sync_fixture\//u.test(sourcePayloadRef.storageRef)
+        );
+      })
+    ).toBe(true);
+    const freshnessRows = insertedRowsForTable(firstQueryCalls, "report_freshness");
+    const snapshotRows = insertedRowsForTable(firstQueryCalls, "report_snapshots");
+    for (const reportName of REPORT_NAMES) {
+      expect(freshnessRows.find((row) => row.report_name === reportName)).toMatchObject({
+        freshness_id: first.freshnessIds[reportName],
+        report_name: reportName,
+        status: "fresh",
+        import_batch_id: first.importBatchId,
+        checkpoint_id: first.checkpointId
+      });
+      const snapshot = snapshotRows.find((row) => row.report_name === reportName);
+      expect(snapshot).toMatchObject({
+        report_snapshot_id: first.snapshotIds[reportName],
+        report_name: reportName
+      });
+      expect(requiredRecord(snapshot?.freshness, "freshness")).toMatchObject({
+        status: "fresh",
+        importBatchId: first.importBatchId,
+        checkpointId: first.checkpointId
+      });
+    }
     expect(insertQueries(client.calls).every((call) => call.sql.includes("on conflict"))).toBe(true);
     expect(first.snapshotIds).toEqual(second.snapshotIds);
     expect(first.freshnessIds).toEqual(second.freshnessIds);
@@ -462,6 +457,14 @@ function recordReplayStorage(base: PostgresStorageAdapter): {
     async upsertAccountingSource(...args) {
       calls.push({ method: "upsertAccountingSource", entity: "sources", ids: [args[0].sourceId] });
       return base.upsertAccountingSource(...args);
+    },
+    async upsertCompanySourceBinding(...args) {
+      calls.push({
+        method: "upsertCompanySourceBinding",
+        entity: "company_sources",
+        ids: [args[0].companySourceId]
+      });
+      return base.upsertCompanySourceBinding(...args);
     },
     async upsertImportBatch(...args) {
       calls.push({ method: "upsertImportBatch", entity: "import_batches", ids: [args[0].importBatchId] });
@@ -715,6 +718,9 @@ function withSinglePostingAmount(
     throw new Error(`expected normalized QuickBooks line ${line.sourceLineId ?? String(line.lineNumber)} to have a posting`);
   }
   const { debitAmount, creditAmount, netAmount, ...postingWithoutAmounts } = posting;
+  void debitAmount;
+  void creditAmount;
+  void netAmount;
 
   return {
     ...line,
@@ -745,6 +751,9 @@ function derivedRevenueLine(
     throw new Error(`expected normalized QuickBooks line ${base.sourceLineId ?? String(base.lineNumber)} to have a posting`);
   }
   const { debitAmount, creditAmount, netAmount, ...postingWithoutAmounts } = posting;
+  void debitAmount;
+  void creditAmount;
+  void netAmount;
   const sourcePayloadRef = safeQboSourcePayloadRef("JournalEntryLine", input.sourcePostingId, "2026-01-15T16:00:00.000Z", {
     lineNumber: input.lineNumber
   });
@@ -899,6 +908,13 @@ function insertedRowsFromCall(call: QueryCall): readonly Record<string, unknown>
     rows.push(Object.fromEntries(columns.map((column, index) => [column, call.params[offset + index]])));
   }
   return rows;
+}
+
+function requiredRecord(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`expected ${label} to be a record`);
+  }
+  return value as Record<string, unknown>;
 }
 
 function requiredSafeLineRef(

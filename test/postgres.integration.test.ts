@@ -1,0 +1,443 @@
+import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { Pool } from "pg";
+
+import {
+  POSTGRES_CANONICAL_SCHEMA_MANIFEST,
+  migratePostgresSchema,
+  validatePostgresMigrationHistory,
+  validatePostgresSchema
+} from "../src/index.js";
+
+import type {
+  PostgresMigrationTransactionRunner,
+  PostgresQueryClient,
+  PostgresQueryResult
+} from "../src/index.js";
+import type { PoolClient, QueryResultRow } from "pg";
+
+const databaseUrl = process.env.ERP_FINANCIALS_TEST_DATABASE_URL;
+const runIntegration = databaseUrl !== undefined;
+const describeIntegration = runIntegration ? describe.sequential : describe.skip;
+
+describeIntegration("ERP Financials real PostgreSQL", () => {
+  const safeDatabaseUrl = requiredSafeTestDatabaseUrl(databaseUrl);
+  const pool = new Pool({ connectionString: safeDatabaseUrl, max: 6 });
+  const runner = new PgTransactionRunner(pool);
+
+  beforeEach(async () => {
+    await pool.query('drop schema if exists "erp_financials" cascade');
+  });
+
+  afterAll(async () => {
+    await pool.query('drop schema if exists "erp_financials" cascade');
+    await pool.end();
+  });
+
+  it("migrates a blank database transactionally and validates schema plus immutable migration history", async () => {
+    const result = await migratePostgresSchema(runner, { appliedByRef: "integration:blank-install" });
+    const client = new PgQueryClient(pool);
+    const schema = await validatePostgresSchema(client);
+    const history = await validatePostgresMigrationHistory(client);
+
+    expect(result.targetVersion).toBe(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion);
+    expect(result.applied.at(-1)?.toVersion).toBe(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion);
+    expect(schema).toMatchObject({ compatible: true, fixtureSupport: true, issues: [] });
+    expect(history).toMatchObject({ compatible: true, currentVersion: 13, issues: [] });
+    await expect(
+      pool.query("update erp_financials.schema_migrations set name = 'tampered' where to_version = 13")
+    ).rejects.toThrow("schema migration history is append-only");
+  });
+
+  it("upgrades a real v6 database through the scoped v7 migration before continuing", async () => {
+    await migratePostgresSchema(runner, { appliedByRef: "integration:v6", targetVersion: 6 });
+    await expect(snapshotScopeColumns(pool)).resolves.toEqual([]);
+
+    const v7 = await migratePostgresSchema(runner, { appliedByRef: "integration:v7", targetVersion: 7 });
+
+    expect(v7.currentVersion).toBe(6);
+    expect(v7.applied.map((migration) => migration.toVersion)).toEqual([7]);
+    await expect(snapshotScopeColumns(pool)).resolves.toEqual(["company_id", "source_id"]);
+  });
+
+  it("rolls back every DDL and ledger row when an ordered migration fails", async () => {
+    const failingRunner: PostgresMigrationTransactionRunner = {
+      transaction: (work) =>
+        runner.transaction((client) =>
+          work(new FailingMigrationClient(client, 'create table "erp_financials"."company_sources"'))
+        )
+    };
+
+    await expect(
+      migratePostgresSchema(failingRunner, { appliedByRef: "integration:rollback" })
+    ).rejects.toThrow("injected real migration failure");
+
+    const relation = await pool.query<{ relation_name: string | null }>(
+      "select to_regclass('erp_financials.report_snapshots') as relation_name"
+    );
+    expect(relation.rows[0]?.relation_name).toBeNull();
+  });
+
+  it("enforces scoped foreign keys, posting arithmetic, and immutable posted journal facts", async () => {
+    await migratePostgresSchema(runner, { appliedByRef: "integration:constraints" });
+    await seedAccountingScope(pool);
+
+    await pool.query(`
+insert into erp_financials.transactions (
+  transaction_id, tenant_id, source_id, source_transaction_id, source_transaction_type, transaction_date,
+  posted_at, updated_at, currency_code, status, source_payload_ref
+) values
+  ('journal_reversal_1', 'tenant_1', 'source_1', 'reversal:1', 'JournalEntryAdjustment', '2026-08-02', now(), now(), 'USD', 'posted', '{}'::jsonb),
+  ('journal_reversal_2', 'tenant_1', 'source_1', 'reversal:2', 'JournalEntryAdjustment', '2026-08-03', now(), now(), 'USD', 'posted', '{}'::jsonb);
+insert into erp_financials.financial_lifecycle_events values
+  ('event_reversal_1', 'tenant_1', 'company_1', 'source_1', 'journal_entry', 'journal_1', 'reversed', 'user:1', 'user:2', 'request:r1', 'correlation:r', 'test', null, now(), now(), 'event_reversal_1', repeat('a',64), '{}'::jsonb, null),
+  ('event_reversal_2', 'tenant_1', 'company_1', 'source_1', 'journal_entry', 'journal_1', 'voided', 'user:1', 'user:2', 'request:r2', 'correlation:r', 'test', null, now(), now(), 'event_reversal_2', repeat('a',64), '{}'::jsonb, null);
+insert into erp_financials.journal_entry_links values
+  ('link_reversal_1', 'tenant_1', 'company_1', 'source_1', 'journal_1', 'journal_reversal_1', 'reversal', 'event_reversal_1', now());
+`);
+    await expect(
+      pool.query(
+        "insert into erp_financials.journal_entry_links values ('link_reversal_2', 'tenant_1', 'company_1', 'source_1', 'journal_1', 'journal_reversal_2', 'void', 'event_reversal_2', now())"
+      )
+    ).rejects.toMatchObject({ code: "23505" });
+
+    await expect(
+      pool.query(
+        `insert into erp_financials.accounts (
+  account_id, tenant_id, source_id, source_account_id, name, type, classification, parent_account_id, active
+) values ('account_cross_scope', 'tenant_1', 'source_2', 'cross', 'Cross scope', 'asset', 'asset', 'account_cash', true)`
+      )
+    ).rejects.toMatchObject({ code: "23503" });
+
+    await expect(
+      pool.query(
+        `insert into erp_financials.ledger_postings (
+  posting_id, tenant_id, source_id, source_posting_id, transaction_id, transaction_line_id, account_id,
+  posting_date, accounting_basis, debit_amount, credit_amount, net_amount, currency_code, dimension_hash,
+  dimension_refs, import_batch_id
+) values (
+  'posting_bad', 'tenant_1', 'source_1', 'bad', 'journal_1', 'line_1', 'account_cash',
+  '2026-08-01', 'accrual', 10, 2, 8, 'USD', repeat('a', 64), '[]'::jsonb, 'batch_1'
+)`
+      )
+    ).rejects.toMatchObject({ code: "23514" });
+
+    await pool.query(
+      `insert into erp_financials.ledger_postings (
+  posting_id, tenant_id, source_id, source_posting_id, transaction_id, transaction_line_id, account_id,
+  posting_date, accounting_basis, debit_amount, credit_amount, net_amount, currency_code, dimension_hash,
+  dimension_refs, import_batch_id
+) values (
+  'posting_1', 'tenant_1', 'source_1', 'good', 'journal_1', 'line_1', 'account_cash',
+  '2026-08-01', 'accrual', 10, 0, 10, 'USD', repeat('a', 64), '[]'::jsonb, 'batch_1'
+)`
+    );
+    await expect(
+      pool.query("update erp_financials.transactions set memo = 'changed' where transaction_id = 'journal_1'")
+    ).rejects.toThrow("posted journal entries are immutable");
+    await expect(
+      pool.query("delete from erp_financials.ledger_postings where posting_id = 'posting_1'")
+    ).rejects.toThrow("posted journal entry facts are immutable");
+  });
+
+  it("serializes advisory locks and preserves repeatable-read snapshot isolation", async () => {
+    await migratePostgresSchema(runner, { appliedByRef: "integration:locks" });
+    const first = await pool.connect();
+    const second = await pool.connect();
+    try {
+      await first.query("begin isolation level repeatable read");
+      await second.query("begin");
+      await first.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", ["integration:lock"]);
+      const unavailable = await second.query<{ acquired: boolean }>(
+        "select pg_try_advisory_xact_lock(hashtextextended($1, 0)) as acquired",
+        ["integration:lock"]
+      );
+      expect(unavailable.rows[0]?.acquired).toBe(false);
+
+      const before = await first.query<{ count: string }>("select count(*)::text as count from erp_financials.schema_migrations");
+      await second.query("insert into erp_financials.schema_migrations values ('integration_probe', 13, 14, 'probe', repeat('b', 64), 'probe', 0, 'integration', clock_timestamp())");
+      await second.query("commit");
+      const during = await first.query<{ count: string }>("select count(*)::text as count from erp_financials.schema_migrations");
+      expect(during.rows[0]?.count).toBe(before.rows[0]?.count);
+      await first.query("rollback");
+
+      const third = await pool.connect();
+      try {
+        await third.query("begin");
+        const available = await third.query<{ acquired: boolean }>(
+          "select pg_try_advisory_xact_lock(hashtextextended($1, 0)) as acquired",
+          ["integration:lock"]
+        );
+        expect(available.rows[0]?.acquired).toBe(true);
+        await third.query("rollback");
+      } finally {
+        third.release();
+      }
+    } finally {
+      await first.query("rollback").catch(() => undefined);
+      await second.query("rollback").catch(() => undefined);
+      first.release();
+      second.release();
+    }
+  });
+
+  it("atomically enforces application balance, party, currency, terminal state, and unapply restoration", async () => {
+    await migratePostgresSchema(runner, { appliedByRef: "integration:applications" });
+    await seedAccountingScope(pool);
+    await seedSubledgerDocuments(pool);
+
+    await expect(
+      pool.query(
+        `insert into erp_financials.subledger_documents (
+  subledger_document_id, tenant_id, company_id, source_id, document_type, transaction_id, party_id,
+  document_date, currency_code, original_amount, open_amount, status, version, idempotency_key,
+  lifecycle_event_id, metadata, created_at, updated_at
+) values ('document_mismatched_journal', 'tenant_1', 'company_1', 'source_1', 'invoice', 'txn_payment',
+  'customer_1', '2026-08-05', 'USD', 10, 10, 'open', 1, 'document_mismatched_journal',
+  'event_payment', '{}'::jsonb, now(), now())`
+      )
+    ).rejects.toThrow("must match its posted journal type, currency, and party");
+
+    await expect(
+      pool.query(
+        `insert into erp_financials.subledger_applications (
+  subledger_application_id, tenant_id, company_id, source_id, application_type, source_document_id,
+  target_document_id, applied_amount, currency_code, application_date, status, version, idempotency_key,
+  applied_event_id, ended_event_id, created_at, updated_at
+) values ('application_invalid_initial', 'tenant_1', 'company_1', 'source_1', 'customer_payment_to_invoice',
+  'payment_1', 'invoice_1', 1, 'USD', '2026-08-05', 'unapplied', 2, 'apply_invalid_initial',
+  'event_apply', 'event_apply', now(), now())`
+      )
+    ).rejects.toThrow("must begin applied at version 1");
+
+    await expect(
+      pool.query(
+        `insert into erp_financials.subledger_applications (
+  subledger_application_id, tenant_id, company_id, source_id, application_type, source_document_id,
+  target_document_id, applied_amount, currency_code, application_date, status, version, idempotency_key,
+  applied_event_id, created_at, updated_at
+) values ('application_party', 'tenant_1', 'company_1', 'source_1', 'customer_payment_to_invoice',
+  'payment_other_party', 'invoice_1', 1, 'USD', '2026-08-05', 'applied', 1, 'apply_party', 'event_apply', now(), now())`
+      )
+    ).rejects.toThrow("same non-null party");
+    await expect(
+      pool.query(
+        `insert into erp_financials.subledger_applications (
+  subledger_application_id, tenant_id, company_id, source_id, application_type, source_document_id,
+  target_document_id, applied_amount, currency_code, application_date, status, version, idempotency_key,
+  applied_event_id, created_at, updated_at
+) values ('application_currency', 'tenant_1', 'company_1', 'source_1', 'customer_payment_to_invoice',
+  'payment_eur', 'invoice_1', 1, 'EUR', '2026-08-05', 'applied', 1, 'apply_currency', 'event_apply', now(), now())`
+      )
+    ).rejects.toThrow("currency must match");
+    await expect(
+      pool.query("update erp_financials.transactions set memo = 'changed' where transaction_id = 'txn_invoice'")
+    ).rejects.toThrow("posted journal entries are immutable");
+    await expect(
+      pool.query("update erp_financials.subledger_documents set open_amount = 99 where subledger_document_id = 'invoice_1'")
+    ).rejects.toThrow("posted subledger documents are immutable");
+
+    await pool.query(
+      `insert into erp_financials.subledger_applications (
+  subledger_application_id, tenant_id, company_id, source_id, application_type, source_document_id,
+  target_document_id, applied_amount, currency_code, application_date, status, version, idempotency_key,
+  applied_event_id, created_at, updated_at
+) values (
+  'application_1', 'tenant_1', 'company_1', 'source_1', 'customer_payment_to_invoice', 'payment_1',
+  'invoice_1', 60, 'USD', '2026-08-05', 'applied', 1, 'apply_1', 'event_apply', now(), now()
+)`
+    );
+    await expect(documentBalances(pool)).resolves.toEqual([
+      { subledger_document_id: "invoice_1", open_amount: "40", status: "partially_applied", version: 2 },
+      { subledger_document_id: "payment_1", open_amount: "0", status: "settled", version: 2 }
+    ]);
+
+    await pool.query(
+      `insert into erp_financials.financial_lifecycle_events values (
+  'event_over', 'tenant_1', 'company_1', 'source_1', 'subledger_application', 'application_over', 'applied',
+  'user:1', null, 'request:over', 'correlation:1', 'test', null, now(), now(), 'event_over', repeat('a',64), '{}'::jsonb, null
+)`
+    );
+    await expect(
+      pool.query(
+        `insert into erp_financials.subledger_applications (
+  subledger_application_id, tenant_id, company_id, source_id, application_type, source_document_id,
+  target_document_id, applied_amount, currency_code, application_date, status, version, idempotency_key,
+  applied_event_id, created_at, updated_at
+) values ('application_over', 'tenant_1', 'company_1', 'source_1', 'customer_payment_to_invoice',
+  'payment_1', 'invoice_1', 1, 'USD', '2026-08-05', 'applied', 1, 'apply_over', 'event_over', now(), now())`
+      )
+    ).rejects.toThrow("exceeds an available document balance");
+
+    await pool.query(
+      `insert into erp_financials.financial_lifecycle_events values (
+  'event_unapply', 'tenant_1', 'company_1', 'source_1', 'subledger_application', 'application_1', 'unapplied',
+  'user:1', 'user:2', 'request:unapply', 'correlation:1', 'test', null, now(), now(), 'event_unapply', repeat('a',64), '{}'::jsonb, 'event_apply'
+)`
+    );
+    await expect(
+      pool.query(
+        "update erp_financials.subledger_applications set status = 'unapplied', version = 9, ended_event_id = 'event_unapply', updated_at = now() where subledger_application_id = 'application_1'"
+      )
+    ).rejects.toThrow("must increment version and timestamp");
+    await pool.query(
+      "update erp_financials.subledger_applications set status = 'unapplied', version = 2, ended_event_id = 'event_unapply', updated_at = now() where subledger_application_id = 'application_1'"
+    );
+    await expect(documentBalances(pool)).resolves.toEqual([
+      { subledger_document_id: "invoice_1", open_amount: "100", status: "open", version: 3 },
+      { subledger_document_id: "payment_1", open_amount: "60", status: "open", version: 3 }
+    ]);
+    await expect(
+      pool.query("delete from erp_financials.subledger_applications where subledger_application_id = 'application_1'")
+    ).rejects.toThrow("cannot be deleted");
+  });
+
+  it("uses the scoped transaction identity index for an important journal lookup", async () => {
+    await migratePostgresSchema(runner, { appliedByRef: "integration:query-plan" });
+    await seedAccountingScope(pool);
+    const client = await pool.connect();
+    try {
+      await client.query("set enable_seqscan = off");
+      const plan = await client.query<{ "QUERY PLAN": string }>(
+        `explain select * from erp_financials.transactions
+where tenant_id = 'tenant_1' and source_id = 'source_1' and transaction_id = 'journal_1'`
+      );
+      expect(plan.rows.map((row) => row["QUERY PLAN"]).join("\n")).toContain("transactions_scope_uidx");
+    } finally {
+      client.release();
+    }
+  });
+});
+
+class PgQueryClient implements PostgresQueryClient {
+  constructor(private readonly queryable: Pick<Pool | PoolClient, "query">) {}
+
+  async query<Row extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string,
+    params: readonly unknown[] = []
+  ): Promise<PostgresQueryResult<Row>> {
+    const result = await this.queryable.query<QueryResultRow>(sql, [...params]);
+    return { rows: result.rows as readonly Row[], rowCount: result.rowCount };
+  }
+}
+
+class PgTransactionRunner implements PostgresMigrationTransactionRunner {
+  constructor(private readonly pool: Pool) {}
+
+  async transaction<Result>(work: (client: PostgresQueryClient) => Promise<Result>): Promise<Result> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      const result = await work(new PgQueryClient(client));
+      await client.query("commit");
+      return result;
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+}
+
+class FailingMigrationClient implements PostgresQueryClient {
+  constructor(
+    private readonly client: PostgresQueryClient,
+    private readonly failingSqlFragment: string
+  ) {}
+
+  query<Row extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string,
+    params: readonly unknown[] = []
+  ): Promise<PostgresQueryResult<Row>> {
+    if (sql.includes(this.failingSqlFragment)) {
+      return Promise.reject(new Error("injected real migration failure"));
+    }
+    return this.client.query<Row>(sql, params);
+  }
+}
+
+function requiredSafeTestDatabaseUrl(value: string | undefined): string {
+  if (value === undefined) {
+    return "postgres://unused:unused@127.0.0.1:1/erp_financials_test_skipped";
+  }
+  const parsed = new URL(value);
+  const databaseName = parsed.pathname.slice(1);
+  if (!/^erp_financials(?:_|-)test(?:_|-|$)/u.test(databaseName)) {
+    throw new Error("ERP_FINANCIALS_TEST_DATABASE_URL must target a database named erp_financials_test*");
+  }
+  return value;
+}
+
+async function snapshotScopeColumns(pool: Pool): Promise<readonly string[]> {
+  const result = await pool.query<{ column_name: string }>(
+    `select column_name from information_schema.columns
+where table_schema = 'erp_financials' and table_name = 'report_snapshots'
+  and column_name in ('company_id', 'source_id') order by column_name`
+  );
+  return result.rows.map((row) => row.column_name);
+}
+
+async function seedAccountingScope(pool: Pool): Promise<void> {
+  await pool.query(`
+insert into erp_financials.accounting_companies values ('company_1', 'tenant_1', 'One', 'One', 'USD', 1, 'test', 'native_erp', 'one');
+insert into erp_financials.accounting_sources (source_id, tenant_id, source_system, provider_environment, connection_ref, status)
+values ('source_1', 'tenant_1', 'native_erp', 'test', 'source:1', 'active'),
+       ('source_2', 'tenant_1', 'native_erp', 'test', 'source:2', 'active');
+insert into erp_financials.company_sources values ('company_source_1', 'tenant_1', 'company_1', 'source_1', now());
+insert into erp_financials.accounts (account_id, tenant_id, source_id, source_account_id, name, type, classification, active)
+values ('account_cash', 'tenant_1', 'source_1', 'cash', 'Cash', 'asset', 'asset', true),
+       ('account_ar', 'tenant_1', 'source_1', 'ar', 'Receivable', 'asset', 'asset', true);
+insert into erp_financials.parties (party_id, tenant_id, source_id, source_party_id, party_type, display_name, active)
+values ('customer_1', 'tenant_1', 'source_1', 'customer:1', 'customer', 'Customer One', true),
+       ('customer_2', 'tenant_1', 'source_1', 'customer:2', 'customer', 'Customer Two', true);
+insert into erp_financials.import_batches (import_batch_id, tenant_id, source_id, mode, status, started_at, completed_at, source_object_counts)
+values ('batch_1', 'tenant_1', 'source_1', 'delta', 'completed', now(), now(), '{}'::jsonb);
+insert into erp_financials.transactions (
+  transaction_id, tenant_id, source_id, source_transaction_id, source_transaction_type, transaction_date,
+  posted_at, updated_at, currency_code, status, source_payload_ref
+) values ('journal_1', 'tenant_1', 'source_1', 'journal:1', 'JournalEntry', '2026-08-01', now(), now(), 'USD', 'posted', '{}'::jsonb);
+insert into erp_financials.transaction_lines (
+  transaction_line_id, tenant_id, source_id, transaction_id, line_number, account_id, amount, dimension_refs
+) values ('line_1', 'tenant_1', 'source_1', 'journal_1', 1, 'account_cash', 10, '[]'::jsonb);
+`);
+}
+
+async function seedSubledgerDocuments(pool: Pool): Promise<void> {
+  await pool.query(`
+insert into erp_financials.transactions (
+  transaction_id, tenant_id, source_id, source_transaction_id, source_transaction_type, transaction_date,
+  posted_at, updated_at, party_id, currency_code, status, source_payload_ref
+) values
+  ('txn_invoice', 'tenant_1', 'source_1', 'invoice:1', 'Subledger:invoice', '2026-08-01', now(), now(), 'customer_1', 'USD', 'posted', '{}'::jsonb),
+  ('txn_payment', 'tenant_1', 'source_1', 'payment:1', 'Subledger:customer_payment', '2026-08-05', now(), now(), 'customer_1', 'USD', 'posted', '{}'::jsonb),
+  ('txn_payment_other', 'tenant_1', 'source_1', 'payment:other', 'Subledger:customer_payment', '2026-08-05', now(), now(), 'customer_2', 'USD', 'posted', '{}'::jsonb),
+  ('txn_payment_eur', 'tenant_1', 'source_1', 'payment:eur', 'Subledger:customer_payment', '2026-08-05', now(), now(), 'customer_1', 'EUR', 'posted', '{}'::jsonb);
+insert into erp_financials.financial_lifecycle_events values
+  ('event_invoice', 'tenant_1', 'company_1', 'source_1', 'subledger_document', 'invoice_1', 'posted', 'user:1', null, 'request:invoice', 'correlation:1', 'test', null, now(), now(), 'event_invoice', repeat('a',64), '{}'::jsonb, null),
+  ('event_payment', 'tenant_1', 'company_1', 'source_1', 'subledger_document', 'payment_1', 'posted', 'user:1', null, 'request:payment', 'correlation:1', 'test', null, now(), now(), 'event_payment', repeat('a',64), '{}'::jsonb, null),
+  ('event_payment_other', 'tenant_1', 'company_1', 'source_1', 'subledger_document', 'payment_other_party', 'posted', 'user:1', null, 'request:payment-other', 'correlation:1', 'test', null, now(), now(), 'event_payment_other', repeat('a',64), '{}'::jsonb, null),
+  ('event_payment_eur', 'tenant_1', 'company_1', 'source_1', 'subledger_document', 'payment_eur', 'posted', 'user:1', null, 'request:payment-eur', 'correlation:1', 'test', null, now(), now(), 'event_payment_eur', repeat('a',64), '{}'::jsonb, null),
+  ('event_apply', 'tenant_1', 'company_1', 'source_1', 'subledger_application', 'application_1', 'applied', 'user:1', null, 'request:apply', 'correlation:1', 'test', null, now(), now(), 'event_apply', repeat('a',64), '{}'::jsonb, null);
+insert into erp_financials.subledger_documents (
+  subledger_document_id, tenant_id, company_id, source_id, document_type, transaction_id, party_id,
+  document_date, currency_code, original_amount, open_amount, status, version, idempotency_key,
+  lifecycle_event_id, metadata, created_at, updated_at
+) values
+  ('invoice_1', 'tenant_1', 'company_1', 'source_1', 'invoice', 'txn_invoice', 'customer_1', '2026-08-01', 'USD', 100, 100, 'open', 1, 'invoice_1', 'event_invoice', '{}'::jsonb, now(), now()),
+  ('payment_1', 'tenant_1', 'company_1', 'source_1', 'customer_payment', 'txn_payment', 'customer_1', '2026-08-05', 'USD', 60, 60, 'open', 1, 'payment_1', 'event_payment', '{}'::jsonb, now(), now()),
+  ('payment_other_party', 'tenant_1', 'company_1', 'source_1', 'customer_payment', 'txn_payment_other', 'customer_2', '2026-08-05', 'USD', 10, 10, 'open', 1, 'payment_other_party', 'event_payment_other', '{}'::jsonb, now(), now()),
+  ('payment_eur', 'tenant_1', 'company_1', 'source_1', 'customer_payment', 'txn_payment_eur', 'customer_1', '2026-08-05', 'EUR', 10, 10, 'open', 1, 'payment_eur', 'event_payment_eur', '{}'::jsonb, now(), now());
+`);
+}
+
+async function documentBalances(pool: Pool): Promise<readonly Record<string, unknown>[]> {
+  const result = await pool.query<{
+    readonly subledger_document_id: string;
+    readonly open_amount: string;
+    readonly status: string;
+    readonly version: number;
+  }>(
+    "select subledger_document_id, open_amount::text, status, version from erp_financials.subledger_documents where subledger_document_id in ('invoice_1', 'payment_1') order by subledger_document_id"
+  );
+  return result.rows;
+}

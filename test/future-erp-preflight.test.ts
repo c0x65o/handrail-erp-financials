@@ -47,8 +47,8 @@ describe("Future ERP canonical schema preflight", () => {
     expect(validation.issues).toEqual([]);
     expect(validation.install).toMatchObject({
       executed: true,
-      manifestVersion: "2026-08-11.transaction-matching-v1",
-      schemaVersion: 6
+      manifestVersion: POSTGRES_CANONICAL_SCHEMA_MANIFEST.manifestVersion,
+      schemaVersion: POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion
     });
     expect(client.calls[0]?.sql).toBe('create schema if not exists "erp_financials";');
     expect(client.calls.some((call) => call.sql.includes('create table if not exists "erp_financials"."ledger_postings"'))).toBe(

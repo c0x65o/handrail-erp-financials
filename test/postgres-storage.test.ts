@@ -38,12 +38,13 @@ type QueryCall = {
 };
 
 type CatalogRow = {
-  readonly object_type: "schema" | "table" | "column" | "index" | "constraint";
+  readonly object_type: "schema" | "table" | "column" | "index" | "constraint" | "trigger";
   readonly table_name: string | null;
   readonly object_name: string;
   readonly data_type?: string | null;
   readonly is_nullable?: string | null;
   readonly definition?: string | null;
+  readonly enabled?: boolean | null;
 };
 
 describe("Postgres storage adapter", () => {
@@ -52,8 +53,8 @@ describe("Postgres storage adapter", () => {
     const result = await installPostgresSchema(client, POSTGRES_CANONICAL_SCHEMA_MANIFEST, { dryRun: true });
 
     expect(result.executed).toBe(false);
-    expect(result.manifestVersion).toBe("2026-08-12.scoped-integrity-v1");
-    expect(result.schemaVersion).toBe(9);
+    expect(result.manifestVersion).toBe("2026-08-12.subledger-v1");
+    expect(result.schemaVersion).toBe(13);
     expect(result.statements[0]).toBe('create schema if not exists "erp_financials";');
     expect(result.statements.some((statement) => statement.includes('"rollup_buckets"'))).toBe(true);
     expect(result.statements.some((statement) => statement.includes('"report_freshness"'))).toBe(true);
@@ -82,7 +83,13 @@ describe("Postgres storage adapter", () => {
     expect(missingResult.compatible).toBe(false);
     expect(missingResult.fixtureSupport).toBe(false);
     expect(missingResult.issues.map((issue) => issue.kind)).toEqual(
-      expect.arrayContaining(["missing_table", "missing_index", "missing_constraint", "missing_fixture_support"])
+      expect.arrayContaining([
+        "missing_table",
+        "missing_index",
+        "missing_constraint",
+        "missing_trigger",
+        "missing_fixture_support"
+      ])
     );
     expect(missingResult.issues.some((issue) => issue.objectName === "ledger_postings")).toBe(true);
   });
@@ -124,6 +131,9 @@ describe("Postgres storage adapter", () => {
           definition: "foreign key (tenant_id, source_id) references erp_financials.accounting_sources (source_id, tenant_id) on update restrict on delete restrict"
         };
       }
+      if (row.object_type === "trigger" && row.object_name === "transactions_posted_journal_immutable") {
+        return { ...row, enabled: false };
+      }
       return row;
     });
 
@@ -135,6 +145,10 @@ describe("Postgres storage adapter", () => {
         expect.objectContaining({
           kind: "incompatible_constraint_definition",
           objectName: "transactions_source_scope_fk"
+        }),
+        expect.objectContaining({
+          kind: "incompatible_trigger_definition",
+          objectName: "transactions_posted_journal_immutable"
         })
       ])
     );
@@ -2066,7 +2080,7 @@ function catalogRowsForManifest(manifest: PostgresSchemaManifest): readonly Cata
         object_type: "index" as const,
         table_name: table.name,
         object_name: index.name,
-        definition: `create ${index.unique === true ? "unique " : ""}index ${index.name} on ${manifest.namespace}.${table.name} using btree (${index.columns.join(", ")})`
+        definition: `create ${index.unique === true ? "unique " : ""}index ${index.name} on ${manifest.namespace}.${table.name} using btree (${index.columns.join(", ")})${index.whereSql === undefined ? "" : ` where ${index.whereSql}`}`
       })),
       ...[
         `${table.name}_pkey`,
@@ -2080,6 +2094,17 @@ function catalogRowsForManifest(manifest: PostgresSchemaManifest): readonly Cata
         object_name: constraintName,
         definition: table.constraints.find((constraint) => constraint.name === constraintName)?.sql
       }))
-    ])
+    ]),
+    ...manifest.requiredTriggers.map((trigger) => ({
+      object_type: "trigger" as const,
+      table_name: trigger.table,
+      object_name: trigger.name,
+      enabled: true,
+      definition: `create trigger ${trigger.name} ${trigger.timing} ${trigger.events
+        .map((event) => event === "update" && trigger.updateColumns !== undefined
+          ? `update of ${trigger.updateColumns.join(", ")}`
+          : event)
+        .join(" or ")} on ${manifest.namespace}.${trigger.table} for each row execute function ${manifest.namespace}.${trigger.functionName}()`
+    }))
   ];
 }

@@ -55,17 +55,19 @@ referenced public import is missing from the package root.
 The in-repo Future ERP consumer type fixture and package-boundary test cover
 these required supported adoption surfaces from the package root:
 
-- Canonical schema, install, and health:
-  `POSTGRES_CANONICAL_SCHEMA_MANIFEST`, `renderPostgresSchemaSql`,
-  `createPostgresStorageAdapter(...).installSchema()`,
+- Canonical schema, migration, and health:
+  `POSTGRES_MIGRATIONS`, `planPostgresMigrations`,
+  `migratePostgresSchema`, `validatePostgresMigrationHistory`,
+  `POSTGRES_CANONICAL_SCHEMA_MANIFEST`,
   `createPostgresStorageAdapter(...).validateSchema()`,
   `validatePostgresSchema`, `checkErpFinancialsInstallHealth`, and
   `validateFutureErpCanonicalSchemaPreflight`.
 - Storage adapter and persistence: `createPostgresStorageAdapter`,
   `createFutureErpCanonicalFactPersistenceWorker`, and
   `persistFutureErpCanonicalFacts`.
-- Native accounting operations: `createErpFinancials`, including reusable
-  account hierarchy updates and balanced, idempotent journal posting.
+- Native accounting operations: `createErpFinancials`, including account
+  hierarchy updates, fiscal controls, immutable journal correction workflows,
+  atomic subledger documents, and payment applications.
 - QuickBooks mapping and SDK/service contracts:
   `HandrailQuickBooksSdkResourcesAdapterInput`,
   `mapHandrailQuickBooksSdkResourcesToCanonicalFacts`,

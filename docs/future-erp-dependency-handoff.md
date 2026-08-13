@@ -191,9 +191,12 @@ Exact Future ERP package modules touched for the adoption surface:
 
 ERP Financials APIs used by the phase:
 
-- Storage and schema: `createPostgresStorageAdapter`, `installPostgresSchema`,
-  `validatePostgresSchema`, `POSTGRES_CANONICAL_SCHEMA_MANIFEST`, and
-  `assertManifestHasNoCredentialColumns`.
+- Storage and schema: `createPostgresStorageAdapter`, `POSTGRES_MIGRATIONS`,
+  `planPostgresMigrations`, `migratePostgresSchema`,
+  `validatePostgresMigrationHistory`, `validatePostgresSchema`,
+  `POSTGRES_CANONICAL_SCHEMA_MANIFEST`, and
+  `assertManifestHasNoCredentialColumns`. `installPostgresSchema` remains a
+  compatibility/DDL-preview helper, not the production upgrade path.
 - Boundary guards: `assertNoCredentialKeys`, `assertSafeSourcePayloadRef`,
   `assertSafeDrilldownRef`, and `createCompactDrilldownRef`.
 - Source mapping: `adaptNormalizedQuickBooksResourceSetToAdapterInput`,

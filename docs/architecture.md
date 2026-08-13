@@ -10,6 +10,11 @@ The package should standardize:
 
 - canonical accounting facts
 - provider-neutral account hierarchy and journal posting orchestration
+- ordered, checksummed Postgres migrations and scoped integrity constraints
+- immutable financial lifecycle and approval evidence
+- fiscal periods, posting locks, close, adjustment, and reopen controls
+- compensating journal reversal, correction, void, and replacement workflows
+- atomic receivable, payable, cash, and payment-application subledgers
 - provider-neutral transaction matching and posting rule contracts
 - database migration manifests
 - report read models
@@ -96,8 +101,10 @@ Individual ERP apps own:
 Apps provide a standard Postgres pool or a database-library-specific transaction
 runner once. Native account-tree and journal-entry callers should use the
 package-level `createErpFinancials(...)` service so balance validation, idempotency, canonical
-row construction, atomic persistence, and report invalidation are not repeated
-in every host.
+row construction, fiscal locks, audit evidence, immutable corrections, atomic
+subledgers, and report invalidation are not repeated in every host. Apps decide
+authorization and permissions before calling the service; every mutation still
+carries the package's standardized operation context for durable evidence.
 
 Apps consume this package rather than copying schema and report code.
 

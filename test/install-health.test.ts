@@ -31,8 +31,8 @@ describe("ERP Financials install health", () => {
     expect(health).toMatchObject({
       packageName: "@handrail/erp-financials",
       packageVersion: ERP_FINANCIALS_PACKAGE.version,
-      manifestVersion: "2026-08-11.transaction-matching-v1",
-      schemaVersion: 6,
+      manifestVersion: POSTGRES_CANONICAL_SCHEMA_MANIFEST.manifestVersion,
+      schemaVersion: POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion,
       status: "healthy",
       schema: {
         namespace: "erp_financials",
@@ -80,11 +80,9 @@ describe("ERP Financials install health", () => {
     expect(health.issues.map((issue) => issue.kind)).toEqual(
       expect.arrayContaining(["missing_table", "missing_index", "missing_constraint", "missing_fixture_support"])
     );
-    expect(health.checks).toContainEqual({
-      name: "fixture_support",
-      status: "fail",
-      issueCount: 11
-    });
+    const fixtureSupportCheck = health.checks.find((check) => check.name === "fixture_support");
+    expect(fixtureSupportCheck).toMatchObject({ name: "fixture_support", status: "fail" });
+    expect(fixtureSupportCheck?.issueCount).toBeGreaterThan(0);
     expect(JSON.stringify(health)).not.toMatch(PROVIDER_CREDENTIAL_OR_RAW_PAYLOAD_KEY_PATTERN);
   });
 

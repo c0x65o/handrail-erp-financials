@@ -4,7 +4,8 @@ Provider-neutral TypeScript foundation for reusable ERP accounting and financial
 This package is intended to give host ERP apps a shared kernel for canonical
 accounting facts, schema and migration manifests, deterministic
 fixture/reference report formulas, rollups, snapshots, freshness tracking,
-fixtures, and validation utilities.
+fixtures, validation utilities, fiscal controls, immutable journal lifecycles,
+and atomic receivable/payable/cash subledgers.
 
 The package boundary follows the repository docs:
 
@@ -104,7 +105,28 @@ const financials = createErpFinancials({
   currencyCode: "USD"
 });
 
+await financials.fiscalPeriods.define({
+  fiscalYear: 2026,
+  periodNumber: 8,
+  periodStart: "2026-08-01",
+  periodEnd: "2026-08-31",
+  operation: {
+    actorRef: "user:123",
+    requestId: "request:period-2026-08",
+    correlationId: "workflow:year-setup",
+    reasonCode: "fiscal_period_defined",
+    occurredAt: "2026-08-12T13:00:00.000Z"
+  }
+});
+
 await financials.accounts.upsertTree({
+  operation: {
+    actorRef: "user:123",
+    requestId: "request:account-tree-1",
+    correlationId: "workflow:chart-setup",
+    reasonCode: "chart_configured",
+    occurredAt: "2026-08-12T14:00:00.000Z"
+  },
   parent: {
     accountKey: "service-revenue",
     accountNumber: "4000",
@@ -128,6 +150,13 @@ await financials.accounts.upsertTree({
 });
 
 await financials.journalEntries.post({
+  operation: {
+    actorRef: "user:123",
+    requestId: "request:journal-1",
+    correlationId: "workflow:journal-1",
+    reasonCode: "reclassification",
+    occurredAt: "2026-08-12T15:00:00.000Z"
+  },
   idempotencyKey: "service-revenue-reclass-2026-08",
   date: "2026-08-12",
   memo: "Break out service revenue",
@@ -144,7 +173,8 @@ owns `BEGIN`, `COMMIT`, `ROLLBACK`, and connection release. A host database
 library that already exposes transactions can instead supply an
 `ErpFinancialsTransactionRunner`, or adapt a pool explicitly with
 `createPostgresTransactionRunner(...)`. Authorization and approval decisions
-stay with the host; canonical write orchestration does not. Snapshot
+stay with the host; each write carries standardized authorization/audit context
+that the package records as an immutable lifecycle event. Snapshot
 invalidation is part of the atomic write. The host scheduler should run the
 normal rollup and snapshot-refresh workers after a successful result.
 
@@ -169,9 +199,13 @@ own database credentials, provider OAuth, or runtime env vars. Any client with a
 `query(sql, params)` method can be adapted:
 
 ```ts
+const database = createPostgresTransactionRunner(postgresPool);
+await migratePostgresSchema(database, {
+  appliedByRef: "deployment:erp-api-2026-08-12"
+});
+
 const storage = createPostgresStorageAdapter(postgresClient);
 
-const installPlan = await storage.installSchema({ dryRun: true });
 const validation = await storage.validateSchema();
 
 if (!validation.compatible) {
@@ -184,8 +218,11 @@ await storage.upsertLedgerPostings(ERP_FINANCIALS_STATEMENT_FIXTURE.postings);
 await storage.writeReportSnapshot(profitAndLoss);
 ```
 
-`installSchema({ dryRun: true })` returns the deterministic DDL statements
-without mutating a database. `validateSchema()` reads Postgres catalogs and
+`migratePostgresSchema(...)` is the production install and upgrade path. It
+uses an ordered checksummed ledger, advisory transaction locking, transactional
+upgrades, supported legacy-baseline adoption, drift detection, and final schema
+validation. `installSchema({ dryRun: true })` remains a development/compatibility
+DDL preview and is not the production upgrade path. `validateSchema()` reads Postgres catalogs and
 reports missing schema, tables, columns, indexes, constraints, and fixture-loader
 support. Fixture loading, rollup writes, freshness writes, and stale snapshot
 marking are explicit mutating methods so validation can be run safely against a
@@ -199,6 +236,8 @@ backdated source facts without duplicating canonical postings.
 For the complete blank-host install sequence, fixture smoke test path,
 scheduled job expectations, freshness checks, and future Handrail capability
 validation checklist, see [docs/host-app-install.md](docs/host-app-install.md).
+The production accounting integration contract is in
+[docs/prime-time-financial-kernel.md](docs/prime-time-financial-kernel.md).
 For the worker-facing QuickBooks SDK/service to host-app storage contract, see
 [docs/storage-host-app-handoff.md](docs/storage-host-app-handoff.md).
 
@@ -212,9 +251,10 @@ folders, or app-local compatibility shims are unsupported.
 
 The supported adoption surfaces are:
 
-- Canonical schema, install, and health:
-  `POSTGRES_CANONICAL_SCHEMA_MANIFEST`, `renderPostgresSchemaSql`,
-  `createPostgresStorageAdapter(...).installSchema()`,
+- Canonical schema, migration, and health:
+  `POSTGRES_MIGRATIONS`, `planPostgresMigrations`,
+  `migratePostgresSchema`, `validatePostgresMigrationHistory`,
+  `POSTGRES_CANONICAL_SCHEMA_MANIFEST`,
   `createPostgresStorageAdapter(...).validateSchema()`,
   `validatePostgresSchema`, `checkErpFinancialsInstallHealth`, and
   `validateFutureErpCanonicalSchemaPreflight`.
@@ -228,9 +268,11 @@ The supported adoption surfaces are:
   import batch, checkpoint, canonical row/write counts, freshness, resume
   metadata, and bounded safe source refs through app read APIs.
 - Native accounting operations: `createErpFinancials` is the preferred
-  package-level API for account-tree upserts and balanced journal posting. It
-  owns validation, deterministic ids, idempotency, atomic canonical writes, and
-  report-snapshot invalidation after the host supplies a transaction runner.
+  package-level API for account trees, journals and their immutable correction
+  lifecycle, fiscal controls, receivable/payable/cash documents, and payment
+  applications. It owns validation, deterministic ids, idempotency, audit
+  evidence, atomic canonical writes, and report-snapshot invalidation after the
+  host supplies a transaction runner.
 - QuickBooks normalized mapping: `HandrailQuickBooksSdkResourcesAdapterInput`,
   `mapHandrailQuickBooksSdkResourcesToCanonicalFacts`,
   `mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts`, and

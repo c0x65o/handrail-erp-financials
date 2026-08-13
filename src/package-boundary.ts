@@ -12,6 +12,11 @@ export const PACKAGE_BOUNDARY = {
   owns: [
     "canonical accounting facts",
     "account hierarchy and journal posting orchestration",
+    "ordered database migrations and financial integrity constraints",
+    "immutable financial lifecycle evidence",
+    "fiscal periods, posting locks, and close controls",
+    "journal reversal, correction, void, and replacement workflows",
+    "receivable, payable, cash, and payment-application subledgers",
     "transaction matching and posting rule evaluation",
     "schema and migration manifests",
     "deterministic fixture/reference report formulas",

@@ -152,6 +152,10 @@ class RecordingFullSyncStorage implements FutureErpCanonicalFactPersistenceStora
     return Promise.resolve(1);
   }
 
+  upsertCompanySourceBinding(): Promise<number> {
+    return Promise.resolve(1);
+  }
+
   upsertImportBatch(): Promise<number> {
     return Promise.resolve(1);
   }

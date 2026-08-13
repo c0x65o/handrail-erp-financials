@@ -26,6 +26,16 @@ export type PostgresIndexManifest = {
   readonly name: string;
   readonly columns: readonly string[];
   readonly unique?: boolean;
+  readonly whereSql?: string;
+};
+
+export type PostgresTriggerManifest = {
+  readonly name: string;
+  readonly table: string;
+  readonly timing: "before" | "after";
+  readonly events: readonly ("insert" | "update" | "delete")[];
+  readonly updateColumns?: readonly string[];
+  readonly functionName: string;
 };
 
 export type PostgresTableManifest = {
@@ -43,10 +53,11 @@ export type PostgresTableManifest = {
 };
 
 export type PostgresSchemaManifest = {
-  readonly manifestVersion: "2026-08-12.scoped-integrity-v1";
-  readonly schemaVersion: 9;
+  readonly manifestVersion: "2026-08-12.subledger-v1";
+  readonly schemaVersion: 13;
   readonly dialect: "postgres";
   readonly namespace: "erp_financials";
+  readonly requiredTriggers: readonly PostgresTriggerManifest[];
   readonly tables: readonly PostgresTableManifest[];
 };
 
@@ -133,10 +144,98 @@ const table = (
 });
 
 export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
-  manifestVersion: "2026-08-12.scoped-integrity-v1",
-  schemaVersion: 9,
+  manifestVersion: "2026-08-12.subledger-v1",
+  schemaVersion: 13,
   dialect: "postgres",
   namespace: "erp_financials",
+  requiredTriggers: [
+    {
+      name: "schema_migrations_immutable",
+      table: "schema_migrations",
+      timing: "before",
+      events: ["update", "delete"],
+      functionName: "reject_schema_migration_mutation"
+    },
+    {
+      name: "transactions_posted_journal_immutable",
+      table: "transactions",
+      timing: "before",
+      events: ["update", "delete"],
+      functionName: "reject_posted_journal_mutation"
+    },
+    {
+      name: "transaction_lines_posted_journal_immutable",
+      table: "transaction_lines",
+      timing: "before",
+      events: ["update", "delete"],
+      functionName: "reject_posted_journal_child_mutation"
+    },
+    {
+      name: "ledger_postings_posted_journal_immutable",
+      table: "ledger_postings",
+      timing: "before",
+      events: ["update", "delete"],
+      functionName: "reject_posted_journal_child_mutation"
+    },
+    {
+      name: "financial_lifecycle_events_immutable",
+      table: "financial_lifecycle_events",
+      timing: "before",
+      events: ["update", "delete"],
+      functionName: "reject_financial_lifecycle_event_mutation"
+    },
+    {
+      name: "fiscal_periods_no_overlap",
+      table: "fiscal_periods",
+      timing: "before",
+      events: ["insert", "update"],
+      updateColumns: ["tenant_id", "company_id", "source_id", "period_start", "period_end"],
+      functionName: "reject_overlapping_fiscal_period"
+    },
+    {
+      name: "journal_entry_links_immutable",
+      table: "journal_entry_links",
+      timing: "before",
+      events: ["update", "delete"],
+      functionName: "reject_journal_entry_link_mutation"
+    },
+    {
+      name: "subledger_documents_validate_insert",
+      table: "subledger_documents",
+      timing: "before",
+      events: ["insert"],
+      functionName: "validate_subledger_document_insert"
+    },
+    {
+      name: "subledger_documents_guard",
+      table: "subledger_documents",
+      timing: "before",
+      events: ["update", "delete"],
+      functionName: "guard_subledger_document_mutation"
+    },
+    {
+      name: "subledger_applications_validate",
+      table: "subledger_applications",
+      timing: "before",
+      events: ["insert", "update"],
+      functionName: "validate_subledger_application"
+    },
+    {
+      name: "subledger_applications_update_balances",
+      table: "subledger_applications",
+      timing: "after",
+      events: ["insert", "update"],
+      updateColumns: ["status"],
+      functionName: "apply_subledger_application_balances"
+    },
+    {
+      name: "subledger_applications_no_delete",
+      table: "subledger_applications",
+      timing: "before",
+      events: ["delete"],
+      functionName: "reject_subledger_application_delete"
+    }
+  ],
   tables: [
     table(
       "schema_migrations",
@@ -271,6 +370,201 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
           name: "company_sources_scope_uidx",
           columns: ["tenant_id", "company_id", "source_id"],
           unique: true
+        }
+      ]
+    ),
+    table(
+      "financial_lifecycle_events",
+      "Append-only authorization, approval, request, reason, and lifecycle evidence for every financial mutation.",
+      [
+        id("event_id"),
+        text("tenant_id"),
+        text("company_id"),
+        text("source_id"),
+        text("aggregate_type"),
+        text("aggregate_id"),
+        text("event_type"),
+        text("actor_ref"),
+        text("approver_ref", true),
+        text("request_id"),
+        text("correlation_id"),
+        text("reason_code"),
+        text("reason_detail", true),
+        timestamp("occurred_at"),
+        timestamp("recorded_at"),
+        text("idempotency_key"),
+        text("payload_checksum"),
+        jsonb("payload", 8192, false),
+        text("prior_event_id", true)
+      ],
+      [
+        {
+          name: "financial_lifecycle_events_required_refs_check",
+          sql: "btrim(actor_ref) <> '' and btrim(request_id) <> '' and btrim(correlation_id) <> '' and btrim(reason_code) <> ''"
+        },
+        {
+          name: "financial_lifecycle_events_checksum_check",
+          sql: "length(payload_checksum) = 64"
+        },
+        {
+          name: "financial_lifecycle_events_timestamp_check",
+          sql: "occurred_at <= recorded_at"
+        },
+        foreignKey(
+          "financial_lifecycle_events_company_source_scope_fk",
+          ["tenant_id", "company_id", "source_id"],
+          "company_sources",
+          ["tenant_id", "company_id", "source_id"]
+        ),
+        foreignKey(
+          "financial_lifecycle_events_prior_scope_fk",
+          ["tenant_id", "company_id", "source_id", "prior_event_id"],
+          "financial_lifecycle_events",
+          ["tenant_id", "company_id", "source_id", "event_id"]
+        )
+      ],
+      [
+        {
+          name: "financial_lifecycle_events_idempotency_uidx",
+          columns: ["tenant_id", "company_id", "source_id", "idempotency_key"],
+          unique: true
+        },
+        {
+          name: "financial_lifecycle_events_scope_uidx",
+          columns: ["tenant_id", "company_id", "source_id", "event_id"],
+          unique: true
+        },
+        {
+          name: "financial_lifecycle_events_aggregate_idx",
+          columns: ["tenant_id", "company_id", "source_id", "aggregate_type", "aggregate_id", "occurred_at"]
+        },
+        {
+          name: "financial_lifecycle_events_correlation_idx",
+          columns: ["tenant_id", "correlation_id", "occurred_at"]
+        }
+      ]
+    ),
+    table(
+      "accounting_book_controls",
+      "Versioned posting lock date and book-level close controls for one company/source scope.",
+      [
+        id("book_control_id"),
+        text("tenant_id"),
+        text("company_id"),
+        text("source_id"),
+        date("posting_lock_date", true),
+        integer("version"),
+        text("last_event_id"),
+        timestamp("created_at"),
+        timestamp("updated_at")
+      ],
+      [
+        {
+          name: "accounting_book_controls_version_check",
+          sql: "version >= 1"
+        },
+        {
+          name: "accounting_book_controls_timestamp_check",
+          sql: "updated_at >= created_at"
+        },
+        foreignKey(
+          "accounting_book_controls_company_source_scope_fk",
+          ["tenant_id", "company_id", "source_id"],
+          "company_sources",
+          ["tenant_id", "company_id", "source_id"]
+        ),
+        foreignKey(
+          "accounting_book_controls_event_scope_fk",
+          ["tenant_id", "company_id", "source_id", "last_event_id"],
+          "financial_lifecycle_events",
+          ["tenant_id", "company_id", "source_id", "event_id"]
+        )
+      ],
+      [
+        {
+          name: "accounting_book_controls_scope_uidx",
+          columns: ["tenant_id", "company_id", "source_id"],
+          unique: true
+        }
+      ]
+    ),
+    table(
+      "fiscal_periods",
+      "Versioned open, closing, and closed fiscal periods with immutable lifecycle evidence links.",
+      [
+        id("fiscal_period_id"),
+        text("tenant_id"),
+        text("company_id"),
+        text("source_id"),
+        integer("fiscal_year"),
+        integer("period_number"),
+        date("period_start"),
+        date("period_end"),
+        text("status"),
+        integer("version"),
+        text("close_event_id", true),
+        text("reopen_event_id", true),
+        timestamp("created_at"),
+        timestamp("updated_at")
+      ],
+      [
+        {
+          name: "fiscal_periods_period_check",
+          sql: "period_start <= period_end"
+        },
+        {
+          name: "fiscal_periods_number_check",
+          sql: "period_number between 1 and 366"
+        },
+        {
+          name: "fiscal_periods_status_check",
+          sql: "status in ('open', 'closing', 'closed')"
+        },
+        {
+          name: "fiscal_periods_version_check",
+          sql: "version >= 1"
+        },
+        {
+          name: "fiscal_periods_timestamp_check",
+          sql: "updated_at >= created_at"
+        },
+        {
+          name: "fiscal_periods_closed_event_check",
+          sql: "status <> 'closed' or close_event_id is not null"
+        },
+        foreignKey(
+          "fiscal_periods_company_source_scope_fk",
+          ["tenant_id", "company_id", "source_id"],
+          "company_sources",
+          ["tenant_id", "company_id", "source_id"]
+        ),
+        foreignKey(
+          "fiscal_periods_close_event_scope_fk",
+          ["tenant_id", "company_id", "source_id", "close_event_id"],
+          "financial_lifecycle_events",
+          ["tenant_id", "company_id", "source_id", "event_id"]
+        ),
+        foreignKey(
+          "fiscal_periods_reopen_event_scope_fk",
+          ["tenant_id", "company_id", "source_id", "reopen_event_id"],
+          "financial_lifecycle_events",
+          ["tenant_id", "company_id", "source_id", "event_id"]
+        )
+      ],
+      [
+        {
+          name: "fiscal_periods_identity_uidx",
+          columns: ["tenant_id", "company_id", "source_id", "fiscal_year", "period_number"],
+          unique: true
+        },
+        {
+          name: "fiscal_periods_scope_uidx",
+          columns: ["tenant_id", "company_id", "source_id", "fiscal_period_id"],
+          unique: true
+        },
+        {
+          name: "fiscal_periods_date_idx",
+          columns: ["tenant_id", "company_id", "source_id", "period_start", "period_end", "status"]
         }
       ]
     ),
@@ -655,6 +949,271 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         {
           name: "ledger_postings_import_batch_idx",
           columns: ["tenant_id", "import_batch_id"]
+        }
+      ]
+    ),
+    table(
+      "journal_entry_links",
+      "Append-only reversal, void, correction, and replacement relationships between immutable posted journals.",
+      [
+        id("journal_entry_link_id"),
+        text("tenant_id"),
+        text("company_id"),
+        text("source_id"),
+        text("original_transaction_id"),
+        text("related_transaction_id"),
+        text("link_type"),
+        text("lifecycle_event_id"),
+        timestamp("created_at")
+      ],
+      [
+        {
+          name: "journal_entry_links_type_check",
+          sql: "link_type in ('reversal', 'void', 'correction', 'replacement')"
+        },
+        {
+          name: "journal_entry_links_distinct_check",
+          sql: "original_transaction_id <> related_transaction_id"
+        },
+        foreignKey(
+          "journal_entry_links_company_source_scope_fk",
+          ["tenant_id", "company_id", "source_id"],
+          "company_sources",
+          ["tenant_id", "company_id", "source_id"]
+        ),
+        foreignKey(
+          "journal_entry_links_original_scope_fk",
+          ["tenant_id", "source_id", "original_transaction_id"],
+          "transactions",
+          ["tenant_id", "source_id", "transaction_id"]
+        ),
+        foreignKey(
+          "journal_entry_links_related_scope_fk",
+          ["tenant_id", "source_id", "related_transaction_id"],
+          "transactions",
+          ["tenant_id", "source_id", "transaction_id"]
+        ),
+        foreignKey(
+          "journal_entry_links_event_scope_fk",
+          ["tenant_id", "company_id", "source_id", "lifecycle_event_id"],
+          "financial_lifecycle_events",
+          ["tenant_id", "company_id", "source_id", "event_id"]
+        )
+      ],
+      [
+        {
+          name: "journal_entry_links_identity_uidx",
+          columns: ["tenant_id", "company_id", "source_id", "original_transaction_id", "related_transaction_id", "link_type"],
+          unique: true
+        },
+        {
+          name: "journal_entry_links_original_idx",
+          columns: ["tenant_id", "company_id", "source_id", "original_transaction_id", "created_at"]
+        },
+        {
+          name: "journal_entry_links_terminal_reversal_uidx",
+          columns: ["tenant_id", "company_id", "source_id", "original_transaction_id"],
+          unique: true,
+          whereSql: `"link_type" = any (array['reversal'::text, 'void'::text])`
+        },
+        {
+          name: "journal_entry_links_terminal_replacement_uidx",
+          columns: ["tenant_id", "company_id", "source_id", "original_transaction_id"],
+          unique: true,
+          whereSql: `"link_type" = any (array['correction'::text, 'replacement'::text])`
+        }
+      ]
+    ),
+    table(
+      "subledger_documents",
+      "Versioned receivable, payable, cash, credit, refund, write-off, deposit, and transfer documents.",
+      [
+        id("subledger_document_id"),
+        text("tenant_id"),
+        text("company_id"),
+        text("source_id"),
+        text("document_type"),
+        text("transaction_id"),
+        text("party_id", true),
+        text("document_number", true),
+        date("document_date"),
+        date("due_date", true),
+        text("currency_code"),
+        numeric("original_amount"),
+        numeric("open_amount"),
+        text("status"),
+        integer("version"),
+        text("idempotency_key"),
+        text("lifecycle_event_id"),
+        jsonb("metadata", 4096, false),
+        timestamp("created_at"),
+        timestamp("updated_at")
+      ],
+      [
+        {
+          name: "subledger_documents_type_check",
+          sql: "document_type in ('invoice', 'customer_payment', 'credit_memo', 'refund', 'vendor_bill', 'bill_payment', 'write_off', 'deposit', 'transfer')"
+        },
+        {
+          name: "subledger_documents_amount_check",
+          sql: "original_amount > 0 and open_amount >= 0 and open_amount <= original_amount"
+        },
+        {
+          name: "subledger_documents_status_check",
+          sql: "(status = 'open' and open_amount = original_amount) or (status = 'partially_applied' and open_amount > 0 and open_amount < original_amount) or (status in ('settled', 'voided') and open_amount = 0)"
+        },
+        {
+          name: "subledger_documents_version_check",
+          sql: "version >= 1"
+        },
+        {
+          name: "subledger_documents_due_date_check",
+          sql: "due_date is null or due_date >= document_date"
+        },
+        {
+          name: "subledger_documents_timestamp_check",
+          sql: "updated_at >= created_at"
+        },
+        foreignKey(
+          "subledger_documents_company_source_scope_fk",
+          ["tenant_id", "company_id", "source_id"],
+          "company_sources",
+          ["tenant_id", "company_id", "source_id"]
+        ),
+        foreignKey(
+          "subledger_documents_transaction_scope_fk",
+          ["tenant_id", "source_id", "transaction_id"],
+          "transactions",
+          ["tenant_id", "source_id", "transaction_id"]
+        ),
+        foreignKey(
+          "subledger_documents_party_scope_fk",
+          ["tenant_id", "source_id", "party_id"],
+          "parties",
+          ["tenant_id", "source_id", "party_id"]
+        ),
+        foreignKey(
+          "subledger_documents_event_scope_fk",
+          ["tenant_id", "company_id", "source_id", "lifecycle_event_id"],
+          "financial_lifecycle_events",
+          ["tenant_id", "company_id", "source_id", "event_id"]
+        )
+      ],
+      [
+        {
+          name: "subledger_documents_idempotency_uidx",
+          columns: ["tenant_id", "company_id", "source_id", "idempotency_key"],
+          unique: true
+        },
+        {
+          name: "subledger_documents_scope_uidx",
+          columns: ["tenant_id", "company_id", "source_id", "subledger_document_id"],
+          unique: true
+        },
+        {
+          name: "subledger_documents_open_idx",
+          columns: ["tenant_id", "company_id", "source_id", "document_type", "status", "due_date", "document_date"]
+        },
+        {
+          name: "subledger_documents_party_idx",
+          columns: ["tenant_id", "company_id", "source_id", "party_id", "document_type", "status"]
+        }
+      ]
+    ),
+    table(
+      "subledger_applications",
+      "Versioned payment and credit allocations with database-enforced balance, party, scope, currency, and terminal-state invariants.",
+      [
+        id("subledger_application_id"),
+        text("tenant_id"),
+        text("company_id"),
+        text("source_id"),
+        text("application_type"),
+        text("source_document_id"),
+        text("target_document_id"),
+        numeric("applied_amount"),
+        text("currency_code"),
+        date("application_date"),
+        text("status"),
+        integer("version"),
+        text("idempotency_key"),
+        text("applied_event_id"),
+        text("ended_event_id", true),
+        timestamp("created_at"),
+        timestamp("updated_at")
+      ],
+      [
+        {
+          name: "subledger_applications_type_check",
+          sql: "application_type in ('customer_payment_to_invoice', 'bill_payment_to_bill', 'credit_to_invoice')"
+        },
+        {
+          name: "subledger_applications_amount_check",
+          sql: "applied_amount > 0"
+        },
+        {
+          name: "subledger_applications_status_check",
+          sql: "status in ('applied', 'unapplied', 'voided')"
+        },
+        {
+          name: "subledger_applications_version_check",
+          sql: "version >= 1"
+        },
+        {
+          name: "subledger_applications_distinct_check",
+          sql: "source_document_id <> target_document_id"
+        },
+        {
+          name: "subledger_applications_terminal_event_check",
+          sql: "(status = 'applied' and ended_event_id is null) or (status in ('unapplied', 'voided') and ended_event_id is not null)"
+        },
+        {
+          name: "subledger_applications_timestamp_check",
+          sql: "updated_at >= created_at"
+        },
+        foreignKey(
+          "subledger_applications_source_document_scope_fk",
+          ["tenant_id", "company_id", "source_id", "source_document_id"],
+          "subledger_documents",
+          ["tenant_id", "company_id", "source_id", "subledger_document_id"]
+        ),
+        foreignKey(
+          "subledger_applications_target_document_scope_fk",
+          ["tenant_id", "company_id", "source_id", "target_document_id"],
+          "subledger_documents",
+          ["tenant_id", "company_id", "source_id", "subledger_document_id"]
+        ),
+        foreignKey(
+          "subledger_applications_applied_event_scope_fk",
+          ["tenant_id", "company_id", "source_id", "applied_event_id"],
+          "financial_lifecycle_events",
+          ["tenant_id", "company_id", "source_id", "event_id"]
+        ),
+        foreignKey(
+          "subledger_applications_ended_event_scope_fk",
+          ["tenant_id", "company_id", "source_id", "ended_event_id"],
+          "financial_lifecycle_events",
+          ["tenant_id", "company_id", "source_id", "event_id"]
+        )
+      ],
+      [
+        {
+          name: "subledger_applications_idempotency_uidx",
+          columns: ["tenant_id", "company_id", "source_id", "idempotency_key"],
+          unique: true
+        },
+        {
+          name: "subledger_applications_scope_uidx",
+          columns: ["tenant_id", "company_id", "source_id", "subledger_application_id"],
+          unique: true
+        },
+        {
+          name: "subledger_applications_source_status_idx",
+          columns: ["tenant_id", "company_id", "source_id", "source_document_id", "status", "application_date"]
+        },
+        {
+          name: "subledger_applications_target_status_idx",
+          columns: ["tenant_id", "company_id", "source_id", "target_document_id", "status", "application_date"]
         }
       ]
     ),
@@ -1352,9 +1911,10 @@ function renderTableSql(namespace: string, tableManifest: PostgresTableManifest)
     createTableSql,
     ...tableManifest.indexes.map((index) => {
       const uniqueSql = index.unique === true ? "unique " : "";
+      const whereSql = index.whereSql === undefined ? "" : ` where ${index.whereSql}`;
       return `create ${uniqueSql}index if not exists ${quoteIdentifier(index.name)} on ${qualifiedTableName} (${index.columns
         .map(quoteIdentifier)
-        .join(", ")});`;
+        .join(", ")})${whereSql};`;
     })
   ];
 }

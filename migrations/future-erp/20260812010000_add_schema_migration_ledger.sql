@@ -16,3 +16,18 @@ create table if not exists "erp_financials"."schema_migrations" (
 
 create unique index if not exists "schema_migrations_to_version_uidx"
   on "erp_financials"."schema_migrations" ("to_version");
+
+create or replace function "erp_financials"."reject_schema_migration_mutation"()
+returns trigger
+language plpgsql
+as $immutable_schema_migration$
+begin
+  raise exception 'schema migration history is append-only';
+  return old;
+end
+$immutable_schema_migration$;
+
+drop trigger if exists "schema_migrations_immutable" on "erp_financials"."schema_migrations";
+create trigger "schema_migrations_immutable"
+before update or delete on "erp_financials"."schema_migrations"
+for each row execute function "erp_financials"."reject_schema_migration_mutation"();

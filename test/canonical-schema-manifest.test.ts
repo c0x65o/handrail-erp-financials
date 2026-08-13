@@ -29,8 +29,8 @@ const MIGRATION_LEDGER_UPGRADE_SQL = readFileSync(
 
 describe("canonical schema manifest", () => {
   it("is versioned and covers the documented canonical entities", () => {
-    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.manifestVersion).toBe("2026-08-12.scoped-integrity-v1");
-    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion).toBe(9);
+    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.manifestVersion).toBe("2026-08-12.subledger-v1");
+    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion).toBe(13);
 
     const tableNames = POSTGRES_CANONICAL_SCHEMA_MANIFEST.tables.map((table) => table.name);
 
@@ -39,6 +39,9 @@ describe("canonical schema manifest", () => {
       "accounting_companies",
       "accounting_sources",
       "company_sources",
+      "financial_lifecycle_events",
+      "accounting_book_controls",
+      "fiscal_periods",
       "accounts",
       "parties",
       "items",
@@ -46,6 +49,9 @@ describe("canonical schema manifest", () => {
       "transactions",
       "transaction_lines",
       "ledger_postings",
+      "journal_entry_links",
+      "subledger_documents",
+      "subledger_applications",
       "posting_rules",
       "transaction_match_candidates",
       "transaction_match_decisions",
@@ -203,11 +209,23 @@ describe("canonical schema manifest", () => {
       '"report_snapshots" (\n  "report_snapshot_id" text not null,\n  "tenant_id" text not null,\n  "company_id"'
     );
     expect(MIGRATION_LEDGER_UPGRADE_SQL).toContain('create table if not exists "erp_financials"."schema_migrations"');
+    expect(MIGRATION_LEDGER_UPGRADE_SQL).toContain('create trigger "schema_migrations_immutable"');
+    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.requiredTriggers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "schema_migrations_immutable", table: "schema_migrations" }),
+        expect.objectContaining({ name: "financial_lifecycle_events_immutable" }),
+        expect.objectContaining({ name: "subledger_applications_validate" })
+      ])
+    );
     expect(POSTGRES_MIGRATIONS.map(({ fromVersion, toVersion }) => [fromVersion, toVersion])).toEqual([
       [0, 6],
       [6, 7],
       [7, 8],
-      [8, 9]
+      [8, 9],
+      [9, 10],
+      [10, 11],
+      [11, 12],
+      [12, 13]
     ]);
     expect(renderPostgresSchemaSql()).toContain('create table if not exists "erp_financials"."schema_migrations"');
     expect(FUTURE_ERP_CANONICAL_SCHEMA_MIGRATION_SQL).not.toMatch(

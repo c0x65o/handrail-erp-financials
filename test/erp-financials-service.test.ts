@@ -59,6 +59,7 @@ describe("reusable ERP Financials service", () => {
     const financials = service(database);
 
     const result = await financials.accounts.upsertTree({
+      operation: operation("request-account-tree-depth"),
       parent: {
         accountId: "acct_service_revenue",
         accountNumber: "4000",
@@ -111,13 +112,15 @@ describe("reusable ERP Financials service", () => {
       tenant_id: "tenant_service",
       source_id: "source_service"
     });
-    expect(database.client.calls.at(-1)?.sql).toContain('update "erp_financials"."report_snapshots" rs');
+    expect(database.client.calls.some((call) => call.sql.includes('update "erp_financials"."report_snapshots" rs'))).toBe(true);
+    expect(result.lifecycleEventId).toMatch(/^event_[a-f0-9]{24}$/);
   });
 
   it("derives scoped canonical ids from reusable account keys across tree and journal calls", async () => {
     const database = new ServiceTestDatabase();
     const financials = service(database);
     const tree = await financials.accounts.upsertTree({
+      operation: operation("request-account-tree-keys"),
       parent: {
         accountKey: "service-revenue",
         name: "Service Revenue",
@@ -144,6 +147,7 @@ describe("reusable ERP Financials service", () => {
       sourceId: "source_service",
       currencyCode: "USD"
     }).accounts.upsertTree({
+      operation: operation("request-other-tenant-tree"),
       parent: {
         accountKey: "service-revenue",
         name: "Service Revenue",
@@ -153,6 +157,7 @@ describe("reusable ERP Financials service", () => {
     expect(otherTenantTree.accounts[0]?.accountId).not.toBe(accountIdsBySourceId["service-revenue"]);
 
     await financials.journalEntries.post({
+      operation: operation("request-account-key-reclassification"),
       idempotencyKey: "account-key-reclassification",
       date: "2026-08-12",
       lines: [
@@ -241,7 +246,12 @@ describe("reusable ERP Financials service", () => {
         postings: 0
       }
     });
-    expect(retryCalls.some((call) => call.sql.startsWith("insert into"))).toBe(false);
+    expect(
+      retryCalls.some(
+        (call) =>
+          call.sql.startsWith("insert into") && !call.sql.includes('"erp_financials"."financial_lifecycle_events"')
+      )
+    ).toBe(false);
     expect(database.transactionCalls).toBe(2);
     expect(database.commits).toBe(2);
   });
@@ -278,6 +288,7 @@ describe("reusable ERP Financials service", () => {
 
     await expect(
       financials.journalEntries.post({
+        operation: operation("request-unbalanced-entry"),
         idempotencyKey: "unbalanced-entry",
         date: "2026-08-12",
         lines: [
@@ -299,6 +310,7 @@ describe("reusable ERP Financials service", () => {
 
     await expect(
       financials.journalEntries.post({
+        operation: operation("request-inactive-entry"),
         idempotencyKey: "inactive-entry",
         date: "2026-08-12",
         lines: [
@@ -329,12 +341,432 @@ describe("reusable ERP Financials service", () => {
     expect(database.client.calls.some((call) => call.sql.includes('update "erp_financials"."report_snapshots"'))).toBe(false);
   });
 
+  it.each([
+    ["reverse", "reversed", "reversal"],
+    ["void", "voided", "void"]
+  ] as const)("%ss a posted journal with a new opposite entry and immutable linkage", async (method, outcome, linkType) => {
+    const database = new ServiceTestDatabase([
+      accountRow("acct_service_revenue", true),
+      accountRow("acct_setup_fee", true),
+      accountRow("acct_access_fee", true)
+    ]);
+    const financials = service(database);
+    const original = await financials.journalEntries.post(reclassificationEntry());
+    const originalStored = structuredClone(
+      database.client.storedJournals.get("JournalEntry:service-revenue-reclass-2026-08")
+    );
+
+    const result = await financials.journalEntries[method]({
+      originalTransactionId: original.transactionId,
+      idempotencyKey: `workflow-${method}`,
+      date: "2026-08-13",
+      operation: approvedOperation(`request-${method}`)
+    });
+
+    expect(result.outcome).toBe(outcome);
+    expect(result.reversal.transactionId).not.toBe(original.transactionId);
+    expect(database.client.storedJournals.get("JournalEntry:service-revenue-reclass-2026-08")).toEqual(
+      originalStored
+    );
+    const reversalPostings = database.client.storedPostings.filter(
+      (posting) => posting.transaction_id === result.reversal.transactionId
+    );
+    expect(reversalPostings.map((posting) => [posting.debit_amount, posting.credit_amount])).toEqual(
+      expect.arrayContaining([
+        ["0.00", "100.00"],
+        ["30.00", "0.00"],
+        ["70.00", "0.00"]
+      ])
+    );
+    expect(database.client.journalLinks).toEqual([
+      expect.objectContaining({
+        original_transaction_id: original.transactionId,
+        related_transaction_id: result.reversal.transactionId,
+        link_type: linkType
+      })
+    ]);
+  });
+
+  it("prevents a second terminal reversal or void workflow for the same journal", async () => {
+    const database = new ServiceTestDatabase([
+      accountRow("acct_service_revenue", true),
+      accountRow("acct_setup_fee", true),
+      accountRow("acct_access_fee", true)
+    ]);
+    const financials = service(database);
+    const original = await financials.journalEntries.post(reclassificationEntry());
+    await financials.journalEntries.reverse({
+      originalTransactionId: original.transactionId,
+      idempotencyKey: "first-terminal-workflow",
+      date: "2026-08-13",
+      operation: approvedOperation("request-first-terminal-workflow")
+    });
+
+    await expect(
+      financials.journalEntries.void({
+        originalTransactionId: original.transactionId,
+        idempotencyKey: "second-terminal-workflow",
+        date: "2026-08-14",
+        operation: approvedOperation("request-second-terminal-workflow")
+      })
+    ).rejects.toThrow("already has a terminal reversal workflow");
+    expect(database.client.journalLinks).toHaveLength(1);
+  });
+
+  it.each([
+    ["correct", "corrected", "correction"],
+    ["replace", "replaced", "replacement"]
+  ] as const)("%ss a journal with atomic reversal and replacement entries", async (method, outcome, linkType) => {
+    const database = new ServiceTestDatabase([
+      accountRow("acct_service_revenue", true),
+      accountRow("acct_setup_fee", true),
+      accountRow("acct_access_fee", true)
+    ]);
+    const financials = service(database);
+    const original = await financials.journalEntries.post(reclassificationEntry());
+
+    const result = await financials.journalEntries[method]({
+      originalTransactionId: original.transactionId,
+      idempotencyKey: `workflow-${method}`,
+      date: "2026-08-13",
+      operation: approvedOperation(`request-${method}`),
+      replacement: {
+        idempotencyKey: `workflow-${method}:replacement-entry`,
+        date: "2026-08-13",
+        memo: "Corrected classification",
+        lines: [
+          { accountId: "acct_service_revenue", debit: "100.00" },
+          { accountId: "acct_setup_fee", credit: "25.00" },
+          { accountId: "acct_access_fee", credit: "75.00" }
+        ]
+      }
+    });
+
+    expect(result).toMatchObject({ outcome, originalTransactionId: original.transactionId });
+    expect(result.replacement?.transactionId).toBeDefined();
+    expect(result.journalEntryLinkIds).toHaveLength(2);
+    expect(database.transactionCalls).toBe(2);
+    expect(database.client.journalLinks.map((link) => link.link_type)).toEqual(["reversal", linkType]);
+    expect(database.client.storedJournals.size).toBe(3);
+  });
+
+  it("requires an independent approver before opening a journal lifecycle transaction", async () => {
+    const database = new ServiceTestDatabase();
+    const financials = service(database);
+
+    await expect(
+      financials.journalEntries.reverse({
+        originalTransactionId: "transaction_original",
+        idempotencyKey: "reverse-without-approval",
+        date: "2026-08-13",
+        operation: operation("request-reverse-no-approval")
+      })
+    ).rejects.toThrow("operation.approverRef is required");
+    expect(database.transactionCalls).toBe(0);
+  });
+
+  it("atomically creates invoices and payments, applies once, and restores both balances on unapply", async () => {
+    const database = subledgerDatabase();
+    const financials = service(database);
+    const invoice = await financials.invoices.create({
+      operation: operation("request-invoice"),
+      idempotencyKey: "invoice-1001",
+      date: "2026-08-01",
+      dueDate: "2026-08-31",
+      customerId: "customer_acme",
+      receivableAccount: { accountId: "acct_receivable" },
+      revenueLines: [
+        { accountId: "acct_service_revenue", amount: "70.00" },
+        { accountId: "acct_access_fee", amount: "30.00" }
+      ]
+    });
+    const payment = await financials.customerPayments.record({
+      operation: operation("request-payment"),
+      idempotencyKey: "payment-1001",
+      date: "2026-08-05",
+      customerId: "customer_acme",
+      amount: "60.00",
+      cashAccount: { accountId: "acct_cash" },
+      receivableAccount: { accountId: "acct_receivable" }
+    });
+
+    const applied = await financials.paymentApplications.apply({
+      operation: operation("request-apply"),
+      idempotencyKey: "apply-payment-1001",
+      applicationType: "customer_payment_to_invoice",
+      sourceDocumentId: payment.documentId,
+      targetDocumentId: invoice.documentId,
+      amount: "60.00",
+      applicationDate: "2026-08-05",
+      expectedSourceVersion: 1,
+      expectedTargetVersion: 1
+    });
+    const retry = await financials.paymentApplications.apply({
+      operation: operation("request-apply-retry"),
+      idempotencyKey: "apply-payment-1001",
+      applicationType: "customer_payment_to_invoice",
+      sourceDocumentId: payment.documentId,
+      targetDocumentId: invoice.documentId,
+      amount: "60.00",
+      applicationDate: "2026-08-05",
+      expectedSourceVersion: 1,
+      expectedTargetVersion: 1
+    });
+
+    expect(applied).toMatchObject({ status: "applied", appliedAmount: "60.00", version: 1 });
+    expect(retry).toEqual({ ...applied, status: "already_applied" });
+    await expect(
+      financials.paymentApplications.apply({
+        operation: operation("request-apply-conflict"),
+        idempotencyKey: "apply-payment-1001",
+        applicationType: "customer_payment_to_invoice",
+        sourceDocumentId: payment.documentId,
+        targetDocumentId: invoice.documentId,
+        amount: "60.00",
+        applicationDate: "2026-08-06",
+        expectedSourceVersion: 1,
+        expectedTargetVersion: 1
+      })
+    ).rejects.toBeInstanceOf(ErpFinancialsIdempotencyConflictError);
+    expect(subledgerRow(database, payment.documentId)).toMatchObject({
+      open_amount: "0.00",
+      status: "settled",
+      version: 2
+    });
+    expect(subledgerRow(database, invoice.documentId)).toMatchObject({
+      open_amount: "40.00",
+      status: "partially_applied",
+      version: 2
+    });
+
+    const unapplied = await financials.paymentApplications.unapply({
+      operation: approvedOperation("request-unapply"),
+      applicationId: applied.applicationId,
+      expectedVersion: 1
+    });
+    const unapplyRetry = await financials.paymentApplications.unapply({
+      operation: approvedOperation("request-unapply-retry"),
+      applicationId: applied.applicationId,
+      expectedVersion: 1
+    });
+
+    expect(unapplied).toMatchObject({ status: "unapplied", version: 2 });
+    expect(unapplyRetry).toEqual(unapplied);
+    expect(subledgerRow(database, payment.documentId)).toMatchObject({ open_amount: "60.00", status: "open", version: 3 });
+    expect(subledgerRow(database, invoice.documentId)).toMatchObject({ open_amount: "100.00", status: "open", version: 3 });
+    expect(database.client.subledgerApplications).toHaveLength(1);
+
+    await expect(
+      financials.paymentApplications.apply({
+        operation: operation("request-reapply-ended"),
+        idempotencyKey: "apply-payment-1001",
+        applicationType: "customer_payment_to_invoice",
+        sourceDocumentId: payment.documentId,
+        targetDocumentId: invoice.documentId,
+        amount: "60.00",
+        applicationDate: "2026-08-05",
+        expectedSourceVersion: 3,
+        expectedTargetVersion: 3
+      })
+    ).rejects.toThrow("cannot be replayed as applied");
+  });
+
+  it("namespaces journal persistence identities by transaction type", async () => {
+    const database = subledgerDatabase();
+    const financials = service(database);
+    const nativeJournal = await financials.journalEntries.post({
+      operation: operation("request-shared-key-journal"),
+      idempotencyKey: "shared-idempotency-key",
+      date: "2026-08-01",
+      lines: [
+        { accountId: "acct_receivable", debit: "10.00" },
+        { accountId: "acct_service_revenue", credit: "10.00" }
+      ]
+    });
+    const invoice = await financials.invoices.create({
+      operation: operation("request-shared-key-invoice"),
+      idempotencyKey: "shared-idempotency-key",
+      date: "2026-08-01",
+      dueDate: "2026-08-31",
+      customerId: "customer_acme",
+      receivableAccount: { accountId: "acct_receivable" },
+      revenueLines: [{ accountId: "acct_service_revenue", amount: "10.00" }]
+    });
+
+    expect(invoice.journal.transactionId).not.toBe(nativeJournal.transactionId);
+    expect(invoice.journal.importBatchId).not.toBe(nativeJournal.importBatchId);
+    expect(invoice.journal.postingIds).not.toEqual(nativeJournal.postingIds);
+  });
+
+  it("rejects a subledger idempotency replay when material document facts change", async () => {
+    const database = subledgerDatabase();
+    const financials = service(database);
+    const input = {
+      operation: operation("request-invoice-idempotency"),
+      idempotencyKey: "invoice-idempotency",
+      date: "2026-08-01",
+      dueDate: "2026-08-31",
+      customerId: "customer_acme",
+      receivableAccount: { accountId: "acct_receivable" },
+      revenueLines: [{ accountId: "acct_service_revenue", amount: "10.00" }]
+    } as const;
+
+    await financials.invoices.create(input);
+    await expect(
+      financials.invoices.create({ ...input, dueDate: "2026-09-01" })
+    ).rejects.toBeInstanceOf(ErpFinancialsIdempotencyConflictError);
+    expect(database.client.subledgerDocuments).toHaveLength(1);
+  });
+
+  it("rejects cross-party, cross-currency, over-balance, and stale-version applications before writing", async () => {
+    const database = subledgerDatabase();
+    const financials = service(database);
+    const invoice = await financials.invoices.create({
+      operation: operation("request-invoice-invariants"),
+      idempotencyKey: "invoice-invariants",
+      date: "2026-08-01",
+      dueDate: "2026-08-31",
+      customerId: "customer_acme",
+      receivableAccount: { accountId: "acct_receivable" },
+      revenueLines: [{ accountId: "acct_service_revenue", amount: "100.00" }]
+    });
+    const payment = await financials.customerPayments.record({
+      operation: operation("request-payment-invariants"),
+      idempotencyKey: "payment-invariants",
+      date: "2026-08-05",
+      customerId: "customer_other",
+      amount: "60.00",
+      cashAccount: { accountId: "acct_cash" },
+      receivableAccount: { accountId: "acct_receivable" }
+    });
+
+    await expect(
+      financials.paymentApplications.apply({
+        operation: operation("request-cross-party"),
+        idempotencyKey: "apply-cross-party",
+        applicationType: "customer_payment_to_invoice",
+        sourceDocumentId: payment.documentId,
+        targetDocumentId: invoice.documentId,
+        amount: "10.00",
+        applicationDate: "2026-08-05",
+        expectedSourceVersion: 1,
+        expectedTargetVersion: 1
+      })
+    ).rejects.toThrow("same non-null party");
+
+    subledgerRow(database, payment.documentId).party_id = "customer_acme";
+    subledgerRow(database, payment.documentId).currency_code = "EUR";
+    await expect(
+      financials.paymentApplications.apply({
+        operation: operation("request-cross-currency"),
+        idempotencyKey: "apply-cross-currency",
+        applicationType: "customer_payment_to_invoice",
+        sourceDocumentId: payment.documentId,
+        targetDocumentId: invoice.documentId,
+        amount: "10.00",
+        applicationDate: "2026-08-05",
+        expectedSourceVersion: 1,
+        expectedTargetVersion: 1
+      })
+    ).rejects.toThrow("same currency");
+
+    subledgerRow(database, payment.documentId).currency_code = "USD";
+    await expect(
+      financials.paymentApplications.apply({
+        operation: operation("request-over-balance"),
+        idempotencyKey: "apply-over-balance",
+        applicationType: "customer_payment_to_invoice",
+        sourceDocumentId: payment.documentId,
+        targetDocumentId: invoice.documentId,
+        amount: "61.00",
+        applicationDate: "2026-08-05",
+        expectedSourceVersion: 1,
+        expectedTargetVersion: 1
+      })
+    ).rejects.toThrow("exceeds an available document balance");
+
+    await expect(
+      financials.paymentApplications.apply({
+        operation: operation("request-stale-version"),
+        idempotencyKey: "apply-stale-version",
+        applicationType: "customer_payment_to_invoice",
+        sourceDocumentId: payment.documentId,
+        targetDocumentId: invoice.documentId,
+        amount: "10.00",
+        applicationDate: "2026-08-05",
+        expectedSourceVersion: 2,
+        expectedTargetVersion: 1
+      })
+    ).rejects.toThrow("Source document version changed concurrently");
+    expect(database.client.subledgerApplications).toHaveLength(0);
+  });
+
+  it("exposes atomic services for every required receivable, payable, cash, and adjustment document", async () => {
+    const database = subledgerDatabase();
+    const financials = service(database);
+    const results = [
+      await financials.credits.issue({
+        operation: operation("request-credit"), idempotencyKey: "credit-1", date: "2026-08-02",
+        customerId: "customer_acme", amount: "10.00", revenueAccount: { accountId: "acct_service_revenue" },
+        receivableAccount: { accountId: "acct_receivable" }
+      }),
+      await financials.refunds.issue({
+        operation: operation("request-refund"), idempotencyKey: "refund-1", date: "2026-08-03",
+        customerId: "customer_acme", amount: "5.00", receivableAccount: { accountId: "acct_receivable" },
+        cashAccount: { accountId: "acct_cash" }
+      }),
+      await financials.vendorBills.create({
+        operation: operation("request-bill"), idempotencyKey: "bill-1", date: "2026-08-04", dueDate: "2026-09-03",
+        vendorId: "vendor_northwind", payableAccount: { accountId: "acct_payable" },
+        expenseLines: [{ accountId: "acct_expense", amount: "25.00" }]
+      }),
+      await financials.billPayments.record({
+        operation: operation("request-bill-payment"), idempotencyKey: "bill-payment-1", date: "2026-08-05",
+        vendorId: "vendor_northwind", amount: "20.00", payableAccount: { accountId: "acct_payable" },
+        cashAccount: { accountId: "acct_cash" }
+      }),
+      await financials.writeOffs.record({
+        operation: operation("request-write-off"), idempotencyKey: "write-off-1", date: "2026-08-06",
+        partyId: "customer_acme", amount: "7.00", balanceType: "receivable",
+        balanceAccount: { accountId: "acct_receivable" }, writeOffAccount: { accountId: "acct_expense" }
+      }),
+      await financials.deposits.record({
+        operation: operation("request-deposit"), idempotencyKey: "deposit-1", date: "2026-08-07", amount: "30.00",
+        bankAccount: { accountId: "acct_cash" }, clearingAccount: { accountId: "acct_clearing" }
+      }),
+      await financials.transfers.record({
+        operation: operation("request-transfer"), idempotencyKey: "transfer-1", date: "2026-08-08", amount: "15.00",
+        fromAccount: { accountId: "acct_cash" }, toAccount: { accountId: "acct_clearing" }
+      })
+    ];
+
+    expect(results.map((result) => result.documentType)).toEqual([
+      "credit_memo", "refund", "vendor_bill", "bill_payment", "write_off", "deposit", "transfer"
+    ]);
+    expect(results.every((result) => result.status === "posted")).toBe(true);
+    expect(database.client.subledgerDocuments).toHaveLength(7);
+    expect(database.commits).toBe(7);
+
+    await expect(
+      financials.transfers.record({
+        operation: operation("request-transfer-same-account"),
+        idempotencyKey: "transfer-same-account",
+        date: "2026-08-09",
+        amount: "1.00",
+        fromAccount: { accountId: "acct_cash" },
+        toAccount: { accountId: "acct_cash" }
+      })
+    ).rejects.toThrow("must differ");
+    expect(database.transactionCalls).toBe(7);
+  });
+
   it("rejects duplicate account identities before writing a hierarchy", async () => {
     const database = new ServiceTestDatabase();
     const financials = service(database);
 
     await expect(
       financials.accounts.upsertTree({
+        operation: operation("request-duplicate-account"),
         parent: {
           accountId: "acct_service_revenue",
           name: "Service Revenue",
@@ -362,12 +794,14 @@ function service(database: ErpFinancialsTransactionRunner) {
     sourceId: "source_service",
     currencyCode: "USD",
     accountingBasis: "accrual",
+    postingPolicy: "legacy_unrestricted",
     now: () => "2026-08-12T15:00:00.000Z"
   });
 }
 
 function reclassificationEntry(): PostJournalEntryInput {
   return {
+    operation: operation("request-journal-reclass"),
     idempotencyKey: "service-revenue-reclass-2026-08",
     date: "2026-08-12",
     memo: "Break out service revenue",
@@ -377,6 +811,40 @@ function reclassificationEntry(): PostJournalEntryInput {
       { accountId: "acct_access_fee", credit: "70.00" }
     ]
   };
+}
+
+function operation(requestId: string) {
+  return {
+    actorRef: "user:ray",
+    requestId,
+    correlationId: "correlation:erp-service-test",
+    reasonCode: "test_financial_operation",
+    occurredAt: "2026-08-12T14:59:00.000Z"
+  } as const;
+}
+
+function approvedOperation(requestId: string) {
+  return { ...operation(requestId), approverRef: "user:controller" } as const;
+}
+
+function subledgerDatabase(): ServiceTestDatabase {
+  return new ServiceTestDatabase([
+    accountRow("acct_receivable", true),
+    accountRow("acct_payable", true),
+    accountRow("acct_cash", true),
+    accountRow("acct_clearing", true),
+    accountRow("acct_expense", true),
+    accountRow("acct_service_revenue", true),
+    accountRow("acct_access_fee", true)
+  ]);
+}
+
+function subledgerRow(database: ServiceTestDatabase, documentId: string): Record<string, unknown> {
+  const row = database.client.subledgerDocuments.find((document) => document.subledger_document_id === documentId);
+  if (row === undefined) {
+    throw new Error(`Missing subledger test document ${documentId}`);
+  }
+  return row;
 }
 
 function accountRow(accountId: string, active: boolean): Record<string, unknown> {
@@ -408,11 +876,13 @@ class ServiceTestDatabase implements ErpFinancialsTransactionRunner {
 
   async transaction<Result>(operation: (client: PostgresQueryClient) => Promise<Result>): Promise<Result> {
     this.transactionCalls += 1;
+    const before = this.client.snapshot();
     try {
       const result = await operation(this.client);
       this.commits += 1;
       return result;
     } catch (error) {
+      this.client.restore(before);
       this.rollbacks += 1;
       throw error;
     }
@@ -422,11 +892,41 @@ class ServiceTestDatabase implements ErpFinancialsTransactionRunner {
 class ServiceTestClient implements PostgresQueryClient {
   readonly calls: QueryCall[] = [];
   readonly accounts: Record<string, unknown>[];
-  storedJournal?: StoredJournal;
+  readonly storedJournals = new Map<string, StoredJournal & Record<string, unknown>>();
+  storedPostings: Record<string, unknown>[] = [];
+  journalLinks: Record<string, unknown>[] = [];
+  subledgerDocuments: Record<string, unknown>[] = [];
+  subledgerApplications: Record<string, unknown>[] = [];
+  readonly lifecycleEvents = new Map<string, Record<string, unknown>>();
   failInsertTable?: string;
 
   constructor(accounts: readonly Record<string, unknown>[]) {
     this.accounts = [...accounts];
+  }
+
+  snapshot() {
+    return {
+      accounts: structuredClone(this.accounts),
+      storedJournals: structuredClone([...this.storedJournals.entries()]),
+      storedPostings: structuredClone(this.storedPostings),
+      lifecycleEvents: structuredClone([...this.lifecycleEvents.entries()]),
+      journalLinks: structuredClone(this.journalLinks)
+      ,
+      subledgerDocuments: structuredClone(this.subledgerDocuments),
+      subledgerApplications: structuredClone(this.subledgerApplications)
+    };
+  }
+
+  restore(snapshot: ReturnType<ServiceTestClient["snapshot"]>): void {
+    this.accounts.splice(0, this.accounts.length, ...snapshot.accounts);
+    this.storedJournals.clear();
+    snapshot.storedJournals.forEach(([key, value]) => this.storedJournals.set(key, value));
+    this.storedPostings = snapshot.storedPostings;
+    this.lifecycleEvents.clear();
+    snapshot.lifecycleEvents.forEach(([key, value]) => this.lifecycleEvents.set(key, value));
+    this.journalLinks = snapshot.journalLinks;
+    this.subledgerDocuments = snapshot.subledgerDocuments;
+    this.subledgerApplications = snapshot.subledgerApplications;
   }
 
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
@@ -439,6 +939,146 @@ class ServiceTestClient implements PostgresQueryClient {
       return Promise.resolve({ rows: [{ company_source_id: "company_source_service" }] as unknown as readonly Row[] });
     }
 
+    if (sql.includes('from "erp_financials"."parties"')) {
+      const partyId = String(params[2]);
+      return Promise.resolve({
+        rows: [
+          {
+            party_id: partyId,
+            party_type: partyId.includes("vendor") ? "vendor" : "customer",
+            active: true
+          }
+        ] as unknown as readonly Row[]
+      });
+    }
+
+    if (sql.includes('from "erp_financials"."subledger_documents"')) {
+      if (sql.includes('"idempotency_key" = $4')) {
+        const row = this.subledgerDocuments.find((document) => document.idempotency_key === params[3]);
+        return Promise.resolve({ rows: (row === undefined ? [] : [row]) as unknown as readonly Row[] });
+      }
+      const ids = params[3];
+      const rows = Array.isArray(ids)
+        ? this.subledgerDocuments.filter((document) => ids.includes(document.subledger_document_id))
+        : [];
+      return Promise.resolve({ rows: rows as unknown as readonly Row[] });
+    }
+
+    if (sql.includes('insert into "erp_financials"."subledger_documents"')) {
+      const row: Record<string, unknown> = {
+        subledger_document_id: params[0],
+        tenant_id: params[1],
+        company_id: params[2],
+        source_id: params[3],
+        document_type: params[4],
+        transaction_id: params[5],
+        party_id: params[6],
+        document_number: params[7],
+        document_date: params[8],
+        due_date: params[9],
+        currency_code: params[10],
+        original_amount: params[11],
+        open_amount: params[12],
+        status: params[13],
+        version: 1,
+        idempotency_key: params[14],
+        lifecycle_event_id: params[15],
+        metadata: params[16],
+        created_at: params[17],
+        updated_at: params[17]
+      };
+      const existing = this.subledgerDocuments.find((document) => document.idempotency_key === row.idempotency_key);
+      if (existing !== undefined) {
+        return Promise.resolve({ rows: [], rowCount: 0 });
+      }
+      this.subledgerDocuments.push(row);
+      return Promise.resolve({ rows: [row] as unknown as readonly Row[], rowCount: 1 });
+    }
+
+    if (sql.includes('from "erp_financials"."subledger_applications"')) {
+      const row = sql.includes('"idempotency_key" = $4')
+        ? this.subledgerApplications.find((application) => application.idempotency_key === params[3])
+        : this.subledgerApplications.find((application) => application.subledger_application_id === params[3]);
+      return Promise.resolve({ rows: (row === undefined ? [] : [row]) as unknown as readonly Row[] });
+    }
+
+    if (sql.includes('insert into "erp_financials"."subledger_applications"')) {
+      const row: Record<string, unknown> = {
+        subledger_application_id: params[0],
+        tenant_id: params[1],
+        company_id: params[2],
+        source_id: params[3],
+        application_type: params[4],
+        source_document_id: params[5],
+        target_document_id: params[6],
+        applied_amount: params[7],
+        currency_code: params[8],
+        application_date: params[9],
+        status: "applied",
+        version: 1,
+        idempotency_key: params[10],
+        applied_event_id: params[11],
+        ended_event_id: null,
+        created_at: params[12],
+        updated_at: params[12]
+      };
+      this.subledgerApplications.push(row);
+      this.changeSubledgerBalances(row, -1);
+      return Promise.resolve({ rows: [row] as unknown as readonly Row[], rowCount: 1 });
+    }
+
+    if (sql.startsWith('update "erp_financials"."subledger_applications"')) {
+      const row = this.subledgerApplications.find((application) => application.subledger_application_id === params[3]);
+      if (row === undefined || row.version !== params[7] || row.status !== "applied") {
+        return Promise.resolve({ rows: [], rowCount: 0 });
+      }
+      row.status = params[4];
+      row.version = Number(row.version) + 1;
+      row.ended_event_id = params[5];
+      row.updated_at = params[6];
+      this.changeSubledgerBalances(row, 1);
+      return Promise.resolve({ rows: [row] as unknown as readonly Row[], rowCount: 1 });
+    }
+
+    if (sql.includes('insert into "erp_financials"."financial_lifecycle_events"')) {
+      const idempotencyKey = String(params[15]);
+      if (this.lifecycleEvents.has(idempotencyKey)) {
+        return Promise.resolve({ rows: [], rowCount: 0 });
+      }
+      const row = {
+        event_id: params[0],
+        aggregate_type: params[4],
+        aggregate_id: params[5],
+        event_type: params[6],
+        actor_ref: params[7],
+        approver_ref: params[8] ?? null,
+        request_id: params[9],
+        correlation_id: params[10],
+        reason_code: params[11],
+        reason_detail: params[12] ?? null,
+        occurred_at: params[13],
+        payload_checksum: params[16],
+        prior_event_id: params[18] ?? null
+      };
+      this.lifecycleEvents.set(idempotencyKey, row);
+      return Promise.resolve({ rows: [row] as unknown as readonly Row[], rowCount: 1 });
+    }
+
+    if (sql.includes('from "erp_financials"."financial_lifecycle_events"')) {
+      const row = sql.includes('"aggregate_type" = \'journal_entry\'')
+        ? [...this.lifecycleEvents.values()].find((event) => event.aggregate_id === params[3])
+        : this.lifecycleEvents.get(String(params[3]));
+      return Promise.resolve({ rows: (row === undefined ? [] : [row]) as unknown as readonly Row[] });
+    }
+
+    if (sql.includes('from "erp_financials"."journal_entry_links"')) {
+      const linkTypes = Array.isArray(params[4]) ? params[4] : [];
+      const row = this.journalLinks.find(
+        (link) => link.original_transaction_id === params[3] && linkTypes.includes(link.link_type)
+      );
+      return Promise.resolve({ rows: (row === undefined ? [] : [row]) as unknown as readonly Row[] });
+    }
+
     if (sql.includes('from "erp_financials"."accounts"')) {
       const requestedIds = params[2];
       const rows = Array.isArray(requestedIds)
@@ -447,8 +1087,20 @@ class ServiceTestClient implements PostgresQueryClient {
       return Promise.resolve({ rows: rows as readonly Row[] });
     }
 
+    if (sql.includes('join "erp_financials"."ledger_postings"')) {
+      const transaction = [...this.storedJournals.values()].find((row) => row.transaction_id === params[2]);
+      const rows =
+        transaction === undefined
+          ? []
+          : this.storedPostings
+              .filter((posting) => posting.transaction_id === transaction.transaction_id)
+              .map((posting) => ({ ...transaction, ...posting }));
+      return Promise.resolve({ rows: rows as unknown as readonly Row[] });
+    }
+
     if (sql.includes('from "erp_financials"."transactions"') && sql.includes("for update")) {
-      const rows = this.storedJournal === undefined ? [] : [this.storedJournal];
+      const stored = this.storedJournals.get(`${String(params[3])}:${String(params[2])}`);
+      const rows = stored === undefined ? [] : [stored];
       return Promise.resolve({ rows: rows as unknown as readonly Row[] });
     }
 
@@ -459,12 +1111,21 @@ class ServiceTestClient implements PostgresQueryClient {
     if (sql.includes('insert into "erp_financials"."transactions"')) {
       const row = insertedRows({ sql, params })[0];
       if (row !== undefined) {
-        this.storedJournal = {
+        this.storedJournals.set(`${String(row.source_transaction_type)}:${String(row.source_transaction_id)}`, {
+          ...row,
           transaction_id: String(row.transaction_id),
           status: String(row.status),
           source_payload_ref: row.source_payload_ref
-        };
+        });
       }
+    }
+
+    if (sql.includes('insert into "erp_financials"."ledger_postings"')) {
+      this.storedPostings.push(...insertedRows({ sql, params }));
+    }
+
+    if (sql.includes('insert into "erp_financials"."journal_entry_links"')) {
+      this.journalLinks.push(...insertedRows({ sql, params }));
     }
 
     if (sql.includes('insert into "erp_financials"."accounts"')) {
@@ -476,6 +1137,25 @@ class ServiceTestClient implements PostgresQueryClient {
     }
 
     return Promise.resolve({ rows: [] });
+  }
+
+  private changeSubledgerBalances(application: Record<string, unknown>, direction: 1 | -1): void {
+    const amount = Number(application.applied_amount) * direction;
+    for (const id of [application.source_document_id, application.target_document_id]) {
+      const document = this.subledgerDocuments.find((candidate) => candidate.subledger_document_id === id);
+      if (document === undefined) {
+        throw new Error("test subledger document is missing");
+      }
+      const openAmount = Number(document.open_amount) + amount;
+      document.open_amount = openAmount.toFixed(2);
+      document.version = Number(document.version) + 1;
+      document.status =
+        openAmount === 0
+          ? "settled"
+          : openAmount === Number(document.original_amount)
+            ? "open"
+            : "partially_applied";
+    }
   }
 }
 

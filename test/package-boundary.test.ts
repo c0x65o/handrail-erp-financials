@@ -32,11 +32,14 @@ import {
   mapHandrailQuickBooksSdkResourcesToCanonicalFacts,
   mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts,
   mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts,
+  migratePostgresSchema,
+  planPostgresMigrations,
   persistFutureErpCanonicalFacts,
   reconcileReportFreshness,
   renderPostgresSchemaSql,
   validateAccountHierarchy,
   validateFutureErpCanonicalSchemaPreflight,
+  validatePostgresMigrationHistory,
   validatePostgresSchema
 } from "../src/index.js";
 
@@ -56,6 +59,10 @@ describe("package boundary", () => {
     expect(PACKAGE_BOUNDARY.purpose).toContain("provider-neutral");
     expect(PACKAGE_BOUNDARY.owns).toContain("canonical accounting facts");
     expect(PACKAGE_BOUNDARY.owns).toContain("account hierarchy and journal posting orchestration");
+    expect(PACKAGE_BOUNDARY.owns).toContain("ordered database migrations and financial integrity constraints");
+    expect(PACKAGE_BOUNDARY.owns).toContain("immutable financial lifecycle evidence");
+    expect(PACKAGE_BOUNDARY.owns).toContain("fiscal periods, posting locks, and close controls");
+    expect(PACKAGE_BOUNDARY.owns).toContain("receivable, payable, cash, and payment-application subledgers");
     expect(PACKAGE_BOUNDARY.owns).toContain("transaction matching and posting rule evaluation");
     expect(PACKAGE_BOUNDARY.owns).toContain("rollup and snapshot jobs");
     expect(PACKAGE_BOUNDARY.owns).toContain("deterministic fixture/reference report formulas");
@@ -87,6 +94,9 @@ describe("package boundary", () => {
       POSTGRES_CANONICAL_SCHEMA_MANIFEST,
       renderPostgresSchemaSql,
       createPostgresStorageAdapter,
+      planPostgresMigrations,
+      migratePostgresSchema,
+      validatePostgresMigrationHistory,
       validatePostgresSchema,
       checkErpFinancialsInstallHealth,
       validateFutureErpCanonicalSchemaPreflight,
