@@ -108,9 +108,18 @@ describe("fiscal period and posting lock controls", () => {
       })
     ).rejects.toBeInstanceOf(FiscalPeriodConcurrencyError);
 
+    await expect(
+      periods.close({
+        fiscalPeriodId: defined.fiscalPeriodId,
+        expectedVersion: 1,
+        evidence: closeEvidence(),
+        operation: operation("close-without-preparation", true)
+      })
+    ).rejects.toThrow("must be closing before it can close");
+
     expect(database.client.periods[0]?.status).toBe("open");
     expect(database.client.events.size).toBe(eventCount);
-    expect(database.rollbacks).toBe(1);
+    expect(database.rollbacks).toBe(2);
   });
 
   it("allows approved adjustments while closing but rejects ordinary and closed-period postings", async () => {
@@ -140,10 +149,15 @@ describe("fiscal period and posting lock controls", () => {
       periodEnd: "2026-08-31",
       operation: operation("define-drafts", false)
     });
+    const closing = await periods.beginClose({
+      fiscalPeriodId: defined.fiscalPeriodId,
+      expectedVersion: 1,
+      operation: operation("begin-close-drafts", false)
+    });
     await expect(
       periods.close({
         fiscalPeriodId: defined.fiscalPeriodId,
-        expectedVersion: 1,
+        expectedVersion: closing.version,
         evidence: { ...closeEvidence(), evidenceChecksum: "0".repeat(64) },
         operation: operation("close-bad-evidence", true)
       })
@@ -153,12 +167,12 @@ describe("fiscal period and posting lock controls", () => {
     await expect(
       periods.close({
         fiscalPeriodId: defined.fiscalPeriodId,
-        expectedVersion: 1,
+        expectedVersion: closing.version,
         evidence: closeEvidence(),
         operation: operation("close-drafts", true)
       })
     ).rejects.toThrow("draft transactions remain");
-    expect(database.client.periods[0]?.status).toBe("open");
+    expect(database.client.periods[0]?.status).toBe("closing");
   });
 });
 

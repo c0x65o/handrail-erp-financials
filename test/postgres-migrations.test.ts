@@ -92,7 +92,7 @@ describe("Postgres schema migrations", () => {
     expect(runner.rollbacks).toBe(0);
   });
 
-  it("adopts an unversioned v6 database and applies only v6 to v8 upgrades", async () => {
+  it("adopts an unversioned v6 database and applies only the remaining ordered upgrades", async () => {
     const client = new MigrationClient({ version: 6, ledgerExists: false, ledger: [] });
     const runner = new MemoryTransactionRunner(client);
 

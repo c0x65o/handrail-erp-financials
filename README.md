@@ -223,7 +223,7 @@ uses an ordered checksummed ledger, advisory transaction locking, transactional
 upgrades, supported legacy-baseline adoption, drift detection, and final schema
 validation. `installSchema({ dryRun: true })` remains a development/compatibility
 DDL preview and is not the production upgrade path. `validateSchema()` reads Postgres catalogs and
-reports missing schema, tables, columns, indexes, constraints, and fixture-loader
+reports missing schema, tables, columns, indexes, constraints, required enforcement triggers, and fixture-loader
 support. Fixture loading, rollup writes, freshness writes, and stale snapshot
 marking are explicit mutating methods so validation can be run safely against a
 host production database.
