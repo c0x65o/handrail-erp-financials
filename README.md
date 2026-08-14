@@ -314,6 +314,15 @@ The supported adoption surfaces are:
   `mapHandrailQuickBooksSdkResourcesToCanonicalFacts`,
   `mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts`, and
   `mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts`.
+- QuickBooks SDK envelope handoff:
+  `adaptHandrailQuickBooksSdkFullSyncEnvelope`,
+  `adaptHandrailQuickBooksSdkIncrementalSyncEnvelope`, and
+  `adaptHandrailQuickBooksSdkSyncEnvelope` accept the public
+  `handrail.quickbooks.normalized-sync-envelope.v1` response directly and
+  return the ERP Financials worker envelope. The adapter validates tenant,
+  realm, and provider identity; preserves checkpoint, delta, completeness, and
+  normalization-warning evidence; requires explicit debit/credit posting
+  polarity; and marks incremental resources with canonical sync actions.
 - QuickBooks sync worker contracts:
   `createQuickBooksFullSyncWorker`, `createQuickBooksIncrementalSyncWorker`,
   `createFutureErpQuickBooksFullSyncWorker`,
@@ -369,6 +378,35 @@ const quickBooksFacts = mapQuickBooksJournalEntriesToCanonicalFacts(quickBooksSd
 const quickBooksResourceFacts = mapHandrailQuickBooksSdkResourcesToCanonicalFacts(handrailQuickBooksResourcesInput);
 const quickBooksEvidence = ERP_FINANCIALS_QUICKBOOKS_ADAPTER_FIXTURE.providerReportEvidence;
 ```
+
+Apps using `@handrail/quickbooks-node-sdk` do not need an app-local accounting
+normalizer. Adapt the SDK response at the package seam, then pass the result to
+the matching ERP Financials worker:
+
+```ts
+import {
+  adaptHandrailQuickBooksSdkFullSyncEnvelope,
+  createQuickBooksFullSyncWorker
+} from "@handrail/erp-financials";
+
+const sdkResponse = await quickBooks.fullSync({ entities });
+const erpEnvelope = adaptHandrailQuickBooksSdkFullSyncEnvelope(sdkResponse, {
+  sourceId,
+  accountingBasis: "accrual",
+  currencyCode: "USD"
+});
+
+const worker = createQuickBooksFullSyncWorker({
+  companyId,
+  persistence,
+  quickBooksClient: { fullSync: async () => erpEnvelope }
+});
+```
+
+Use `adaptHandrailQuickBooksSdkIncrementalSyncEnvelope` with
+`createQuickBooksIncrementalSyncWorker` for delta/checkpoint-resume imports.
+The adapter only reshapes safe normalized SDK data; it does not call Intuit,
+retain credentials, or infer accounting postings in the host app.
 
 For service and SDK boundaries, the package also exports normalized QuickBooks
 resource contracts such as `NormalizedQuickBooksResourceSet`,

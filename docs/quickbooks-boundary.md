@@ -143,6 +143,23 @@ mode, import batch id, checkpoint id, cursor kind/value, freshness timestamps,
 resource counts, warning/error summaries, and idempotency keys explicit without
 exposing provider credentials or raw QuickBooks payloads.
 
+The package also exports the concrete reusable bridge from the QuickBooks SDK
+contract to those worker envelopes:
+
+- `adaptHandrailQuickBooksSdkFullSyncEnvelope`
+- `adaptHandrailQuickBooksSdkIncrementalSyncEnvelope`
+- `adaptHandrailQuickBooksSdkSyncEnvelope`
+
+These functions consume
+`handrail.quickbooks.normalized-sync-envelope.v1` without an app-local cast or
+normalization framework. They fail closed on cross-resource tenant, realm, or
+provider-environment mismatches and on ledger entries that omit a finite amount,
+account reference, or explicit `Debit`/`Credit` polarity. SDK checkpoint and
+delta evidence is retained on the adapted envelope; SDK completeness and
+normalization warnings are retained both as typed evidence and as ERP warning
+summaries; incremental resources carry canonical sync actions for persistence
+evidence and replay handling.
+
 ## Runtime Contract
 
 Host apps should consume the existing Handrail QuickBooks capability and SDK
@@ -156,6 +173,8 @@ Expected app behavior:
 - read QuickBooks service config through the SDK/runtime contract
 - call SDK/service methods for full sync, incremental sync, and provider report
   parity
+- adapt SDK sync responses with the matching
+  `adaptHandrailQuickBooksSdk*SyncEnvelope` package function
 - map `NormalizedQuickBooksResourceSet` or
   `NormalizedQuickBooksSyncResourceSet` into canonical facts through the ERP
   Financials adapter contract:

@@ -1,4 +1,6 @@
 import {
+  adaptHandrailQuickBooksSdkFullSyncEnvelope,
+  adaptHandrailQuickBooksSdkIncrementalSyncEnvelope,
   buildBalanceSheetReport,
   buildCashFlowReport,
   buildFutureErpReportFromCanonicalReadModel,
@@ -66,6 +68,9 @@ import type {
   FutureErpQuickBooksProviderReportParityStatus,
   FreshnessReconcileInput,
   HandrailQuickBooksFullSyncServiceHandler,
+  HandrailQuickBooksSdkEnvelopeAdapterOptions,
+  HandrailQuickBooksSdkFullSyncEnvelope,
+  HandrailQuickBooksSdkIncrementalSyncEnvelope,
   HandrailQuickBooksSdkResourcesAdapterInput,
   HandrailQuickBooksSyncClientTransport,
   NormalizedQuickBooksFullSyncRequestEnvelope,
@@ -87,6 +92,8 @@ import type {
 } from "@handrail/erp-financials";
 
 export const futureErpResolvedFinancialImports = {
+  adaptHandrailQuickBooksSdkFullSyncEnvelope,
+  adaptHandrailQuickBooksSdkIncrementalSyncEnvelope,
   createPostgresStorageAdapter,
   createPostgresTransactionRunner,
   planPostgresMigrations,
@@ -137,6 +144,9 @@ export const futureErpConsumerAccountWithParent: Account = {
 };
 
 export type FutureErpResolvedQuickBooksSyncEnvelopeTypes = {
+  readonly sdkAdapterOptions: HandrailQuickBooksSdkEnvelopeAdapterOptions;
+  readonly sdkFullResponse: HandrailQuickBooksSdkFullSyncEnvelope;
+  readonly sdkIncrementalResponse: HandrailQuickBooksSdkIncrementalSyncEnvelope;
   readonly fullRequest: NormalizedQuickBooksFullSyncRequestEnvelope;
   readonly fullResponse: NormalizedQuickBooksFullSyncResponseEnvelope;
   readonly incrementalRequest: NormalizedQuickBooksIncrementalSyncRequestEnvelope;

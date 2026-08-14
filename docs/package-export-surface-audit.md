@@ -74,6 +74,9 @@ these required supported adoption surfaces from the package root:
   atomic subledger documents, and payment applications.
 - QuickBooks mapping and SDK/service contracts:
   `HandrailQuickBooksSdkResourcesAdapterInput`,
+  `adaptHandrailQuickBooksSdkFullSyncEnvelope`,
+  `adaptHandrailQuickBooksSdkIncrementalSyncEnvelope`,
+  `adaptHandrailQuickBooksSdkSyncEnvelope`,
   `mapHandrailQuickBooksSdkResourcesToCanonicalFacts`,
   `mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts`,
   `mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts`,

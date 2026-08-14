@@ -122,6 +122,11 @@ export {
   createQuickBooksIncrementalSyncWorker,
   mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts
 } from "./quickbooks-incremental-sync.js";
+export {
+  adaptHandrailQuickBooksSdkFullSyncEnvelope,
+  adaptHandrailQuickBooksSdkIncrementalSyncEnvelope,
+  adaptHandrailQuickBooksSdkSyncEnvelope
+} from "./quickbooks-sdk-envelope-adapter.js";
 export { createFutureErpQuickBooksIncrementalSyncWorker } from "./future-erp-quickbooks-incremental-sync.js";
 export {
   generateFutureErpCanonicalReportSnapshotsFromImport,
@@ -857,6 +862,22 @@ export type {
   NormalizedQuickBooksVendorRef,
   NormalizedQuickBooksVendorResource
 } from "./normalized-accounting-contracts.js";
+export type {
+  HandrailQuickBooksSdkAdaptedFullSyncEnvelope,
+  HandrailQuickBooksSdkAdaptedIncrementalSyncEnvelope,
+  HandrailQuickBooksSdkCompletenessResourceFamily,
+  HandrailQuickBooksSdkDeltaCounts,
+  HandrailQuickBooksSdkEnvelopeAdapterOptions,
+  HandrailQuickBooksSdkEnvelopeEvidence,
+  HandrailQuickBooksSdkFullSyncEnvelope,
+  HandrailQuickBooksSdkIncrementalSyncEnvelope,
+  HandrailQuickBooksSdkNormalizationWarning,
+  HandrailQuickBooksSdkNormalizedCompletenessMap,
+  HandrailQuickBooksSdkNormalizedResourceCompleteness,
+  HandrailQuickBooksSdkNormalizedResourceFamily,
+  HandrailQuickBooksSdkNormalizedResourceMap,
+  HandrailQuickBooksSdkNormalizedSyncEnvelope
+} from "./quickbooks-sdk-envelope-adapter.js";
 export type {
   BuiltReport,
   CashFlowActivity,
