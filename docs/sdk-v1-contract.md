@@ -87,7 +87,8 @@ cutover and two source charts mapped onto one book chart.
 `createErpFinancialsSdk(...)` returns:
 
 - `commands`: account, journal, fiscal-period, immutable correction, subledger,
-  payment, credit, refund, deposit, transfer, and write-off commands.
+  payment, credit, refund, issued-adjustment void/replacement, deposit,
+  transfer, and write-off commands.
 - `books`: book definition, effective source binding, book chart definition,
   source-account mapping, and scope resolution.
 - `invoices`: draft create/update/void, atomic issue, issued-invoice void through
@@ -96,9 +97,10 @@ cutover and two source charts mapped onto one book chart.
   accept-and-apply.
 - `bankReconciliation`: idempotent feed ingest, exact bank-posting match,
   approved unmatch, and ignore.
-- `queries`: cursor-paginated invoices, payments, general ledger, chart of
-  accounts, financial statements, dashboard, A/R and A/P aging, bank review,
-  and exact invoice/payment/ledger card summaries for host screens.
+- `queries`: cursor-paginated invoices, payments, credits/refunds, general
+  ledger, chart of accounts, financial statements, dashboard, A/R and A/P
+  aging, bank review, exact adjustment detail, and exact
+  invoice/payment/ledger card summaries for host screens.
 - `outbox`: leased claim/publish/fail operations.
 - `createRuntime(...)`: bounded event delivery and retry routing for a cron,
   queue worker, or serverless timer.
@@ -135,6 +137,25 @@ workflow because customer cash has already changed the accounting outcome.
 
 Invoice list status is derived as draft, open, sent, overdue, partial, paid, or
 voided. Delivery attempts are append-only evidence rather than a mutable flag.
+
+## Credits and refunds
+
+`queries.listAdjustments(...)` is the canonical credit/refund register and
+`queries.getAdjustment(...)` returns the exact document lines, ledger postings,
+applications, and void/replacement links. Hosts must not create a parallel
+adjustment table or recompute these states from route-local data.
+
+Issued adjustments can be ended through `commands.adjustments.voidIssued(...)`
+or replaced through `commands.adjustments.replaceIssued(...)`. Typed
+`commands.credits` and `commands.refunds` aliases expose the same operations.
+Both workflows require independent approval, use optimistic concurrency and
+idempotency, post a compensating adjustment journal, set the original canonical
+document to voided, and record immutable journal/lifecycle links in one database
+transaction. Replacement additionally issues the same adjustment type for the
+same customer. Credits with an active or partial application fail closed until
+the application is unapplied; refunds and unapplied credits never require a
+host-local accounting ledger. Runtime consumers can handle issue, void, and
+replacement events through `onAdjustmentChanged`.
 
 ## Matching and applications
 

@@ -760,6 +760,144 @@ describe("reusable ERP Financials service", () => {
     expect(database.transactionCalls).toBe(7);
   });
 
+  it("voids an unapplied issued credit through one compensating canonical lifecycle", async () => {
+    const database = subledgerDatabase();
+    const financials = service(database);
+    const credit = await financials.credits.issue({
+      operation: operation("request-credit-to-void"),
+      idempotencyKey: "credit-to-void",
+      date: "2026-08-02",
+      customerId: "customer_acme",
+      amount: "10.00",
+      revenueAccount: { accountId: "acct_service_revenue" },
+      receivableAccount: { accountId: "acct_receivable" }
+    });
+    const command = {
+      operation: approvedOperation("request-void-credit"),
+      adjustmentDocumentId: credit.documentId,
+      expectedVersion: 1,
+      idempotencyKey: "void-credit",
+      date: "2026-08-14",
+      memo: "Void duplicate credit"
+    } as const;
+
+    const result = await financials.credits.voidIssued(command);
+    expect(result).toMatchObject({
+      status: "voided",
+      outcome: "voided",
+      adjustmentType: "credit",
+      originalAdjustmentDocumentId: credit.documentId,
+      originalVersion: 2
+    });
+    expect(subledgerRow(database, credit.documentId)).toMatchObject({
+      status: "voided",
+      open_amount: "0.00",
+      version: 2
+    });
+    expect(database.client.journalLinks).toEqual([
+      expect.objectContaining({
+        original_transaction_id: credit.journal.transactionId,
+        related_transaction_id: result.reversal.transactionId,
+        link_type: "void"
+      })
+    ]);
+
+    await expect(financials.adjustments.voidIssued({ ...command, adjustmentType: "credit" })).resolves.toMatchObject({
+      status: "already_voided",
+      originalVersion: 2,
+      reversal: { status: "already_posted" }
+    });
+    expect(database.client.journalLinks).toHaveLength(2);
+    expect(new Set(database.client.journalLinks.map((link) => link.journal_entry_link_id)).size).toBe(1);
+  });
+
+  it("replaces an issued refund with a linked refund while preserving one ledger", async () => {
+    const database = subledgerDatabase();
+    const financials = service(database);
+    const refund = await financials.refunds.issue({
+      operation: operation("request-refund-to-replace"),
+      idempotencyKey: "refund-to-replace",
+      date: "2026-08-03",
+      customerId: "customer_acme",
+      amount: "5.00",
+      receivableAccount: { accountId: "acct_receivable" },
+      cashAccount: { accountId: "acct_cash" }
+    });
+
+    const result = await financials.refunds.replaceIssued({
+      operation: approvedOperation("request-replace-refund"),
+      adjustmentDocumentId: refund.documentId,
+      expectedVersion: 1,
+      idempotencyKey: "replace-refund",
+      date: "2026-08-14",
+      replacement: {
+        idempotencyKey: "replacement-refund",
+        date: "2026-08-14",
+        customerId: "customer_acme",
+        amount: "7.00",
+        receivableAccount: { accountId: "acct_receivable" },
+        cashAccount: { accountId: "acct_cash" }
+      }
+    });
+
+    expect(result).toMatchObject({
+      status: "replaced",
+      outcome: "replaced",
+      adjustmentType: "refund",
+      originalVersion: 2,
+      replacement: {
+        documentType: "refund",
+        originalAmount: "7.00",
+        documentStatus: "settled"
+      }
+    });
+    expect(subledgerRow(database, refund.documentId)).toMatchObject({ status: "voided", version: 2 });
+    expect(database.client.journalLinks.map((link) => link.link_type)).toEqual(["reversal", "replacement"]);
+  });
+
+  it("rejects voiding a credit while it has an active application", async () => {
+    const database = subledgerDatabase();
+    const financials = service(database);
+    const invoice = await financials.invoices.create({
+      operation: operation("request-credit-void-invoice"),
+      idempotencyKey: "credit-void-invoice",
+      date: "2026-08-02",
+      dueDate: "2026-09-02",
+      customerId: "customer_acme",
+      receivableAccount: { accountId: "acct_receivable" },
+      revenueLines: [{ accountId: "acct_service_revenue", amount: "20.00" }]
+    });
+    const credit = await financials.credits.issue({
+      operation: operation("request-applied-credit"),
+      idempotencyKey: "applied-credit",
+      date: "2026-08-03",
+      customerId: "customer_acme",
+      amount: "10.00",
+      revenueAccount: { accountId: "acct_service_revenue" },
+      receivableAccount: { accountId: "acct_receivable" }
+    });
+    await financials.paymentApplications.apply({
+      operation: operation("request-apply-credit-before-void"),
+      idempotencyKey: "apply-credit-before-void",
+      applicationType: "credit_to_invoice",
+      sourceDocumentId: credit.documentId,
+      targetDocumentId: invoice.documentId,
+      amount: "5.00",
+      applicationDate: "2026-08-04",
+      expectedSourceVersion: 1,
+      expectedTargetVersion: 1
+    });
+
+    await expect(financials.credits.voidIssued({
+      operation: approvedOperation("request-void-applied-credit"),
+      adjustmentDocumentId: credit.documentId,
+      expectedVersion: 2,
+      idempotencyKey: "void-applied-credit",
+      date: "2026-08-14"
+    })).rejects.toMatchObject({ code: "terminal_state_conflict" });
+    expect(subledgerRow(database, credit.documentId)).toMatchObject({ status: "partially_applied", version: 2 });
+  });
+
   it("rejects duplicate account identities before writing a hierarchy", async () => {
     const database = new ServiceTestDatabase();
     const financials = service(database);
@@ -1007,8 +1145,20 @@ class ServiceTestClient implements PostgresQueryClient {
       const ids = params[3];
       const rows = Array.isArray(ids)
         ? this.subledgerDocuments.filter((document) => ids.includes(document.subledger_document_id))
-        : [];
+        : this.subledgerDocuments.filter((document) => document.subledger_document_id === ids);
       return Promise.resolve({ rows: rows as unknown as readonly Row[] });
+    }
+
+    if (sql.startsWith('update "erp_financials"."subledger_documents"')) {
+      const row = this.subledgerDocuments.find((document) => document.subledger_document_id === params[3]);
+      if (row === undefined || row.version !== params[5]) {
+        return Promise.resolve({ rows: [], rowCount: 0 });
+      }
+      row.open_amount = "0.00";
+      row.status = "voided";
+      row.version = Number(row.version) + 1;
+      row.updated_at = params[4];
+      return Promise.resolve({ rows: [{ version: row.version }] as unknown as readonly Row[], rowCount: 1 });
     }
 
     if (sql.includes('insert into "erp_financials"."subledger_documents"')) {

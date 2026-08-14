@@ -8,6 +8,7 @@ export type FinancialRuntimeHandlers = {
   readonly onLedgerChanged?: (event: FinancialOutboxEvent) => Promise<void>;
   readonly onInvoiceChanged?: (event: FinancialOutboxEvent) => Promise<void>;
   readonly onPaymentChanged?: (event: FinancialOutboxEvent) => Promise<void>;
+  readonly onAdjustmentChanged?: (event: FinancialOutboxEvent) => Promise<void>;
   readonly onSubledgerDocumentChanged?: (event: FinancialOutboxEvent) => Promise<void>;
   readonly onBankReconciliationChanged?: (event: FinancialOutboxEvent) => Promise<void>;
   readonly onEvent?: (event: FinancialOutboxEvent) => Promise<void>;
@@ -86,11 +87,16 @@ function handlerFor(
   if (event.eventType.startsWith("invoice.") || event.eventType === "subledger_document.invoice.posted") {
     return handlers.onInvoiceChanged ?? handlers.onEvent;
   }
+  if (event.eventType.startsWith("issued_adjustment.") || event.eventType === "subledger_document.credit_memo.posted") {
+    return handlers.onAdjustmentChanged ?? handlers.onSubledgerDocumentChanged ?? handlers.onEvent;
+  }
+  if (event.eventType === "subledger_document.refund.posted") {
+    return handlers.onAdjustmentChanged ?? handlers.onPaymentChanged ?? handlers.onSubledgerDocumentChanged ?? handlers.onEvent;
+  }
   if (event.eventType.startsWith("payment_match.") || event.eventType.startsWith("subledger_application.") ||
     [
       "subledger_document.customer_payment.posted",
       "subledger_document.bill_payment.posted",
-      "subledger_document.refund.posted",
       "subledger_document.deposit.posted",
       "subledger_document.transfer.posted"
     ].includes(event.eventType)) {

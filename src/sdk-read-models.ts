@@ -76,6 +76,58 @@ export type PaymentListItem = {
   readonly matchedApplicationCount: number;
 };
 
+export type AdjustmentType = "credit" | "refund";
+
+export type AdjustmentStatus = "open" | "partially_applied" | "settled" | "voided" | "replaced";
+
+export type AdjustmentListItem = {
+  readonly adjustmentId: string;
+  readonly sourceId: string;
+  readonly transactionId: string;
+  readonly adjustmentType: AdjustmentType;
+  readonly customerId: string;
+  readonly customerName?: string;
+  readonly documentNumber?: string;
+  readonly adjustmentDate: IsoDate;
+  readonly currencyCode: IsoCurrencyCode;
+  readonly originalAmount: DecimalString;
+  readonly remainingAmount: DecimalString;
+  readonly status: AdjustmentStatus;
+  readonly version: number;
+  readonly reversalTransactionId?: string;
+  readonly replacementAdjustmentId?: string;
+  readonly replacesAdjustmentId?: string;
+};
+
+export type AdjustmentPostingReadModel = {
+  readonly postingId: string;
+  readonly accountId: string;
+  readonly bookAccountKey: string;
+  readonly accountName: string;
+  readonly itemId?: string;
+  readonly description?: string;
+  readonly debitAmount: DecimalString;
+  readonly creditAmount: DecimalString;
+  readonly currencyCode: IsoCurrencyCode;
+  readonly dimensionRefs: JsonValue;
+};
+
+export type AdjustmentApplicationReadModel = {
+  readonly applicationId: string;
+  readonly invoiceId: string;
+  readonly applicationDate: IsoDate;
+  readonly amount: DecimalString;
+  readonly status: "applied" | "unapplied" | "voided";
+  readonly version: number;
+};
+
+export type AdjustmentDetail = AdjustmentListItem & {
+  readonly memo?: string;
+  readonly lines: readonly CommercialDocumentLineReadModel[];
+  readonly postings: readonly AdjustmentPostingReadModel[];
+  readonly applications: readonly AdjustmentApplicationReadModel[];
+};
+
 export type InvoiceSummary = {
   readonly asOfDate: IsoDate;
   readonly currencyCode: IsoCurrencyCode;
@@ -245,6 +297,8 @@ export type FinancialReadModels = {
   getInvoiceSummary(input?: { readonly asOfDate?: IsoDate }): Promise<InvoiceSummary>;
   listPayments(input?: PageRequest & { readonly paymentType?: PaymentListItem["paymentType"] }): Promise<Page<PaymentListItem>>;
   getPaymentSummary(input: { readonly periodStart: IsoDate; readonly periodEnd: IsoDate }): Promise<PaymentSummary>;
+  listAdjustments(input?: PageRequest & { readonly adjustmentType?: AdjustmentType; readonly status?: AdjustmentStatus }): Promise<Page<AdjustmentListItem>>;
+  getAdjustment(adjustmentId: string): Promise<AdjustmentDetail>;
   listGeneralLedger(input: PageRequest & { readonly periodStart: IsoDate; readonly periodEnd: IsoDate; readonly accountKey?: string }): Promise<Page<GeneralLedgerLine>>;
   getGeneralLedgerSummary(input: { readonly periodStart: IsoDate; readonly periodEnd: IsoDate }): Promise<GeneralLedgerSummary>;
   listChartOfAccounts(input?: { readonly asOfDate?: IsoDate; readonly includeInactive?: boolean }): Promise<readonly ChartOfAccountsItem[]>;
@@ -277,6 +331,8 @@ export function createFinancialReadModels(input: Scope): FinancialReadModels {
     getInvoiceSummary: (request = {}) => getInvoiceSummary(input, request),
     listPayments: (request = {}) => listPayments(input, request),
     getPaymentSummary: (request) => getPaymentSummary(input, request),
+    listAdjustments: (request = {}) => listAdjustments(input, request),
+    getAdjustment: (adjustmentId) => getAdjustment(input, adjustmentId),
     listGeneralLedger: (request) => listGeneralLedger(input, request),
     getGeneralLedgerSummary: (request) => getGeneralLedgerSummary(input, request),
     listChartOfAccounts: (request = {}) => listChartOfAccounts(input, request),
@@ -513,6 +569,165 @@ limit $8`,
       date: item.paymentDate,
       id: item.paymentId
     }));
+  });
+}
+
+async function listAdjustments(
+  scope: Scope,
+  input: PageRequest & {
+    readonly adjustmentType?: AdjustmentType;
+    readonly status?: AdjustmentStatus;
+    readonly adjustmentId?: string;
+  }
+): Promise<Page<AdjustmentListItem>> {
+  const page = pageInput(input, "adjustments", scope.bookId);
+  return scope.database.transaction(async (client) => {
+    const book = await resolveBook(client, scope);
+    const result = await client.query(
+      `with adjustment_rows as (
+  select document."subledger_document_id" as "adjustment_id", document."source_id", document."transaction_id",
+    case when document."document_type" = 'credit_memo' then 'credit' else 'refund' end as "adjustment_type",
+    document."party_id", party."display_name" as "party_name", document."document_number", document."document_date",
+    document."currency_code", document."original_amount", document."open_amount", document."version",
+    void_link."related_transaction_id" as "reversal_transaction_id",
+    replacement."subledger_document_id" as "replacement_adjustment_id",
+    replaced_original."subledger_document_id" as "replaces_adjustment_id",
+    case when replacement."subledger_document_id" is not null then 'replaced' else document."status" end as "status"
+  from "erp_financials"."subledger_documents" document
+  join "erp_financials"."reporting_book_sources" source
+    on source."tenant_id" = document."tenant_id" and source."company_id" = document."company_id"
+   and source."book_id" = $3 and source."source_id" = document."source_id"
+   and (source."effective_from" is null or source."effective_from" <= document."document_date")
+   and (source."effective_through" is null or source."effective_through" >= document."document_date")
+  left join "erp_financials"."parties" party
+    on party."tenant_id" = document."tenant_id" and party."source_id" = document."source_id"
+   and party."party_id" = document."party_id"
+  left join lateral (
+    select link."related_transaction_id"
+    from "erp_financials"."journal_entry_links" link
+    where link."tenant_id" = document."tenant_id" and link."company_id" = document."company_id"
+      and link."source_id" = document."source_id" and link."original_transaction_id" = document."transaction_id"
+      and link."link_type" in ('reversal', 'void')
+    limit 1
+  ) void_link on true
+  left join lateral (
+    select link."related_transaction_id"
+    from "erp_financials"."journal_entry_links" link
+    where link."tenant_id" = document."tenant_id" and link."company_id" = document."company_id"
+      and link."source_id" = document."source_id" and link."original_transaction_id" = document."transaction_id"
+      and link."link_type" = 'replacement'
+    limit 1
+  ) replacement_link on true
+  left join "erp_financials"."subledger_documents" replacement
+    on replacement."tenant_id" = document."tenant_id" and replacement."company_id" = document."company_id"
+   and replacement."source_id" = document."source_id"
+   and replacement."transaction_id" = replacement_link."related_transaction_id"
+   and replacement."document_type" = document."document_type"
+  left join lateral (
+    select link."original_transaction_id"
+    from "erp_financials"."journal_entry_links" link
+    where link."tenant_id" = document."tenant_id" and link."company_id" = document."company_id"
+      and link."source_id" = document."source_id" and link."related_transaction_id" = document."transaction_id"
+      and link."link_type" = 'replacement'
+    limit 1
+  ) replaced_link on true
+  left join "erp_financials"."subledger_documents" replaced_original
+    on replaced_original."tenant_id" = document."tenant_id" and replaced_original."company_id" = document."company_id"
+   and replaced_original."source_id" = document."source_id"
+   and replaced_original."transaction_id" = replaced_link."original_transaction_id"
+   and replaced_original."document_type" = document."document_type"
+  where document."tenant_id" = $1 and document."company_id" = $2
+    and document."document_type" in ('credit_memo', 'refund') and document."currency_code" = $4
+    and ($9::text is null or document."subledger_document_id" = $9)
+)
+select * from adjustment_rows
+where ($5::text is null or "adjustment_type" = $5)
+  and ($6::text is null or "status" = $6)
+  and ($7::date is null or ("document_date", "adjustment_id") < ($7::date, $8::text))
+order by "document_date" desc, "adjustment_id" desc
+limit $10`,
+      [
+        scope.tenantId,
+        scope.companyId,
+        scope.bookId,
+        book.currencyCode,
+        input.adjustmentType,
+        input.status,
+        page.date,
+        page.id,
+        input.adjustmentId,
+        page.limit + 1
+      ]
+    );
+    return toPage(result.rows.map(adjustmentFromRow), page.limit, "adjustments", scope.bookId, (item) => ({
+      date: item.adjustmentDate,
+      id: item.adjustmentId
+    }));
+  });
+}
+
+async function getAdjustment(scope: Scope, adjustmentId: string): Promise<AdjustmentDetail> {
+  assertNonEmpty(adjustmentId, "adjustmentId");
+  const page = await listAdjustments(scope, { adjustmentId, limit: 1 });
+  const adjustment = page.items[0];
+  if (adjustment === undefined) {
+    throw new ErpFinancialsError(
+      "missing_document",
+      `Adjustment ${adjustmentId} does not exist in reporting book ${scope.bookId}`,
+      { details: { adjustmentId, bookId: scope.bookId } }
+    );
+  }
+  return scope.database.transaction(async (client) => {
+    const header = await client.query(
+      `select transaction."memo"
+from "erp_financials"."transactions" transaction
+where transaction."tenant_id" = $1 and transaction."source_id" = $2 and transaction."transaction_id" = $3`,
+      [scope.tenantId, adjustment.sourceId, adjustment.transactionId]
+    );
+    const lines = await client.query(
+      `select "subledger_document_line_id" as "line_id", *
+from "erp_financials"."subledger_document_lines"
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3 and "subledger_document_id" = $4
+order by "line_number"`,
+      [scope.tenantId, scope.companyId, adjustment.sourceId, adjustment.adjustmentId]
+    );
+    const postings = await client.query(
+      `select posting."posting_id", posting."account_id", posting."item_id", posting."description",
+  posting."debit_amount", posting."credit_amount", posting."currency_code", posting."dimension_refs",
+  coalesce(mapping."book_account_key", posting."source_id" || ':' || posting."account_id") as "book_account_key",
+  coalesce(book_account."name", account."name") as "account_name"
+from "erp_financials"."ledger_postings" posting
+join "erp_financials"."accounts" account
+  on account."tenant_id" = posting."tenant_id" and account."source_id" = posting."source_id"
+ and account."account_id" = posting."account_id"
+left join "erp_financials"."reporting_book_account_mappings" mapping
+  on mapping."tenant_id" = $1 and mapping."company_id" = $2 and mapping."book_id" = $3
+ and mapping."source_id" = posting."source_id" and mapping."source_account_id" = posting."account_id"
+left join "erp_financials"."reporting_book_accounts" book_account
+  on book_account."tenant_id" = $1 and book_account."company_id" = $2 and book_account."book_id" = $3
+ and book_account."book_account_key" = mapping."book_account_key"
+where posting."tenant_id" = $1 and posting."source_id" = $4 and posting."transaction_id" = $5
+order by posting."posting_id"`,
+      [scope.tenantId, scope.companyId, scope.bookId, adjustment.sourceId, adjustment.transactionId]
+    );
+    const applications = await client.query(
+      `select application."subledger_application_id" as "application_id",
+  application."target_document_id" as "invoice_id", application."application_date",
+  application."applied_amount", application."status", application."version"
+from "erp_financials"."subledger_applications" application
+where application."tenant_id" = $1 and application."company_id" = $2 and application."source_id" = $3
+  and application."source_document_id" = $4 and application."application_type" = 'credit_to_invoice'
+order by application."application_date", application."subledger_application_id"`,
+      [scope.tenantId, scope.companyId, adjustment.sourceId, adjustment.adjustmentId]
+    );
+    const memo = optionalString(header.rows[0]?.memo);
+    return {
+      ...adjustment,
+      ...(memo === undefined ? {} : { memo }),
+      lines: lines.rows.map(commercialLineFromRow),
+      postings: postings.rows.map(adjustmentPostingFromRow),
+      applications: applications.rows.map(adjustmentApplicationFromRow)
+    };
   });
 }
 
@@ -1011,6 +1226,63 @@ function paymentFromRow(row: Readonly<Record<string, unknown>>): PaymentListItem
     unappliedAmount: unapplied,
     status: unapplied === "0.00" ? "applied" : unapplied === amount ? "unapplied" : "partial",
     matchedApplicationCount: integer(row.application_count, "application_count")
+  };
+}
+
+function adjustmentFromRow(row: Readonly<Record<string, unknown>>): AdjustmentListItem {
+  const customerName = optionalString(row.party_name);
+  const documentNumber = optionalString(row.document_number);
+  const reversalTransactionId = optionalString(row.reversal_transaction_id);
+  const replacementAdjustmentId = optionalString(row.replacement_adjustment_id);
+  const replacesAdjustmentId = optionalString(row.replaces_adjustment_id);
+  return {
+    adjustmentId: string(row.adjustment_id, "adjustment_id"),
+    sourceId: string(row.source_id, "source_id"),
+    transactionId: string(row.transaction_id, "transaction_id"),
+    adjustmentType: string(row.adjustment_type, "adjustment_type") as AdjustmentType,
+    customerId: string(row.party_id, "party_id"),
+    ...(customerName === undefined ? {} : { customerName }),
+    ...(documentNumber === undefined ? {} : { documentNumber }),
+    adjustmentDate: date(row.document_date, "document_date"),
+    currencyCode: string(row.currency_code, "currency_code"),
+    originalAmount: money(row.original_amount, "original_amount"),
+    remainingAmount: money(row.open_amount, "open_amount"),
+    status: string(row.status, "status") as AdjustmentStatus,
+    version: integer(row.version, "version"),
+    ...(reversalTransactionId === undefined ? {} : { reversalTransactionId }),
+    ...(replacementAdjustmentId === undefined ? {} : { replacementAdjustmentId }),
+    ...(replacesAdjustmentId === undefined ? {} : { replacesAdjustmentId })
+  };
+}
+
+function adjustmentPostingFromRow(row: Readonly<Record<string, unknown>>): AdjustmentPostingReadModel {
+  const itemId = optionalString(row.item_id);
+  const description = optionalString(row.description);
+  const dimensionRefs = typeof row.dimension_refs === "string"
+    ? JSON.parse(row.dimension_refs) as JsonValue
+    : row.dimension_refs as JsonValue;
+  return {
+    postingId: string(row.posting_id, "posting_id"),
+    accountId: string(row.account_id, "account_id"),
+    bookAccountKey: string(row.book_account_key, "book_account_key"),
+    accountName: string(row.account_name, "account_name"),
+    ...(itemId === undefined ? {} : { itemId }),
+    ...(description === undefined ? {} : { description }),
+    debitAmount: money(row.debit_amount, "debit_amount"),
+    creditAmount: money(row.credit_amount, "credit_amount"),
+    currencyCode: string(row.currency_code, "currency_code"),
+    dimensionRefs
+  };
+}
+
+function adjustmentApplicationFromRow(row: Readonly<Record<string, unknown>>): AdjustmentApplicationReadModel {
+  return {
+    applicationId: string(row.application_id, "application_id"),
+    invoiceId: string(row.invoice_id, "invoice_id"),
+    applicationDate: date(row.application_date, "application_date"),
+    amount: money(row.applied_amount, "applied_amount"),
+    status: string(row.status, "status") as AdjustmentApplicationReadModel["status"],
+    version: integer(row.version, "version")
   };
 }
 

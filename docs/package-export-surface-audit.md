@@ -56,8 +56,10 @@ The in-repo Future ERP consumer type fixture and package-boundary test cover
 these required supported adoption surfaces from the package root:
 
 - Cohesive new-host SDK: `createErpFinancialsSdk`, reporting books, book-owned
-  chart accounts, invoice lifecycle, atomic payment matching, bank
-  reconciliation, book-aware read models, typed errors, and outbox runtime.
+  chart accounts, invoice lifecycle, canonical credit/refund register and
+  detail models, issued-adjustment void/replacement, atomic payment matching,
+  bank reconciliation, book-aware read models, typed errors, and outbox
+  runtime.
 
 - Canonical schema, migration, and health:
   `POSTGRES_MIGRATIONS`, `planPostgresMigrations`,
@@ -71,7 +73,8 @@ these required supported adoption surfaces from the package root:
   `persistFutureErpCanonicalFacts`.
 - Native accounting operations: `createErpFinancials`, including account
   hierarchy updates, fiscal controls, immutable journal correction workflows,
-  atomic subledger documents, and payment applications.
+  atomic subledger documents, issued credit/refund void and replacement, and
+  payment applications.
 - QuickBooks mapping and SDK/service contracts:
   `HandrailQuickBooksSdkResourcesAdapterInput`,
   `adaptHandrailQuickBooksSdkFullSyncEnvelope`,

@@ -275,6 +275,12 @@ export type { FinancialRuntime, FinancialRuntimeHandlers, FinancialRuntimeRunRes
 export type {
   AgingReport,
   AgingRow,
+  AdjustmentApplicationReadModel,
+  AdjustmentDetail,
+  AdjustmentListItem,
+  AdjustmentPostingReadModel,
+  AdjustmentStatus,
+  AdjustmentType,
   BankReconciliationListItem,
   BankReconciliationSummary,
   ChartOfAccountsItem,
@@ -554,12 +560,17 @@ export type {
   ErpFinancialsTransactionRunner,
   JournalEntryLifecycleResult,
   JournalEntryWriteCounts,
+  IssuedAdjustmentLifecycleResult,
+  IssuedAdjustmentType,
   IssueCreditMemoInput,
   IssueRefundInput,
   PostJournalEntryInput,
   PostJournalEntryLineInput,
   PostJournalEntryResult,
   ReplaceJournalEntryInput,
+  ReplaceIssuedAdjustmentInput,
+  ReplaceIssuedCreditMemoInput,
+  ReplaceIssuedRefundInput,
   RecordBillPaymentInput,
   RecordCustomerPaymentInput,
   RecordDepositInput,
@@ -572,7 +583,10 @@ export type {
   SubledgerDocumentResult,
   SubledgerDocumentType,
   UpsertAccountTreeInput,
-  UpsertAccountTreeResult
+  UpsertAccountTreeResult,
+  VoidIssuedAdjustmentInput,
+  VoidIssuedCreditMemoInput,
+  VoidIssuedRefundInput
 } from "./erp-financials-service.js";
 export type {
   BuildCoreErpPersistenceEvidenceInput,

@@ -113,6 +113,11 @@ because it has no ordered history.
 - `invoices`, `customerPayments`, `credits`, `refunds`, `vendorBills`,
   `billPayments`, `writeOffs`, `deposits`, and `transfers` post their journal and
   subledger document atomically.
+- `adjustments.voidIssued` / `.replaceIssued` and the typed
+  `credits` / `refunds` equivalents terminate an issued adjustment with an
+  independently approved compensating journal. Replacement also posts and
+  links the new canonical subledger document in the same transaction. An
+  applied or partially applied credit must be unapplied first.
 - `paymentApplications.apply`, `.unapply`, and `.void` enforce company/source,
   party, currency, document-type, available-balance, optimistic-version,
   terminal-state, idempotency, and concurrency invariants in both the service

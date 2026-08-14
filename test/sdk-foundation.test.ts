@@ -99,6 +99,36 @@ describe("pre-v1 SDK foundation", () => {
     expect(report.totals).toMatchObject({ income: "150.00", expenses: "20.00", netIncome: "130.00" });
   });
 
+  it("exposes canonical credit/refund register and adjustment detail models", async () => {
+    const client = new AdjustmentClient();
+    const queries = createFinancialReadModels({
+      database: { transaction: async (work) => work(client) },
+      tenantId: "tenant_1",
+      companyId: "company_1",
+      bookId: "book_1"
+    });
+
+    await expect(queries.listAdjustments({ adjustmentType: "credit", status: "replaced" })).resolves.toEqual({
+      items: [expect.objectContaining({
+        adjustmentId: "credit_1",
+        adjustmentType: "credit",
+        status: "replaced",
+        reversalTransactionId: "reversal_1",
+        replacementAdjustmentId: "credit_2"
+      })]
+    });
+    await expect(queries.getAdjustment("credit_1")).resolves.toMatchObject({
+      adjustmentId: "credit_1",
+      memo: "Customer service adjustment",
+      lines: [expect.objectContaining({ lineId: "credit_line_1", amount: "25.00" })],
+      postings: [
+        expect.objectContaining({ accountId: "revenue", debitAmount: "25.00", creditAmount: "0.00" }),
+        expect.objectContaining({ accountId: "receivable", debitAmount: "0.00", creditAmount: "25.00" })
+      ],
+      applications: [expect.objectContaining({ applicationId: "application_1", amount: "5.00" })]
+    });
+  });
+
   it("delivers outbox work through bounded runtime routing and publishes only successful events", async () => {
     const event = outboxEvent();
     const published: string[] = [];
@@ -122,6 +152,23 @@ describe("pre-v1 SDK foundation", () => {
     });
     expect(published).toEqual([event.outboxEventId]);
     expect(failed).toEqual([]);
+  });
+
+  it("routes issued-adjustment lifecycle events to the adjustment handler", async () => {
+    const event = { ...outboxEvent(), eventType: "issued_adjustment.replaced" };
+    const handled: string[] = [];
+    const outbox: FinancialOutboxService = {
+      claim: () => Promise.resolve([event]),
+      markPublished: () => Promise.resolve(),
+      markFailed: () => Promise.resolve()
+    };
+    const runtime = createFinancialRuntime({
+      outbox,
+      handlers: { onAdjustmentChanged: (candidate) => { handled.push(candidate.eventType); return Promise.resolve(); } }
+    });
+
+    await expect(runtime.runOnce()).resolves.toMatchObject({ published: 1, failed: 0 });
+    expect(handled).toEqual(["issued_adjustment.replaced"]);
   });
 });
 
@@ -184,6 +231,84 @@ class StatementClient implements PostgresQueryClient {
       ] as unknown as Row[] });
     }
     throw new Error(`Unexpected statement query: ${sql}`);
+  }
+}
+
+class AdjustmentClient implements PostgresQueryClient {
+  query<Row extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string
+  ): Promise<PostgresQueryResult<Row>> {
+    if (sql.includes('from "erp_financials"."reporting_books"')) {
+      return Promise.resolve({
+        rows: [{ base_currency_code: "USD", accounting_basis: "accrual", status: "active" } as unknown as Row]
+      });
+    }
+    if (sql.includes("with adjustment_rows as")) {
+      return Promise.resolve({ rows: [{
+        adjustment_id: "credit_1",
+        source_id: "source_1",
+        transaction_id: "transaction_1",
+        adjustment_type: "credit",
+        party_id: "customer_1",
+        party_name: "Acme",
+        document_number: "CM-1",
+        document_date: "2026-08-12",
+        currency_code: "USD",
+        original_amount: "25",
+        open_amount: "0",
+        status: "replaced",
+        version: 2,
+        reversal_transaction_id: "reversal_1",
+        replacement_adjustment_id: "credit_2",
+        replaces_adjustment_id: null
+      } as unknown as Row] });
+    }
+    if (sql.includes('from "erp_financials"."transactions" transaction')) {
+      return Promise.resolve({ rows: [{ memo: "Customer service adjustment" } as unknown as Row] });
+    }
+    if (sql.includes('from "erp_financials"."subledger_document_lines"')) {
+      return Promise.resolve({ rows: [{
+        line_id: "credit_line_1",
+        line_number: 1,
+        account_id: "revenue",
+        item_id: null,
+        description: "Service credit",
+        quantity: "1",
+        unit_amount: "25",
+        discount_amount: "0",
+        tax_code: null,
+        tax_amount: "0",
+        service_period_start: null,
+        service_period_end: null,
+        dimension_refs: [],
+        line_amount: "25"
+      } as unknown as Row] });
+    }
+    if (sql.includes('from "erp_financials"."ledger_postings" posting')) {
+      return Promise.resolve({ rows: [
+        {
+          posting_id: "posting_1", account_id: "revenue", book_account_key: "revenue",
+          account_name: "Revenue", item_id: null, description: "Service credit",
+          debit_amount: "25", credit_amount: "0", currency_code: "USD", dimension_refs: []
+        },
+        {
+          posting_id: "posting_2", account_id: "receivable", book_account_key: "receivable",
+          account_name: "Accounts Receivable", item_id: null, description: null,
+          debit_amount: "0", credit_amount: "25", currency_code: "USD", dimension_refs: []
+        }
+      ] as unknown as Row[] });
+    }
+    if (sql.includes('from "erp_financials"."subledger_applications" application')) {
+      return Promise.resolve({ rows: [{
+        application_id: "application_1",
+        invoice_id: "invoice_1",
+        application_date: "2026-08-13",
+        applied_amount: "5",
+        status: "unapplied",
+        version: 2
+      } as unknown as Row] });
+    }
+    throw new Error(`Unexpected adjustment query: ${sql}`);
   }
 }
 

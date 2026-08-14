@@ -243,6 +243,49 @@ export type IssueRefundInput = SubledgerDocumentInputCommon & {
   readonly cashAccount: ErpFinancialsAccountReference;
 };
 
+export type IssuedAdjustmentType = "credit" | "refund";
+
+export type VoidIssuedAdjustmentInput = {
+  readonly operation: FinancialOperationContext;
+  readonly adjustmentType: IssuedAdjustmentType;
+  readonly adjustmentDocumentId: string;
+  readonly expectedVersion: number;
+  readonly idempotencyKey: string;
+  readonly date: IsoDate;
+  readonly memo?: string;
+};
+
+export type VoidIssuedCreditMemoInput = Omit<VoidIssuedAdjustmentInput, "adjustmentType">;
+
+export type VoidIssuedRefundInput = Omit<VoidIssuedAdjustmentInput, "adjustmentType">;
+
+type WithoutFinancialOperation<Input> = Input extends unknown ? Omit<Input, "operation"> : never;
+
+export type ReplaceIssuedCreditMemoInput = VoidIssuedCreditMemoInput & {
+  readonly replacement: WithoutFinancialOperation<IssueCreditMemoInput>;
+};
+
+export type ReplaceIssuedRefundInput = VoidIssuedRefundInput & {
+  readonly replacement: WithoutFinancialOperation<IssueRefundInput>;
+};
+
+export type ReplaceIssuedAdjustmentInput =
+  | (ReplaceIssuedCreditMemoInput & { readonly adjustmentType: "credit" })
+  | (ReplaceIssuedRefundInput & { readonly adjustmentType: "refund" });
+
+export type IssuedAdjustmentLifecycleResult = {
+  readonly status: "voided" | "already_voided" | "replaced" | "already_replaced";
+  readonly outcome: "voided" | "replaced";
+  readonly adjustmentType: IssuedAdjustmentType;
+  readonly originalAdjustmentDocumentId: string;
+  readonly originalTransactionId: string;
+  readonly originalVersion: number;
+  readonly reversal: PostJournalEntryResult;
+  readonly replacement?: SubledgerDocumentResult;
+  readonly journalEntryLinkIds: readonly string[];
+  readonly lifecycleEventIds: readonly string[];
+};
+
 export type CreateVendorBillInput = SubledgerDocumentInputCommon & {
   readonly vendorId: string;
   readonly dueDate: IsoDate;
@@ -348,8 +391,20 @@ export type ErpFinancials = {
   readonly fiscalPeriods: FiscalPeriodService;
   readonly invoices: { create(input: CreateInvoiceInput): Promise<SubledgerDocumentResult> };
   readonly customerPayments: { record(input: RecordCustomerPaymentInput): Promise<SubledgerDocumentResult> };
-  readonly credits: { issue(input: IssueCreditMemoInput): Promise<SubledgerDocumentResult> };
-  readonly refunds: { issue(input: IssueRefundInput): Promise<SubledgerDocumentResult> };
+  readonly adjustments: {
+    voidIssued(input: VoidIssuedAdjustmentInput): Promise<IssuedAdjustmentLifecycleResult>;
+    replaceIssued(input: ReplaceIssuedAdjustmentInput): Promise<IssuedAdjustmentLifecycleResult>;
+  };
+  readonly credits: {
+    issue(input: IssueCreditMemoInput): Promise<SubledgerDocumentResult>;
+    voidIssued(input: VoidIssuedCreditMemoInput): Promise<IssuedAdjustmentLifecycleResult>;
+    replaceIssued(input: ReplaceIssuedCreditMemoInput): Promise<IssuedAdjustmentLifecycleResult>;
+  };
+  readonly refunds: {
+    issue(input: IssueRefundInput): Promise<SubledgerDocumentResult>;
+    voidIssued(input: VoidIssuedRefundInput): Promise<IssuedAdjustmentLifecycleResult>;
+    replaceIssued(input: ReplaceIssuedRefundInput): Promise<IssuedAdjustmentLifecycleResult>;
+  };
   readonly vendorBills: { create(input: CreateVendorBillInput): Promise<SubledgerDocumentResult> };
   readonly billPayments: { record(input: RecordBillPaymentInput): Promise<SubledgerDocumentResult> };
   readonly writeOffs: { record(input: RecordWriteOffInput): Promise<SubledgerDocumentResult> };
@@ -479,8 +534,36 @@ export function createErpFinancials(input: CreateErpFinancialsInput): ErpFinanci
     fiscalPeriods: createFiscalPeriodService(context),
     invoices: { create: (documentInput) => createInvoice(context, documentInput) },
     customerPayments: { record: (documentInput) => recordCustomerPayment(context, documentInput) },
-    credits: { issue: (documentInput) => issueCreditMemo(context, documentInput) },
-    refunds: { issue: (documentInput) => issueRefund(context, documentInput) },
+    adjustments: {
+      voidIssued: (adjustmentInput) => runIssuedAdjustmentLifecycle(context, "voided", adjustmentInput),
+      replaceIssued: (adjustmentInput) => runIssuedAdjustmentLifecycle(context, "replaced", adjustmentInput)
+    },
+    credits: {
+      issue: (documentInput) => issueCreditMemo(context, documentInput),
+      voidIssued: (adjustmentInput) => runIssuedAdjustmentLifecycle(
+        context,
+        "voided",
+        { ...adjustmentInput, adjustmentType: "credit" }
+      ),
+      replaceIssued: (adjustmentInput) => runIssuedAdjustmentLifecycle(
+        context,
+        "replaced",
+        { ...adjustmentInput, adjustmentType: "credit" }
+      )
+    },
+    refunds: {
+      issue: (documentInput) => issueRefund(context, documentInput),
+      voidIssued: (adjustmentInput) => runIssuedAdjustmentLifecycle(
+        context,
+        "voided",
+        { ...adjustmentInput, adjustmentType: "refund" }
+      ),
+      replaceIssued: (adjustmentInput) => runIssuedAdjustmentLifecycle(
+        context,
+        "replaced",
+        { ...adjustmentInput, adjustmentType: "refund" }
+      )
+    },
     vendorBills: { create: (documentInput) => createVendorBill(context, documentInput) },
     billPayments: { record: (documentInput) => recordBillPayment(context, documentInput) },
     writeOffs: { record: (documentInput) => recordWriteOff(context, documentInput) },
@@ -1647,6 +1730,314 @@ type LoadedPostedJournal = {
   readonly postedLifecycleEventId?: string;
 };
 
+type LoadedIssuedAdjustment = {
+  readonly documentId: string;
+  readonly documentType: "credit_memo" | "refund";
+  readonly transactionId: string;
+  readonly partyId: string;
+  readonly currencyCode: IsoCurrencyCode;
+  readonly originalAmount: DecimalString;
+  readonly openAmount: DecimalString;
+  readonly status: SubledgerDocumentResult["documentStatus"];
+  readonly version: number;
+  readonly journal: LoadedPostedJournal;
+};
+
+async function runIssuedAdjustmentLifecycle(
+  context: ServiceContext,
+  outcome: "voided" | "replaced",
+  input: VoidIssuedAdjustmentInput | ReplaceIssuedAdjustmentInput
+): Promise<IssuedAdjustmentLifecycleResult> {
+  assertIndependentApproval(input.operation);
+  assertNonEmpty(input.adjustmentDocumentId, "adjustmentDocumentId");
+  assertNonEmpty(input.idempotencyKey, "idempotencyKey");
+  assertExpectedSubledgerVersion(input.expectedVersion, "expectedVersion");
+  assertIsoDate(input.date, "date");
+  if (outcome === "replaced" && !("replacement" in input)) {
+    throw new ErpFinancialsValidationError("Replacing an issued adjustment requires a replacement document");
+  }
+
+  return context.database.transaction(async (client) => {
+    await acquireTransactionLock(
+      client,
+      `issued-adjustment:${context.tenantId}:${context.companyId}:${context.sourceId}:${input.adjustmentDocumentId}`
+    );
+    await assertCompanySourceScope(client, context);
+    const original = await loadIssuedAdjustmentForLifecycle(client, context, input.adjustmentDocumentId);
+    assertIssuedAdjustmentType(original, input.adjustmentType);
+
+    const reversalInput: PostJournalEntryInput = {
+      operation: input.operation,
+      idempotencyKey: `${input.idempotencyKey}:reversal`,
+      date: input.date,
+      memo: input.memo ?? `${outcome} ${original.documentId}`,
+      currencyCode: original.currencyCode,
+      accountingBasis: original.journal.accountingBasis,
+      adjustment: true,
+      lines: original.journal.lines
+    };
+    const reversalJournal = normalizeJournalEntry(context, reversalInput);
+    const reversalIdentities = journalIdentities(context, reversalJournal);
+    const reversalLinkType = outcome === "voided" ? "void" : "reversal";
+    const replay = await assertJournalLifecycleSlotAvailable(client, context, {
+      originalTransactionId: original.transactionId,
+      expectedRelatedTransactionId: reversalIdentities.transactionId,
+      expectedLinkType: reversalLinkType,
+      competingLinkTypes: ["reversal", "void"]
+    });
+    assertIssuedAdjustmentLifecycleState(original, input.expectedVersion, replay);
+
+    await acquireTransactionLock(
+      client,
+      `journal-entry:${context.tenantId}:${context.sourceId}:${reversalJournal.idempotencyKey}`
+    );
+    const reversal = await executePostJournalEntryInTransaction(
+      client,
+      context,
+      reversalInput,
+      reversalJournal,
+      reversalIdentities
+    );
+    const reversalLink = await appendJournalEntryLink(client, context, {
+      originalTransactionId: original.transactionId,
+      relatedTransactionId: reversal.transactionId,
+      linkType: reversalLinkType,
+      eventType: outcome === "voided" ? "issued_adjustment.voided" : "issued_adjustment.reversed",
+      idempotencyKey: `${input.idempotencyKey}:${reversalLinkType}`,
+      operation: input.operation,
+      ...(original.journal.postedLifecycleEventId === undefined
+        ? {}
+        : { priorEventId: original.journal.postedLifecycleEventId })
+    });
+    const originalVersion = replay
+      ? original.version
+      : await markIssuedAdjustmentVoided(client, context, original, input.expectedVersion);
+
+    let replacement: SubledgerDocumentResult | undefined;
+    let replacementLink: { readonly linkId: string; readonly eventId: string } | undefined;
+    if (outcome === "replaced") {
+      const replacementInput = (input as ReplaceIssuedAdjustmentInput).replacement;
+      assertReplacementAdjustmentParty(original, replacementInput.customerId);
+      const nestedContext: ServiceContext = {
+        ...context,
+        database: { transaction: async <Result>(work: (nestedClient: PostgresQueryClient) => Promise<Result>) => work(client) }
+      };
+      replacement = input.adjustmentType === "credit"
+        ? await issueCreditMemo(nestedContext, {
+            ...(replacementInput as ReplaceIssuedCreditMemoInput["replacement"]),
+            operation: input.operation
+          })
+        : await issueRefund(nestedContext, {
+            ...(replacementInput as ReplaceIssuedRefundInput["replacement"]),
+            operation: input.operation
+          });
+      await assertJournalLifecycleSlotAvailable(client, context, {
+        originalTransactionId: original.transactionId,
+        expectedRelatedTransactionId: replacement.journal.transactionId,
+        expectedLinkType: "replacement",
+        competingLinkTypes: ["correction", "replacement"]
+      });
+      replacementLink = await appendJournalEntryLink(client, context, {
+        originalTransactionId: original.transactionId,
+        relatedTransactionId: replacement.journal.transactionId,
+        linkType: "replacement",
+        eventType: "issued_adjustment.replaced",
+        idempotencyKey: `${input.idempotencyKey}:replacement`,
+        operation: input.operation,
+        priorEventId: reversalLink.eventId
+      });
+    }
+
+    const lifecycle = await appendFinancialLifecycleEvent(client, {
+      tenantId: context.tenantId,
+      companyId: context.companyId,
+      sourceId: context.sourceId,
+      aggregateType: "issued_adjustment",
+      aggregateId: original.documentId,
+      eventType: `issued_adjustment.${outcome}`,
+      idempotencyKey: `issued-adjustment:${input.idempotencyKey}:${outcome}`,
+      operation: input.operation,
+      recordedAt: context.now(),
+      priorEventId: replacementLink?.eventId ?? reversalLink.eventId,
+      payload: {
+        adjustmentType: input.adjustmentType,
+        originalDocumentId: original.documentId,
+        originalTransactionId: original.transactionId,
+        replacementDocumentId: replacement?.documentId ?? null,
+        reversalTransactionId: reversal.transactionId
+      }
+    });
+    await appendServiceOutboxEvent(client, context, {
+      eventType: `issued_adjustment.${outcome}`,
+      aggregateType: "issued_adjustment",
+      aggregateId: original.documentId,
+      idempotencyKey: `issued-adjustment:${input.idempotencyKey}:outbox:${outcome}`,
+      payload: {
+        adjustmentType: input.adjustmentType,
+        originalDocumentId: original.documentId,
+        replacementDocumentId: replacement?.documentId ?? null,
+        reversalTransactionId: reversal.transactionId
+      }
+    });
+
+    return {
+      status: replay
+        ? outcome === "voided" ? "already_voided" : "already_replaced"
+        : outcome,
+      outcome,
+      adjustmentType: input.adjustmentType,
+      originalAdjustmentDocumentId: original.documentId,
+      originalTransactionId: original.transactionId,
+      originalVersion,
+      reversal,
+      ...(replacement === undefined ? {} : { replacement }),
+      journalEntryLinkIds: [reversalLink.linkId, ...(replacementLink === undefined ? [] : [replacementLink.linkId])],
+      lifecycleEventIds: [
+        reversal.lifecycleEventId,
+        reversalLink.eventId,
+        ...(replacement === undefined ? [] : [replacement.journal.lifecycleEventId]),
+        ...(replacementLink === undefined ? [] : [replacementLink.eventId]),
+        lifecycle.eventId
+      ]
+    };
+  });
+}
+
+async function loadIssuedAdjustmentForLifecycle(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  documentId: string
+): Promise<LoadedIssuedAdjustment> {
+  const result = await client.query(
+    `select * from "erp_financials"."subledger_documents"
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3 and "subledger_document_id" = $4
+for update`,
+    [context.tenantId, context.companyId, context.sourceId, documentId]
+  );
+  const row = result.rows[0];
+  if (row === undefined || (row.document_type !== "credit_memo" && row.document_type !== "refund")) {
+    throw new ErpFinancialsError(
+      "missing_document",
+      `Issued adjustment ${documentId} does not exist in the write source`,
+      { details: { adjustmentDocumentId: documentId } }
+    );
+  }
+  const documentType = row.document_type;
+  const transactionId = storedString(row.transaction_id, "transaction_id");
+  const journal = await loadPostedJournalForLifecycle(
+    client,
+    context,
+    transactionId,
+    [subledgerTransactionType(documentType)]
+  );
+  const status = storedString(row.status, "status");
+  if (!new Set(["open", "partially_applied", "settled", "voided"]).has(status)) {
+    throw new Error(`Issued adjustment ${documentId} has invalid status ${status}`);
+  }
+  return {
+    documentId,
+    documentType,
+    transactionId,
+    partyId: storedString(row.party_id, "party_id"),
+    currencyCode: storedString(row.currency_code, "currency_code"),
+    originalAmount: storedMoney(row.original_amount, "original_amount"),
+    openAmount: storedMoney(row.open_amount, "open_amount"),
+    status: status as LoadedIssuedAdjustment["status"],
+    version: storedInteger(row.version, "version"),
+    journal
+  };
+}
+
+function assertIssuedAdjustmentType(
+  adjustment: LoadedIssuedAdjustment,
+  expectedType: IssuedAdjustmentType
+): void {
+  const actualType: IssuedAdjustmentType = adjustment.documentType === "credit_memo" ? "credit" : "refund";
+  if (actualType !== expectedType) {
+    throw new ErpFinancialsError(
+      "invalid_input",
+      `Issued adjustment ${adjustment.documentId} is a ${actualType}, not a ${expectedType}`,
+      { details: { actualType, adjustmentDocumentId: adjustment.documentId, expectedType } }
+    );
+  }
+}
+
+function assertIssuedAdjustmentLifecycleState(
+  adjustment: LoadedIssuedAdjustment,
+  expectedVersion: number,
+  replay: boolean
+): void {
+  if (replay) {
+    if (adjustment.status !== "voided") {
+      throw new ErpFinancialsError(
+        "terminal_state_conflict",
+        `Issued adjustment ${adjustment.documentId} has lifecycle links but is not voided`
+      );
+    }
+    return;
+  }
+  if (adjustment.version !== expectedVersion) {
+    throw new ErpFinancialsError(
+      "optimistic_concurrency_conflict",
+      `Issued adjustment expected version ${String(expectedVersion)}, found ${String(adjustment.version)}`,
+      { retryable: true, details: { actualVersion: adjustment.version, expectedVersion } }
+    );
+  }
+  const canEnd = adjustment.documentType === "credit_memo"
+    ? adjustment.status === "open" && adjustment.openAmount === adjustment.originalAmount
+    : adjustment.status === "settled" && adjustment.openAmount === "0.00";
+  if (!canEnd) {
+    throw new ErpFinancialsError(
+      "terminal_state_conflict",
+      adjustment.documentType === "credit_memo"
+        ? "An applied or partially applied credit cannot be voided or replaced; unapply it first"
+        : `Refund ${adjustment.documentId} is already in terminal status ${adjustment.status}`
+    );
+  }
+}
+
+function assertReplacementAdjustmentParty(adjustment: LoadedIssuedAdjustment, customerId: string): void {
+  if (customerId !== adjustment.partyId) {
+    throw new ErpFinancialsError(
+      "scope_mismatch",
+      "A replacement adjustment must keep the original customer",
+      { details: { actualCustomerId: customerId, expectedCustomerId: adjustment.partyId } }
+    );
+  }
+}
+
+async function markIssuedAdjustmentVoided(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  adjustment: LoadedIssuedAdjustment,
+  expectedVersion: number
+): Promise<number> {
+  await client.query("select set_config('erp_financials.application_balance_update', 'on', true)");
+  try {
+    const result = await client.query(
+      `update "erp_financials"."subledger_documents"
+set "open_amount" = 0, "status" = 'voided', "version" = "version" + 1, "updated_at" = $5
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
+  and "subledger_document_id" = $4 and "version" = $6
+  and (("document_type" = 'credit_memo' and "status" = 'open' and "open_amount" = "original_amount")
+    or ("document_type" = 'refund' and "status" = 'settled' and "open_amount" = 0))
+returning "version"`,
+      [context.tenantId, context.companyId, context.sourceId, adjustment.documentId, context.now(), expectedVersion]
+    );
+    const row = result.rows[0];
+    if (row === undefined) {
+      throw new ErpFinancialsError(
+        "optimistic_concurrency_conflict",
+        `Issued adjustment ${adjustment.documentId} changed concurrently`,
+        { retryable: true, details: { adjustmentDocumentId: adjustment.documentId, expectedVersion } }
+      );
+    }
+    return storedInteger(row.version, "version");
+  } finally {
+    await client.query("select set_config('erp_financials.application_balance_update', 'off', true)");
+  }
+}
+
 async function runJournalLifecycleWorkflow(
   context: ServiceContext,
   outcome: JournalEntryLifecycleResult["outcome"],
@@ -1778,7 +2169,7 @@ async function assertJournalLifecycleSlotAvailable(
     readonly expectedLinkType: "reversal" | "void" | "correction" | "replacement";
     readonly competingLinkTypes: readonly ("reversal" | "void" | "correction" | "replacement")[];
   }
-): Promise<void> {
+): Promise<boolean> {
   const result = await client.query(
     `select "related_transaction_id", "link_type"
 from "erp_financials"."journal_entry_links"
@@ -1789,7 +2180,7 @@ for key share`,
   );
   const existing = result.rows[0];
   if (existing === undefined) {
-    return;
+    return false;
   }
   const existingRelatedTransactionId = storedString(existing.related_transaction_id, "related_transaction_id");
   const existingLinkType = storedString(existing.link_type, "link_type");
@@ -1801,12 +2192,14 @@ for key share`,
       `Journal entry ${input.originalTransactionId} already has a terminal ${existingLinkType} workflow`
     );
   }
+  return true;
 }
 
 async function loadPostedJournalForLifecycle(
   client: PostgresQueryClient,
   context: ServiceContext,
-  transactionId: string
+  transactionId: string,
+  allowedSourceTypes: readonly string[] = ["JournalEntry", "JournalEntryAdjustment"]
 ): Promise<LoadedPostedJournal> {
   const result = await client.query(
     `select transactions."transaction_id", transactions."source_transaction_type", transactions."status", transactions."memo",
@@ -1830,8 +2223,8 @@ for update of transactions, postings`,
     throw new Error("Posted journal query returned no first row");
   }
   const sourceType = storedString(first.source_transaction_type, "source_transaction_type");
-  if (sourceType !== "JournalEntry" && sourceType !== "JournalEntryAdjustment") {
-    throw new ErpFinancialsValidationError(`Transaction ${transactionId} is not a journal entry`);
+  if (!allowedSourceTypes.includes(sourceType)) {
+    throw new ErpFinancialsValidationError(`Transaction ${transactionId} is not an allowed lifecycle journal`);
   }
   if (storedString(first.status, "status") !== "posted") {
     throw new ErpFinancialsValidationError(`Journal entry ${transactionId} is not posted`);

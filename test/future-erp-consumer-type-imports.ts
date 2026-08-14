@@ -36,6 +36,8 @@ import {
 import type {
   Account,
   AccountHierarchyDiagnostic,
+  AdjustmentDetail,
+  AdjustmentListItem,
   CanonicalAccountingFactSet,
   CreateErpFinancialsInput,
   ErpFinancials,
@@ -73,6 +75,7 @@ import type {
   HandrailQuickBooksSdkIncrementalSyncEnvelope,
   HandrailQuickBooksSdkResourcesAdapterInput,
   HandrailQuickBooksSyncClientTransport,
+  IssuedAdjustmentLifecycleResult,
   NormalizedQuickBooksFullSyncRequestEnvelope,
   NormalizedQuickBooksFullSyncResponseEnvelope,
   NormalizedQuickBooksIncrementalSyncRequestEnvelope,
@@ -82,13 +85,15 @@ import type {
   NormalizedQuickBooksResourceSet,
   PostgresMigrationPlan,
   QuickBooksContractSmokeHarnessResult,
+  ReplaceIssuedAdjustmentInput,
   ReportFreshnessRow,
   ReportSnapshot,
   RollupBucket,
   PostgresQueryClient,
   ReportBuilderInput,
   SnapshotRefreshContractInput,
-  SubledgerApplicationResult
+  SubledgerApplicationResult,
+  VoidIssuedAdjustmentInput
 } from "@handrail/erp-financials";
 
 export const futureErpResolvedFinancialImports = {
@@ -210,4 +215,9 @@ export type FutureErpResolvedFinancialWorkflowTypes = {
   readonly fiscalCloseEvidenceMaterial: FiscalCloseEvidenceMaterial;
   readonly migrationPlan: PostgresMigrationPlan;
   readonly subledgerApplication: SubledgerApplicationResult;
+  readonly adjustmentRegisterItem: AdjustmentListItem;
+  readonly adjustmentDetail: AdjustmentDetail;
+  readonly voidIssuedAdjustmentInput: VoidIssuedAdjustmentInput;
+  readonly replaceIssuedAdjustmentInput: ReplaceIssuedAdjustmentInput;
+  readonly issuedAdjustmentLifecycle: IssuedAdjustmentLifecycleResult;
 };

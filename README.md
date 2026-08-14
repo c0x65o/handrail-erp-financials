@@ -285,9 +285,11 @@ subpaths, copied package folders, or app-local compatibility shims are unsupport
 The supported adoption surfaces are:
 
 - Cohesive SDK: `createErpFinancialsSdk`, reporting books and their authoritative
-  chart, invoice lifecycle, atomic match-and-apply, bank reconciliation,
-  book-aware query/read models, stable typed errors, outbox delivery, and
-  `createRuntime`. See [docs/sdk-v1-contract.md](docs/sdk-v1-contract.md).
+  chart, invoice lifecycle, canonical credit/refund register and detail models,
+  issued-adjustment void/replacement, atomic match-and-apply, bank
+  reconciliation, book-aware query/read models, stable typed errors, outbox
+  delivery, and `createRuntime`. See
+  [docs/sdk-v1-contract.md](docs/sdk-v1-contract.md).
 - Canonical schema, migration, and health:
   `POSTGRES_MIGRATIONS`, `planPostgresMigrations`,
   `migratePostgresSchema`, `validatePostgresMigrationHistory`,
@@ -306,10 +308,10 @@ The supported adoption surfaces are:
   metadata, and bounded safe source refs through app read APIs.
 - Native accounting operations: `createErpFinancials` is the preferred
   package-level API for account trees, journals and their immutable correction
-  lifecycle, fiscal controls, receivable/payable/cash documents, and payment
-  applications. It owns validation, deterministic ids, idempotency, audit
-  evidence, atomic canonical writes, and report-snapshot invalidation after the
-  host supplies a transaction runner.
+  lifecycle, fiscal controls, receivable/payable/cash documents, issued credit
+  and refund void/replacement, and payment applications. It owns validation,
+  deterministic ids, idempotency, audit evidence, atomic canonical writes, and
+  report-snapshot invalidation after the host supplies a transaction runner.
 - QuickBooks normalized mapping: `HandrailQuickBooksSdkResourcesAdapterInput`,
   `mapHandrailQuickBooksSdkResourcesToCanonicalFacts`,
   `mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts`, and

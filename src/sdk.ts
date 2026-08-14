@@ -137,6 +137,12 @@ export type { CommercialDocumentLineInput, NormalizedCommercialDocumentLine } fr
 export type {
   AgingReport,
   AgingRow,
+  AdjustmentApplicationReadModel,
+  AdjustmentDetail,
+  AdjustmentListItem,
+  AdjustmentPostingReadModel,
+  AdjustmentStatus,
+  AdjustmentType,
   BankReconciliationListItem,
   BankReconciliationSummary,
   ChartOfAccountsItem,
@@ -157,6 +163,18 @@ export type {
   PaymentListItem,
   PaymentSummary
 } from "./sdk-read-models.js";
+export type {
+  IssuedAdjustmentLifecycleResult,
+  IssuedAdjustmentType,
+  IssueCreditMemoInput,
+  IssueRefundInput,
+  ReplaceIssuedAdjustmentInput,
+  ReplaceIssuedCreditMemoInput,
+  ReplaceIssuedRefundInput,
+  VoidIssuedAdjustmentInput,
+  VoidIssuedCreditMemoInput,
+  VoidIssuedRefundInput
+} from "./erp-financials-service.js";
 export type {
   InvoiceDraft,
   InvoiceDraftStatus,
