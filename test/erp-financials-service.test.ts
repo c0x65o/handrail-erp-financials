@@ -561,11 +561,13 @@ describe("reusable ERP Financials service", () => {
     const unapplied = await financials.paymentApplications.unapply({
       operation: approvedOperation("request-unapply"),
       applicationId: applied.applicationId,
+      effectiveDate: "2026-08-06",
       expectedVersion: 1
     });
     const unapplyRetry = await financials.paymentApplications.unapply({
       operation: approvedOperation("request-unapply-retry"),
       applicationId: applied.applicationId,
+      effectiveDate: "2026-08-06",
       expectedVersion: 1
     });
 
@@ -588,6 +590,203 @@ describe("reusable ERP Financials service", () => {
         expectedTargetVersion: 3
       })
     ).rejects.toThrow("cannot be replayed as applied");
+  });
+
+  it("enforces fiscal locks for apply, unapply, and void without changing canonical state", async () => {
+    const database = subledgerDatabase();
+    const unrestricted = service(database);
+    const invoice = await unrestricted.invoices.create({
+      operation: operation("request-fiscal-invoice"),
+      idempotencyKey: "fiscal-invoice",
+      date: "2026-08-01",
+      dueDate: "2026-08-31",
+      customerId: "customer_acme",
+      receivableAccount: { accountId: "acct_receivable" },
+      revenueLines: [{ accountId: "acct_service_revenue", amount: "100.00" }]
+    });
+    const payment = await unrestricted.customerPayments.record({
+      operation: operation("request-fiscal-payment"),
+      idempotencyKey: "fiscal-payment",
+      date: "2026-08-05",
+      customerId: "customer_acme",
+      amount: "60.00",
+      cashAccount: { accountId: "acct_cash" },
+      receivableAccount: { accountId: "acct_receivable" }
+    });
+    const enforced = enforcedService(database);
+
+    database.client.postingLockDate = "2026-08-05";
+    await expect(enforced.paymentApplications.apply({
+      operation: operation("request-locked-apply"),
+      idempotencyKey: "locked-apply",
+      applicationType: "customer_payment_to_invoice",
+      sourceDocumentId: payment.documentId,
+      targetDocumentId: invoice.documentId,
+      amount: "20.00",
+      applicationDate: "2026-08-05",
+      expectedSourceVersion: 1,
+      expectedTargetVersion: 1
+    })).rejects.toMatchObject({ code: "fiscal_period_closed" });
+    expect(database.client.subledgerApplications).toHaveLength(0);
+    expect(subledgerRow(database, invoice.documentId)).toMatchObject({ open_amount: "100.00", version: 1 });
+    expect(subledgerRow(database, payment.documentId)).toMatchObject({ open_amount: "60.00", version: 1 });
+
+    database.client.postingLockDate = undefined;
+    database.client.fiscalPeriodStatus = "closing";
+    await expect(enforced.paymentApplications.apply({
+      operation: operation("request-closing-apply"),
+      idempotencyKey: "closing-apply",
+      applicationType: "customer_payment_to_invoice",
+      sourceDocumentId: payment.documentId,
+      targetDocumentId: invoice.documentId,
+      amount: "20.00",
+      applicationDate: "2026-08-05",
+      expectedSourceVersion: 1,
+      expectedTargetVersion: 1
+    })).rejects.toMatchObject({ code: "fiscal_period_closing" });
+
+    database.client.fiscalPeriodStatus = "open";
+    const application = await enforced.paymentApplications.apply({
+      operation: operation("request-open-apply"),
+      idempotencyKey: "open-apply",
+      applicationType: "customer_payment_to_invoice",
+      sourceDocumentId: payment.documentId,
+      targetDocumentId: invoice.documentId,
+      amount: "20.00",
+      applicationDate: "2026-08-05",
+      expectedSourceVersion: 1,
+      expectedTargetVersion: 1
+    });
+    const stateBeforeBlockedEnd = structuredClone({
+      applications: database.client.subledgerApplications,
+      documents: database.client.subledgerDocuments,
+      lifecycleEvents: [...database.client.lifecycleEvents.entries()],
+      outbox: database.client.financialOutbox
+    });
+
+    database.client.fiscalPeriodStatus = "closed";
+    for (const end of ["unapply", "void"] as const) {
+      await expect(enforced.paymentApplications[end]({
+        operation: approvedOperation(`request-locked-${end}`),
+        applicationId: application.applicationId,
+        effectiveDate: "2026-08-06",
+        expectedVersion: 1
+      })).rejects.toMatchObject({ code: "fiscal_period_closed" });
+      expect({
+        applications: database.client.subledgerApplications,
+        documents: database.client.subledgerDocuments,
+        lifecycleEvents: [...database.client.lifecycleEvents.entries()],
+        outbox: database.client.financialOutbox
+      }).toEqual(stateBeforeBlockedEnd);
+    }
+  });
+
+  it("settles an invoice with a canonical write-off application atomically and replays without new facts", async () => {
+    const database = subledgerDatabase();
+    const financials = service(database);
+    const invoice = await financials.invoices.create({
+      operation: operation("request-write-off-invoice"),
+      idempotencyKey: "write-off-invoice",
+      date: "2026-08-01",
+      dueDate: "2026-08-31",
+      customerId: "customer_acme",
+      receivableAccount: { accountId: "acct_receivable" },
+      revenueLines: [{ accountId: "acct_service_revenue", amount: "100.00" }]
+    });
+    const command = {
+      operation: operation("request-settle-write-off"),
+      idempotencyKey: "settle-write-off",
+      date: "2026-08-08" as const,
+      customerId: "customer_acme",
+      invoiceId: invoice.documentId,
+      expectedInvoiceVersion: 1,
+      amount: "30.00" as const,
+      balanceAccount: { accountId: "acct_receivable" as const },
+      writeOffAccount: { accountId: "acct_expense" as const },
+      reason: "Approved bad debt"
+    };
+
+    const settled = await financials.writeOffs.settleInvoice(command);
+    const replay = await financials.writeOffs.settleInvoice(command);
+
+    expect(settled).toMatchObject({
+      status: "settled",
+      writeOffVersion: 2,
+      invoiceId: invoice.documentId,
+      invoiceOpenAmount: "70.00",
+      invoiceStatus: "partially_applied",
+      invoiceVersion: 2,
+      application: { status: "applied", appliedAmount: "30.00", version: 1 }
+    });
+    expect(replay).toEqual({
+      ...settled,
+      status: "already_settled",
+      application: { ...settled.application, status: "already_applied" }
+    });
+    expect(database.client.subledgerDocuments).toHaveLength(2);
+    expect(database.client.subledgerApplications).toEqual([
+      expect.objectContaining({
+        application_type: "write_off_to_invoice",
+        source_document_id: settled.writeOffDocumentId,
+        target_document_id: invoice.documentId,
+        applied_amount: "30.00"
+      })
+    ]);
+    expect(subledgerRow(database, settled.writeOffDocumentId)).toMatchObject({
+      document_type: "write_off",
+      open_amount: "0.00",
+      status: "settled",
+      version: 2
+    });
+    expect(database.client.financialOutbox.map((event) => event.event_type)).toEqual(expect.arrayContaining([
+      "subledger_document.write_off.posted",
+      "subledger_application.applied"
+    ]));
+  });
+
+  it("rolls back a write-off settlement when invoice scope, balance, or version validation fails", async () => {
+    const database = subledgerDatabase();
+    const financials = service(database);
+    const invoice = await financials.invoices.create({
+      operation: operation("request-write-off-validation-invoice"),
+      idempotencyKey: "write-off-validation-invoice",
+      date: "2026-08-01",
+      dueDate: "2026-08-31",
+      customerId: "customer_acme",
+      receivableAccount: { accountId: "acct_receivable" },
+      revenueLines: [{ accountId: "acct_service_revenue", amount: "10.00" }]
+    });
+    const base = {
+      operation: operation("request-invalid-write-off"),
+      date: "2026-08-08" as const,
+      customerId: "customer_acme",
+      invoiceId: invoice.documentId,
+      expectedInvoiceVersion: 1,
+      amount: "11.00" as const,
+      balanceAccount: { accountId: "acct_receivable" as const },
+      writeOffAccount: { accountId: "acct_expense" as const }
+    };
+
+    await expect(financials.writeOffs.settleInvoice({
+      ...base,
+      idempotencyKey: "write-off-over-balance"
+    })).rejects.toThrow("exceeds an available document balance");
+    await expect(financials.writeOffs.settleInvoice({
+      ...base,
+      idempotencyKey: "write-off-wrong-customer",
+      customerId: "customer_other",
+      amount: "5.00"
+    })).rejects.toMatchObject({ code: "missing_document" });
+    await expect(financials.writeOffs.settleInvoice({
+      ...base,
+      idempotencyKey: "write-off-stale-version",
+      expectedInvoiceVersion: 2,
+      amount: "5.00"
+    })).rejects.toMatchObject({ code: "optimistic_concurrency_conflict" });
+
+    expect(database.client.subledgerDocuments).toHaveLength(1);
+    expect(database.client.subledgerApplications).toHaveLength(0);
+    expect(subledgerRow(database, invoice.documentId)).toMatchObject({ open_amount: "10.00", status: "open", version: 1 });
   });
 
   it("namespaces journal persistence identities by transaction type", async () => {
@@ -1078,6 +1277,19 @@ function service(database: ErpFinancialsTransactionRunner) {
   });
 }
 
+function enforcedService(database: ErpFinancialsTransactionRunner) {
+  return createErpFinancials({
+    database,
+    tenantId: "tenant_service",
+    companyId: "company_service",
+    sourceId: "source_service",
+    currencyCode: "USD",
+    accountingBasis: "accrual",
+    postingPolicy: "enforce_fiscal_periods",
+    now: () => "2026-08-12T15:00:00.000Z"
+  });
+}
+
 function reclassificationEntry(): PostJournalEntryInput {
   return {
     operation: operation("request-journal-reclass"),
@@ -1178,6 +1390,8 @@ class ServiceTestClient implements PostgresQueryClient {
   subledgerApplications: Record<string, unknown>[] = [];
   financialOutbox: Record<string, unknown>[] = [];
   readonly lifecycleEvents = new Map<string, Record<string, unknown>>();
+  postingLockDate?: string;
+  fiscalPeriodStatus: "open" | "closing" | "closed" = "open";
   failInsertTable?: string;
 
   constructor(accounts: readonly Record<string, unknown>[]) {
@@ -1218,6 +1432,18 @@ class ServiceTestClient implements PostgresQueryClient {
 
     if (sql.includes('from "erp_financials"."company_sources"')) {
       return Promise.resolve({ rows: [{ company_source_id: "company_source_service" }] as unknown as readonly Row[] });
+    }
+
+    if (sql.includes('from "erp_financials"."accounting_book_controls"')) {
+      return Promise.resolve({
+        rows: [{ posting_lock_date: this.postingLockDate ?? null }] as unknown as readonly Row[]
+      });
+    }
+
+    if (sql.includes('from "erp_financials"."fiscal_periods"')) {
+      return Promise.resolve({
+        rows: [{ fiscal_period_id: "period_2026_08", status: this.fiscalPeriodStatus }] as unknown as readonly Row[]
+      });
     }
 
     if (sql.includes('insert into "erp_financials"."financial_outbox"')) {
@@ -1284,9 +1510,12 @@ class ServiceTestClient implements PostgresQueryClient {
         return Promise.resolve({ rows: (row === undefined ? [] : [row]) as unknown as readonly Row[] });
       }
       const ids = params[3];
-      const rows = Array.isArray(ids)
+      let rows = Array.isArray(ids)
         ? this.subledgerDocuments.filter((document) => ids.includes(document.subledger_document_id))
         : this.subledgerDocuments.filter((document) => document.subledger_document_id === ids);
+      if (sql.includes('"document_type" = \'invoice\'') && params[4] !== undefined) {
+        rows = rows.filter((document) => document.document_type === "invoice" && document.party_id === params[4]);
+      }
       return Promise.resolve({ rows: rows as unknown as readonly Row[] });
     }
 

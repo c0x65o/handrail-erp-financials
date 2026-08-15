@@ -3,6 +3,7 @@ import { Pool } from "pg";
 
 import {
   POSTGRES_CANONICAL_SCHEMA_MANIFEST,
+  createErpFinancials,
   createErpFinancialsSdk,
   migratePostgresSchema,
   validatePostgresMigrationHistory,
@@ -43,9 +44,9 @@ describeIntegration("ERP Financials real PostgreSQL", () => {
     expect(result.targetVersion).toBe(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion);
     expect(result.applied.at(-1)?.toVersion).toBe(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion);
     expect(schema).toMatchObject({ compatible: true, fixtureSupport: true, issues: [] });
-    expect(history).toMatchObject({ compatible: true, currentVersion: 14, issues: [] });
+    expect(history).toMatchObject({ compatible: true, currentVersion: 17, issues: [] });
     await expect(
-      pool.query("update erp_financials.schema_migrations set name = 'tampered' where to_version = 14")
+      pool.query("update erp_financials.schema_migrations set name = 'tampered' where to_version = 17")
     ).rejects.toThrow("schema migration history is append-only");
   });
 
@@ -290,6 +291,106 @@ insert into erp_financials.journal_entry_links values
     await expect(
       pool.query("delete from erp_financials.subledger_applications where subledger_application_id = 'application_1'")
     ).rejects.toThrow("cannot be deleted");
+  });
+
+  it("atomically settles invoice write-offs and rejects locked application transitions", async () => {
+    await migratePostgresSchema(runner, { appliedByRef: "integration:write-off-settlement" });
+    await seedAccountingScope(pool);
+    const unrestricted = createErpFinancials({
+      database: runner,
+      tenantId: "tenant_1",
+      companyId: "company_1",
+      sourceId: "source_1",
+      currencyCode: "USD",
+      postingPolicy: "legacy_unrestricted",
+      now: () => "2026-08-12T12:00:00.000Z"
+    });
+    const invoice = await unrestricted.invoices.create({
+      operation: sdkOperation(),
+      idempotencyKey: "integration-write-off-invoice",
+      date: "2026-08-01",
+      dueDate: "2026-08-31",
+      customerId: "customer_1",
+      receivableAccount: { accountId: "account_ar" },
+      revenueLines: [{ accountId: "account_income", amount: "40.00" }]
+    });
+    const settlementInput = {
+      operation: sdkOperation(),
+      idempotencyKey: "integration-write-off-settlement",
+      date: "2026-08-08" as const,
+      customerId: "customer_1",
+      invoiceId: invoice.documentId,
+      expectedInvoiceVersion: 1,
+      amount: "15.00" as const,
+      balanceAccount: { accountId: "account_ar" as const },
+      writeOffAccount: { accountId: "account_income" as const },
+      reason: "Approved integration write-off"
+    };
+
+    const settlement = await unrestricted.writeOffs.settleInvoice(settlementInput);
+    await expect(unrestricted.writeOffs.settleInvoice(settlementInput)).resolves.toMatchObject({
+      status: "already_settled",
+      application: { status: "already_applied" }
+    });
+    expect(settlement).toMatchObject({
+      status: "settled",
+      invoiceOpenAmount: "25.00",
+      invoiceStatus: "partially_applied",
+      invoiceVersion: 2,
+      writeOffVersion: 2,
+      application: { appliedAmount: "15.00", version: 1 }
+    });
+    const facts = await pool.query<{
+      application_type: string;
+      invoice_open_amount: string;
+      invoice_status: string;
+      write_off_open_amount: string;
+      write_off_status: string;
+    }>(
+      `select application.application_type,
+  invoice.open_amount::text as invoice_open_amount, invoice.status as invoice_status,
+  write_off.open_amount::text as write_off_open_amount, write_off.status as write_off_status
+from erp_financials.subledger_applications application
+join erp_financials.subledger_documents invoice on invoice.subledger_document_id = application.target_document_id
+join erp_financials.subledger_documents write_off on write_off.subledger_document_id = application.source_document_id
+where application.subledger_application_id = $1`,
+      [settlement.application.applicationId]
+    );
+    expect(facts.rows).toEqual([{
+      application_type: "write_off_to_invoice",
+      invoice_open_amount: "25",
+      invoice_status: "partially_applied",
+      write_off_open_amount: "0",
+      write_off_status: "settled"
+    }]);
+
+    await pool.query(
+      `insert into erp_financials.fiscal_periods (
+  fiscal_period_id, tenant_id, company_id, source_id, fiscal_year, period_number,
+  period_start, period_end, status, version, created_at, updated_at
+) values ('period_2026_08', 'tenant_1', 'company_1', 'source_1', 2026, 8,
+  '2026-08-01', '2026-08-31', 'closing', 1, now(), now())`
+    );
+    const enforced = createErpFinancials({
+      database: runner,
+      tenantId: "tenant_1",
+      companyId: "company_1",
+      sourceId: "source_1",
+      currencyCode: "USD",
+      postingPolicy: "enforce_fiscal_periods",
+      now: () => "2026-08-12T12:00:00.000Z"
+    });
+    await expect(enforced.paymentApplications.unapply({
+      operation: sdkOperation(),
+      applicationId: settlement.application.applicationId,
+      effectiveDate: "2026-08-08",
+      expectedVersion: 1
+    })).rejects.toMatchObject({ code: "fiscal_period_closing" });
+    await expect(
+      pool.query("select status, version from erp_financials.subledger_applications where subledger_application_id = $1", [
+        settlement.application.applicationId
+      ])
+    ).resolves.toMatchObject({ rows: [{ status: "applied", version: 1 }] });
   });
 
   it("uses the scoped transaction identity index for an important journal lookup", async () => {

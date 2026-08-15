@@ -121,7 +121,13 @@ because it has no ordered history.
 - `paymentApplications.apply`, `.unapply`, and `.void` enforce company/source,
   party, currency, document-type, available-balance, optimistic-version,
   terminal-state, idempotency, and concurrency invariants in both the service
-  and database.
+  and database. Apply enforces fiscal locks with `applicationDate`; unapply and
+  void require `effectiveDate` and reject closed or closing periods before any
+  state change.
+- `writeOffs.settleInvoice` atomically posts and applies a receivable write-off
+  to the referenced canonical invoice. It owns invoice balance/status changes,
+  version checks, lifecycle facts, and outbox evidence; hosts never update
+  package subledger rows directly.
 
 All monetary inputs are fixed-scale decimal strings. The package does not use
 binary floating-point arithmetic for journal validation.

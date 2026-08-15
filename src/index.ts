@@ -602,6 +602,8 @@ export type {
   RecordTransferInput,
   RecordWriteOffInput,
   ReverseJournalEntryInput,
+  SettleInvoiceWriteOffInput,
+  SettleInvoiceWriteOffResult,
   SubledgerAmountLine,
   SubledgerApplicationResult,
   SubledgerApplicationType,

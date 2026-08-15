@@ -53,8 +53,8 @@ export type PostgresTableManifest = {
 };
 
 export type PostgresSchemaManifest = {
-  readonly manifestVersion: "2026-08-15.general-ledger-contract";
-  readonly schemaVersion: 16;
+  readonly manifestVersion: "2026-08-15.write-off-invoice-applications";
+  readonly schemaVersion: 17;
   readonly dialect: "postgres";
   readonly namespace: "erp_financials";
   readonly requiredTriggers: readonly PostgresTriggerManifest[];
@@ -144,8 +144,8 @@ const table = (
 });
 
 export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
-  manifestVersion: "2026-08-15.general-ledger-contract",
-  schemaVersion: 16,
+  manifestVersion: "2026-08-15.write-off-invoice-applications",
+  schemaVersion: 17,
   dialect: "postgres",
   namespace: "erp_financials",
   requiredTriggers: [
@@ -234,6 +234,13 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
       timing: "before",
       events: ["delete"],
       functionName: "reject_subledger_application_delete"
+    },
+    {
+      name: "subledger_applications_write_off_validate",
+      table: "subledger_applications",
+      timing: "before",
+      events: ["insert", "update"],
+      functionName: "validate_write_off_to_invoice_application"
     },
     {
       name: "subledger_applications_match_evidence_immutable",
@@ -1256,7 +1263,7 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
       [
         {
           name: "subledger_applications_type_check",
-          sql: "application_type in ('customer_payment_to_invoice', 'bill_payment_to_bill', 'credit_to_invoice')"
+          sql: "application_type in ('customer_payment_to_invoice', 'bill_payment_to_bill', 'credit_to_invoice', 'write_off_to_invoice')"
         },
         {
           name: "subledger_applications_amount_check",

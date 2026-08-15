@@ -15,7 +15,7 @@ dependencies.
 
 ## Setup order
 
-1. Run `migratePostgresSchema(...)` through schema version 16.
+1. Run `migratePostgresSchema(...)` through schema version 17.
 2. Create the canonical company, sources, and company/source bindings.
 3. Define one reporting book and its base currency/accounting basis.
 4. Bind every provenance source to the book with effective dates.
@@ -187,6 +187,21 @@ evidence and correction links. `commands.writeOffs.voidIssued(...)` and
 posted write-offs are never edited or deleted directly. Refund detail likewise
 returns its bounded related-invoice, method, lifecycle reference, and durable
 operation provenance.
+
+Use `commands.writeOffs.settleInvoice(...)` when a receivable write-off must
+reduce a canonical invoice balance. The command posts an open write-off and
+immediately applies it through `write_off_to_invoice` in one transaction. It
+requires the invoice's optimistic version, validates company/customer/currency,
+caps the amount to both available balances, and returns the updated canonical
+invoice status/version. A stable idempotency replay returns `already_settled`.
+Hosts must not call `writeOffs.record(...)` and then update invoice state
+themselves.
+
+Application apply uses `applicationDate` for fiscal-period and posting-lock
+enforcement. Application unapply and void require an explicit `effectiveDate`
+and apply the same lock policy before lifecycle, outbox, or balance changes.
+Identical completed retries remain no-op replays even if that date is later
+locked.
 
 `payment_applications` remains in schema v15 only for compatibility with the
 older canonical contract. New native writes use `subledger_applications`; hosts

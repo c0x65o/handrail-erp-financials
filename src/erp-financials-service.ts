@@ -399,7 +399,8 @@ export type SubledgerDocumentResult = {
 export type SubledgerApplicationType =
   | "customer_payment_to_invoice"
   | "bill_payment_to_bill"
-  | "credit_to_invoice";
+  | "credit_to_invoice"
+  | "write_off_to_invoice";
 
 export type ApplySubledgerPaymentInput = {
   readonly operation: FinancialOperationContext;
@@ -423,7 +424,30 @@ export type ApplySubledgerPaymentInput = {
 export type EndSubledgerApplicationInput = {
   readonly operation: FinancialOperationContext;
   readonly applicationId: string;
+  /** Accounting date used to enforce fiscal-period and posting-lock policy. */
+  readonly effectiveDate: IsoDate;
   readonly expectedVersion: number;
+};
+
+export type SettleInvoiceWriteOffInput = Omit<
+  RecordWriteOffInput,
+  "balanceType" | "partyId" | "relatedInvoiceId"
+> & {
+  readonly customerId: string;
+  readonly invoiceId: string;
+  readonly expectedInvoiceVersion: number;
+};
+
+export type SettleInvoiceWriteOffResult = {
+  readonly status: "settled" | "already_settled";
+  readonly writeOffDocumentId: string;
+  readonly writeOffTransactionId: string;
+  readonly writeOffVersion: number;
+  readonly application: SubledgerApplicationResult;
+  readonly invoiceId: string;
+  readonly invoiceOpenAmount: DecimalString;
+  readonly invoiceStatus: "open" | "partially_applied" | "settled";
+  readonly invoiceVersion: number;
 };
 
 export type SubledgerApplicationResult = {
@@ -480,6 +504,7 @@ export type ErpFinancials = {
   readonly billPayments: { record(input: RecordBillPaymentInput): Promise<SubledgerDocumentResult> };
   readonly writeOffs: {
     record(input: RecordWriteOffInput): Promise<SubledgerDocumentResult>;
+    settleInvoice(input: SettleInvoiceWriteOffInput): Promise<SettleInvoiceWriteOffResult>;
     voidIssued(input: VoidIssuedWriteOffInput): Promise<IssuedAdjustmentLifecycleResult>;
     replaceIssued(input: ReplaceIssuedWriteOffInput): Promise<IssuedAdjustmentLifecycleResult>;
   };
@@ -649,6 +674,7 @@ export function createErpFinancials(input: CreateErpFinancialsInput): ErpFinanci
     billPayments: { record: (documentInput) => recordBillPayment(context, documentInput) },
     writeOffs: {
       record: (documentInput) => recordWriteOff(context, documentInput),
+      settleInvoice: (settlementInput) => settleInvoiceWriteOff(context, settlementInput),
       voidIssued: (workflowInput) => runIssuedAdjustmentLifecycle(context, "voided", {
         ...workflowInput,
         adjustmentDocumentId: workflowInput.writeOffDocumentId,
@@ -1036,7 +1062,11 @@ async function recordBillPayment(
   });
 }
 
-async function recordWriteOff(context: ServiceContext, input: RecordWriteOffInput): Promise<SubledgerDocumentResult> {
+async function recordWriteOff(
+  context: ServiceContext,
+  input: RecordWriteOffInput,
+  options: { readonly documentStartsOpen?: boolean } = {}
+): Promise<SubledgerDocumentResult> {
   const amount = normalizedPositiveMoney(input.amount, "amount");
   const journalLines: readonly PostJournalEntryLineInput[] =
     input.balanceType === "receivable"
@@ -1049,7 +1079,7 @@ async function recordWriteOff(context: ServiceContext, input: RecordWriteOffInpu
           { ...input.writeOffAccount, credit: amount, partyId: input.partyId }
         ];
   return createSubledgerDocument(context, {
-    ...commonSubledgerDocument(context, input, "write_off", amount, false, {
+    ...commonSubledgerDocument(context, input, "write_off", amount, options.documentStartsOpen ?? false, {
       writeOffProvenance: {
         balanceType: input.balanceType,
         balanceAccountId: resolveAccountId(context, input.balanceAccount),
@@ -1060,6 +1090,69 @@ async function recordWriteOff(context: ServiceContext, input: RecordWriteOffInpu
     }),
     partyId: input.partyId,
     journalLines
+  });
+}
+
+async function settleInvoiceWriteOff(
+  context: ServiceContext,
+  input: SettleInvoiceWriteOffInput
+): Promise<SettleInvoiceWriteOffResult> {
+  assertFinancialOperationContext(input.operation);
+  assertNonEmpty(input.idempotencyKey, "idempotencyKey");
+  assertNonEmpty(input.customerId, "customerId");
+  assertNonEmpty(input.invoiceId, "invoiceId");
+  assertExpectedSubledgerVersion(input.expectedInvoiceVersion, "expectedInvoiceVersion");
+  assertIsoDate(input.date, "date");
+  const amount = normalizedPositiveMoney(input.amount, "amount");
+  const currencyCode = input.currencyCode ?? context.currencyCode;
+  assertCurrencyAllowed(context, currencyCode);
+
+  return context.database.transaction(async (client) => {
+    await acquireTransactionLock(
+      client,
+      `write-off-settlement:${context.tenantId}:${context.companyId}:${context.sourceId}:${input.idempotencyKey}`
+    );
+    await assertCompanySourceScope(client, context);
+    const nestedContext: ServiceContext = {
+      ...context,
+      database: { transaction: async <Result>(work: (nestedClient: PostgresQueryClient) => Promise<Result>) => work(client) }
+    };
+    const writeOff = await recordWriteOff(nestedContext, {
+      operation: input.operation,
+      idempotencyKey: input.idempotencyKey,
+      date: input.date,
+      ...(input.documentNumber === undefined ? {} : { documentNumber: input.documentNumber }),
+      ...(input.memo === undefined ? {} : { memo: input.memo }),
+      currencyCode,
+      partyId: input.customerId,
+      amount,
+      balanceType: "receivable",
+      balanceAccount: input.balanceAccount,
+      writeOffAccount: input.writeOffAccount,
+      relatedInvoiceId: input.invoiceId,
+      ...(input.reason === undefined ? {} : { reason: input.reason })
+    }, { documentStartsOpen: true });
+    const application = await applySubledgerPayment(nestedContext, {
+      operation: input.operation,
+      idempotencyKey: input.idempotencyKey,
+      applicationType: "write_off_to_invoice",
+      sourceDocumentId: writeOff.documentId,
+      targetDocumentId: input.invoiceId,
+      amount,
+      applicationDate: input.date,
+      expectedSourceVersion: 1,
+      expectedTargetVersion: input.expectedInvoiceVersion
+    });
+    const [writeOffRow, invoiceRow] = await loadSubledgerDocumentsForUpdate(client, context, [
+      writeOff.documentId,
+      input.invoiceId
+    ]);
+    return invoiceWriteOffSettlementResult(
+      writeOffRow,
+      invoiceRow,
+      application,
+      application.status === "already_applied" ? "already_settled" : "settled"
+    );
   });
 }
 
@@ -1327,6 +1420,9 @@ async function applySubledgerPayment(
       }
       return applicationResult(existing, "already_applied");
     }
+    if (context.postingPolicy === "enforce_fiscal_periods") {
+      await assertPostingDateAllowed(client, context, input.applicationDate);
+    }
     const [source, target] = await loadSubledgerDocumentsForUpdate(client, context, [
       input.sourceDocumentId,
       input.targetDocumentId
@@ -1417,6 +1513,7 @@ async function endSubledgerApplication(
   status: "unapplied" | "voided"
 ): Promise<SubledgerApplicationResult> {
   assertIndependentApproval(input.operation);
+  assertIsoDate(input.effectiveDate, "effectiveDate");
   assertExpectedSubledgerVersion(input.expectedVersion, "expectedVersion");
   return context.database.transaction(async (client) => {
     await acquireTransactionLock(
@@ -1452,6 +1549,9 @@ for update`,
         { retryable: true, details: { actualVersion: currentVersion, expectedVersion: input.expectedVersion } }
       );
     }
+    if (context.postingPolicy === "enforce_fiscal_periods") {
+      await assertPostingDateAllowed(client, context, input.effectiveDate);
+    }
     const lifecycle = await appendFinancialLifecycleEvent(client, {
       tenantId: context.tenantId,
       companyId: context.companyId,
@@ -1463,7 +1563,7 @@ for update`,
       operation: input.operation,
       recordedAt: context.now(),
       priorEventId: storedString(current.applied_event_id, "applied_event_id"),
-      payload: { priorVersion: currentVersion, status }
+      payload: { effectiveDate: input.effectiveDate, priorVersion: currentVersion, status }
     });
     const updated = await client.query(
       `update "erp_financials"."subledger_applications"
@@ -1494,7 +1594,7 @@ returning *`,
       aggregateType: "subledger_application",
       aggregateId: input.applicationId,
       idempotencyKey: `subledger-application:${input.applicationId}:outbox:${status}:v${String(currentVersion)}`,
-      payload: { applicationId: input.applicationId, priorVersion: currentVersion, status }
+      payload: { applicationId: input.applicationId, effectiveDate: input.effectiveDate, priorVersion: currentVersion, status }
     });
     return applicationResult(row, status);
   });
@@ -1594,7 +1694,8 @@ function assertSubledgerApplicationDocuments(
   const expectedTypes: Record<SubledgerApplicationType, readonly [SubledgerDocumentType, SubledgerDocumentType]> = {
     customer_payment_to_invoice: ["customer_payment", "invoice"],
     bill_payment_to_bill: ["bill_payment", "vendor_bill"],
-    credit_to_invoice: ["credit_memo", "invoice"]
+    credit_to_invoice: ["credit_memo", "invoice"],
+    write_off_to_invoice: ["write_off", "invoice"]
   };
   const types = expectedTypes[input.applicationType];
   if (source.document_type !== types[0] || target.document_type !== types[1]) {
@@ -1831,6 +1932,32 @@ function applicationResult(
   };
 }
 
+function invoiceWriteOffSettlementResult(
+  writeOff: Record<string, unknown>,
+  invoice: Record<string, unknown>,
+  application: SubledgerApplicationResult,
+  status: SettleInvoiceWriteOffResult["status"]
+): SettleInvoiceWriteOffResult {
+  if (writeOff.document_type !== "write_off" || invoice.document_type !== "invoice") {
+    throw new Error("Invoice write-off settlement returned unexpected document types");
+  }
+  const invoiceStatus = storedString(invoice.status, "invoice.status");
+  if (!["open", "partially_applied", "settled"].includes(invoiceStatus)) {
+    throw new Error(`Invoice write-off settlement returned unexpected invoice status ${invoiceStatus}`);
+  }
+  return {
+    status,
+    writeOffDocumentId: storedString(writeOff.subledger_document_id, "writeOff.subledger_document_id"),
+    writeOffTransactionId: storedString(writeOff.transaction_id, "writeOff.transaction_id"),
+    writeOffVersion: storedInteger(writeOff.version, "writeOff.version"),
+    application,
+    invoiceId: storedString(invoice.subledger_document_id, "invoice.subledger_document_id"),
+    invoiceOpenAmount: storedMoney(invoice.open_amount, "invoice.open_amount"),
+    invoiceStatus: invoiceStatus as SettleInvoiceWriteOffResult["invoiceStatus"],
+    invoiceVersion: storedInteger(invoice.version, "invoice.version")
+  };
+}
+
 function storedDecimal(value: unknown, field: string): DecimalString {
   const decimal = typeof value === "number" ? String(value) : storedString(value, field);
   if (!/^-?\d+(?:\.\d+)?$/u.test(decimal)) throw new Error(`Stored field ${field} must be a decimal`);
@@ -1899,7 +2026,8 @@ function assertSubledgerApplicationType(value: SubledgerApplicationType): void {
   if (![
     "customer_payment_to_invoice",
     "bill_payment_to_bill",
-    "credit_to_invoice"
+    "credit_to_invoice",
+    "write_off_to_invoice"
   ].includes(value)) {
     throw new ErpFinancialsValidationError(`Unsupported subledger application type ${value}`);
   }

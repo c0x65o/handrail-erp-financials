@@ -30,11 +30,15 @@ const GENERAL_LEDGER_CONTRACT_UPGRADE_SQL = readFileSync(
   new URL("../migrations/future-erp/20260815020000_add_general_ledger_contract.sql", import.meta.url),
   "utf8"
 );
+const WRITE_OFF_APPLICATION_UPGRADE_SQL = readFileSync(
+  new URL("../migrations/future-erp/20260815030000_add_write_off_invoice_applications.sql", import.meta.url),
+  "utf8"
+);
 
 describe("canonical schema manifest", () => {
   it("is versioned and covers the documented canonical entities", () => {
-    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.manifestVersion).toBe("2026-08-15.general-ledger-contract");
-    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion).toBe(16);
+    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.manifestVersion).toBe("2026-08-15.write-off-invoice-applications");
+    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion).toBe(17);
 
     const tableNames = POSTGRES_CANONICAL_SCHEMA_MANIFEST.tables.map((table) => table.name);
 
@@ -230,7 +234,8 @@ describe("canonical schema manifest", () => {
       expect.arrayContaining([
         expect.objectContaining({ name: "schema_migrations_immutable", table: "schema_migrations" }),
         expect.objectContaining({ name: "financial_lifecycle_events_immutable" }),
-        expect.objectContaining({ name: "subledger_applications_validate" })
+        expect.objectContaining({ name: "subledger_applications_validate" }),
+        expect.objectContaining({ name: "subledger_applications_write_off_validate" })
       ])
     );
     expect(POSTGRES_MIGRATIONS.map(({ fromVersion, toVersion }) => [fromVersion, toVersion])).toEqual([
@@ -244,7 +249,8 @@ describe("canonical schema manifest", () => {
       [12, 13],
       [13, 14],
       [14, 15],
-      [15, 16]
+      [15, 16],
+      [16, 17]
     ]);
     expect(renderPostgresSchemaSql()).toContain('create table if not exists "erp_financials"."schema_migrations"');
     expect(FUTURE_ERP_CANONICAL_SCHEMA_MIGRATION_SQL).not.toMatch(
@@ -271,6 +277,15 @@ describe("canonical schema manifest", () => {
     expect(GENERAL_LEDGER_CONTRACT_UPGRADE_SQL).toContain("mapped reporting-book account must remain an active posting account");
     expect(GENERAL_LEDGER_CONTRACT_UPGRADE_SQL).toContain("account type cannot change while children or mappings depend on it");
     expect(GENERAL_LEDGER_CONTRACT_UPGRADE_SQL).toContain("version must remain stable for a replay or advance by exactly one");
+  });
+
+  it("database-enforces canonical write-off-to-invoice document roles", () => {
+    expect(WRITE_OFF_APPLICATION_UPGRADE_SQL).toContain("'write_off_to_invoice'");
+    expect(WRITE_OFF_APPLICATION_UPGRADE_SQL).toContain("source_document_type is distinct from 'write_off'");
+    expect(WRITE_OFF_APPLICATION_UPGRADE_SQL).toContain("target_document_type is distinct from 'invoice'");
+    expect(renderPostgresSchemaSql()).toContain(
+      "application_type in ('customer_payment_to_invoice', 'bill_payment_to_bill', 'credit_to_invoice', 'write_off_to_invoice')"
+    );
   });
 });
 

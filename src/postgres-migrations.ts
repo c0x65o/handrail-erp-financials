@@ -135,6 +135,10 @@ const migrationFiles = {
   generalLedgerContractV16: new URL(
     "../migrations/future-erp/20260815020000_add_general_ledger_contract.sql",
     import.meta.url
+  ),
+  writeOffInvoiceApplicationsV17: new URL(
+    "../migrations/future-erp/20260815030000_add_write_off_invoice_applications.sql",
+    import.meta.url
   )
 } as const;
 
@@ -233,6 +237,13 @@ export const POSTGRES_MIGRATIONS: readonly PostgresMigrationDefinition[] = [
     15,
     16,
     migrationFiles.generalLedgerContractV16
+  ),
+  migration(
+    "20260815030000_add_write_off_invoice_applications",
+    "Add canonical write-off-to-invoice applications",
+    16,
+    17,
+    migrationFiles.writeOffInvoiceApplicationsV17
   )
 ] as const;
 

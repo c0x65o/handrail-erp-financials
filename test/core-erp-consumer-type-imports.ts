@@ -33,6 +33,7 @@ import type {
   InvoiceDeliveryEvent,
   PaymentApplicationDetail,
   PaymentApplicationListItem,
+  EndSubledgerApplicationInput,
   QuickBooksFullSyncRunResult,
   QuickBooksFullSyncWorker,
   QuickBooksIncrementalSyncRunResult,
@@ -48,6 +49,8 @@ import type {
   WriteOffDetail,
   WriteOffListItem,
   ReplaceIssuedWriteOffInput,
+  SettleInvoiceWriteOffInput,
+  SettleInvoiceWriteOffResult,
   VoidIssuedWriteOffInput,
   VoidIssuedVendorBillInput,
   VoidPostedVendorBillInput
@@ -110,8 +113,11 @@ export type CoreErpPersistenceEvidenceImports = {
   readonly generalLedgerSource: GeneralLedgerSourceProvenance;
   readonly paymentApplication: PaymentApplicationListItem;
   readonly paymentApplicationDetail: PaymentApplicationDetail;
+  readonly endSubledgerApplicationInput: EndSubledgerApplicationInput;
   readonly writeOff: WriteOffListItem;
   readonly writeOffDetail: WriteOffDetail;
   readonly voidIssuedWriteOffInput: VoidIssuedWriteOffInput;
   readonly replaceIssuedWriteOffInput: ReplaceIssuedWriteOffInput;
+  readonly settleInvoiceWriteOffInput: SettleInvoiceWriteOffInput;
+  readonly settleInvoiceWriteOffResult: SettleInvoiceWriteOffResult;
 };
