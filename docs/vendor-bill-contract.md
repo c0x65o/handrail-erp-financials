@@ -1,6 +1,6 @@
 # Vendor bill public contract
 
-Version `0.3.0` adds the Bills and Bill detail contract to both public package
+Version `0.3.1` adds the Bills and Bill detail contract to both public package
 entry points. No private ERP Financials table access is required.
 
 ## Read surface
@@ -35,10 +35,11 @@ and currency and records linked reversal/replacement journals.
 
 ## Consumer upgrade and recheck
 
-After `0.3.0` is available from the consumer's configured package source:
+This repository publishes durable package releases as Git tags. Install the
+tagged release directly from the canonical repository:
 
 ```bash
-npm install --save-exact @handrail/erp-financials@0.3.0
+npm install --save 'git+https://github.com/c0x65o/handrail-erp-financials.git#v0.3.1'
 npm ls @handrail/erp-financials
 npx tsc --noEmit
 ```
@@ -51,7 +52,7 @@ npm ls @handrail/erp-financials
 npx tsc --noEmit
 ```
 
-The `npm ls` result must resolve `@handrail/erp-financials@0.3.0`. Recheck the
+The `npm ls` result must resolve `@handrail/erp-financials@0.3.1`. Recheck the
 Bills register against `sdk.queries.listVendorBills(...)`, and Bill detail
 against `sdk.queries.getVendorBill(...)`; do not retain fallback queries over
 ERP Financials private tables.
