@@ -9,6 +9,7 @@ export type FinancialRuntimeHandlers = {
   readonly onInvoiceChanged?: (event: FinancialOutboxEvent) => Promise<void>;
   readonly onPaymentChanged?: (event: FinancialOutboxEvent) => Promise<void>;
   readonly onAdjustmentChanged?: (event: FinancialOutboxEvent) => Promise<void>;
+  readonly onVendorBillChanged?: (event: FinancialOutboxEvent) => Promise<void>;
   readonly onSubledgerDocumentChanged?: (event: FinancialOutboxEvent) => Promise<void>;
   readonly onBankReconciliationChanged?: (event: FinancialOutboxEvent) => Promise<void>;
   readonly onEvent?: (event: FinancialOutboxEvent) => Promise<void>;
@@ -92,6 +93,9 @@ function handlerFor(
   }
   if (event.eventType === "subledger_document.refund.posted") {
     return handlers.onAdjustmentChanged ?? handlers.onPaymentChanged ?? handlers.onSubledgerDocumentChanged ?? handlers.onEvent;
+  }
+  if (event.eventType.startsWith("vendor_bill.") || event.eventType === "subledger_document.vendor_bill.posted") {
+    return handlers.onVendorBillChanged ?? handlers.onSubledgerDocumentChanged ?? handlers.onEvent;
   }
   if (event.eventType.startsWith("payment_match.") || event.eventType.startsWith("subledger_application.") ||
     [

@@ -23,6 +23,7 @@ export const PACKAGE_BOUNDARY = {
     "invoice lifecycle, payment matching, and bank reconciliation workflows",
     "book-aware paginated financial read models",
     "canonical credit and refund register and detail models",
+    "vendor-bill register, detail, application, KPI, and posted correction lifecycle",
     "stable SDK errors and transactional financial outbox delivery",
     "schema and migration manifests",
     "deterministic fixture/reference report formulas",

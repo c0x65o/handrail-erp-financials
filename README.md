@@ -286,10 +286,12 @@ The supported adoption surfaces are:
 
 - Cohesive SDK: `createErpFinancialsSdk`, reporting books and their authoritative
   chart, invoice lifecycle, canonical credit/refund register and detail models,
-  issued-adjustment void/replacement, atomic match-and-apply, bank
+  vendor-bill register/detail/KPIs and posted void/replacement, issued-adjustment
+  void/replacement, atomic match-and-apply, bank
   reconciliation, book-aware query/read models, stable typed errors, outbox
   delivery, and `createRuntime`. See
-  [docs/sdk-v1-contract.md](docs/sdk-v1-contract.md).
+  [docs/sdk-v1-contract.md](docs/sdk-v1-contract.md) and
+  [docs/vendor-bill-contract.md](docs/vendor-bill-contract.md).
 - Canonical schema, migration, and health:
   `POSTGRES_MIGRATIONS`, `planPostgresMigrations`,
   `migratePostgresSchema`, `validatePostgresMigrationHistory`,

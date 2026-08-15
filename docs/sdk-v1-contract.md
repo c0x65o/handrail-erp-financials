@@ -87,8 +87,8 @@ cutover and two source charts mapped onto one book chart.
 `createErpFinancialsSdk(...)` returns:
 
 - `commands`: account, journal, fiscal-period, immutable correction, subledger,
-  payment, credit, refund, issued-adjustment void/replacement, deposit,
-  transfer, and write-off commands.
+  payment, credit, refund, issued-adjustment void/replacement, posted vendor-bill
+  void/replacement, deposit, transfer, and write-off commands.
 - `books`: book definition, effective source binding, book chart definition,
   source-account mapping, and scope resolution.
 - `invoices`: draft create/update/void, atomic issue, issued-invoice void through
@@ -97,10 +97,10 @@ cutover and two source charts mapped onto one book chart.
   accept-and-apply.
 - `bankReconciliation`: idempotent feed ingest, exact bank-posting match,
   approved unmatch, and ignore.
-- `queries`: cursor-paginated invoices, payments, credits/refunds, general
+- `queries`: cursor-paginated invoices, vendor bills, payments, credits/refunds, general
   ledger, chart of accounts, financial statements, dashboard, A/R and A/P
-  aging, bank review, exact adjustment detail, and exact
-  invoice/payment/ledger card summaries for host screens.
+  aging, bank review, exact bill/adjustment detail, and exact
+  invoice/vendor-bill/payment/ledger card summaries for host screens.
 - `outbox`: leased claim/publish/fail operations.
 - `createRuntime(...)`: bounded event delivery and retry routing for a cron,
   queue worker, or serverless timer.

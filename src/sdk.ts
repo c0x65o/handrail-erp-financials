@@ -161,19 +161,30 @@ export type {
   Page,
   PageRequest,
   PaymentListItem,
-  PaymentSummary
+  PaymentSummary,
+  VendorBillApplicationReadModel,
+  VendorBillDetail,
+  VendorBillLineReadModel,
+  VendorBillListItem,
+  VendorBillStatus,
+  VendorBillSummary
 } from "./sdk-read-models.js";
 export type {
   IssuedAdjustmentLifecycleResult,
   IssuedAdjustmentType,
   IssueCreditMemoInput,
   IssueRefundInput,
+  PostedVendorBillLifecycleResult,
+  ReplaceIssuedVendorBillInput,
   ReplaceIssuedAdjustmentInput,
   ReplaceIssuedCreditMemoInput,
   ReplaceIssuedRefundInput,
+  ReplacePostedVendorBillInput,
   VoidIssuedAdjustmentInput,
   VoidIssuedCreditMemoInput,
-  VoidIssuedRefundInput
+  VoidIssuedRefundInput,
+  VoidIssuedVendorBillInput,
+  VoidPostedVendorBillInput
 } from "./erp-financials-service.js";
 export type {
   InvoiceDraft,

@@ -293,6 +293,38 @@ export type CreateVendorBillInput = SubledgerDocumentInputCommon & {
   readonly expenseLines: readonly SubledgerAmountLine[];
 };
 
+export type VoidPostedVendorBillInput = {
+  readonly operation: FinancialOperationContext;
+  readonly vendorBillId: string;
+  readonly expectedVersion: number;
+  readonly idempotencyKey: string;
+  readonly date: IsoDate;
+  readonly memo?: string;
+};
+
+export type ReplacePostedVendorBillInput = VoidPostedVendorBillInput & {
+  readonly replacement: WithoutFinancialOperation<CreateVendorBillInput>;
+};
+
+/** Alias matching issued-document correction terminology used by host applications. */
+export type VoidIssuedVendorBillInput = VoidPostedVendorBillInput;
+
+/** Alias matching issued-document correction terminology used by host applications. */
+export type ReplaceIssuedVendorBillInput = ReplacePostedVendorBillInput;
+
+export type PostedVendorBillLifecycleResult = {
+  readonly status: "voided" | "already_voided" | "replaced" | "already_replaced";
+  readonly outcome: "voided" | "replaced";
+  readonly originalVendorBillId: string;
+  readonly originalTransactionId: string;
+  /** The original bill's version after the correction is applied. */
+  readonly originalVersion: number;
+  readonly reversal: PostJournalEntryResult;
+  readonly replacement?: SubledgerDocumentResult;
+  readonly journalEntryLinkIds: readonly string[];
+  readonly lifecycleEventIds: readonly string[];
+};
+
 export type RecordBillPaymentInput = SubledgerDocumentInputCommon & {
   readonly vendorId: string;
   readonly amount: DecimalString;
@@ -405,7 +437,13 @@ export type ErpFinancials = {
     voidIssued(input: VoidIssuedRefundInput): Promise<IssuedAdjustmentLifecycleResult>;
     replaceIssued(input: ReplaceIssuedRefundInput): Promise<IssuedAdjustmentLifecycleResult>;
   };
-  readonly vendorBills: { create(input: CreateVendorBillInput): Promise<SubledgerDocumentResult> };
+  readonly vendorBills: {
+    create(input: CreateVendorBillInput): Promise<SubledgerDocumentResult>;
+    voidIssued(input: VoidIssuedVendorBillInput): Promise<PostedVendorBillLifecycleResult>;
+    replaceIssued(input: ReplaceIssuedVendorBillInput): Promise<PostedVendorBillLifecycleResult>;
+    voidPosted(input: VoidPostedVendorBillInput): Promise<PostedVendorBillLifecycleResult>;
+    replacePosted(input: ReplacePostedVendorBillInput): Promise<PostedVendorBillLifecycleResult>;
+  };
   readonly billPayments: { record(input: RecordBillPaymentInput): Promise<SubledgerDocumentResult> };
   readonly writeOffs: { record(input: RecordWriteOffInput): Promise<SubledgerDocumentResult> };
   readonly deposits: { record(input: RecordDepositInput): Promise<SubledgerDocumentResult> };
@@ -564,7 +602,13 @@ export function createErpFinancials(input: CreateErpFinancialsInput): ErpFinanci
         { ...adjustmentInput, adjustmentType: "refund" }
       )
     },
-    vendorBills: { create: (documentInput) => createVendorBill(context, documentInput) },
+    vendorBills: {
+      create: (documentInput) => createVendorBill(context, documentInput),
+      voidIssued: (workflowInput) => runPostedVendorBillLifecycle(context, "voided", workflowInput),
+      replaceIssued: (workflowInput) => runPostedVendorBillLifecycle(context, "replaced", workflowInput),
+      voidPosted: (workflowInput) => runPostedVendorBillLifecycle(context, "voided", workflowInput),
+      replacePosted: (workflowInput) => runPostedVendorBillLifecycle(context, "replaced", workflowInput)
+    },
     billPayments: { record: (documentInput) => recordBillPayment(context, documentInput) },
     writeOffs: { record: (documentInput) => recordWriteOff(context, documentInput) },
     deposits: { record: (documentInput) => recordDeposit(context, documentInput) },
@@ -1729,6 +1773,292 @@ type LoadedPostedJournal = {
   readonly lines: readonly PostJournalEntryLineInput[];
   readonly postedLifecycleEventId?: string;
 };
+
+type LoadedPostedVendorBill = {
+  readonly documentId: string;
+  readonly transactionId: string;
+  readonly vendorId: string;
+  readonly currencyCode: IsoCurrencyCode;
+  readonly originalAmount: DecimalString;
+  readonly openAmount: DecimalString;
+  readonly status: SubledgerDocumentResult["documentStatus"];
+  readonly version: number;
+  readonly journal: LoadedPostedJournal;
+};
+
+async function runPostedVendorBillLifecycle(
+  context: ServiceContext,
+  outcome: "voided" | "replaced",
+  input: VoidPostedVendorBillInput | ReplacePostedVendorBillInput
+): Promise<PostedVendorBillLifecycleResult> {
+  assertIndependentApproval(input.operation);
+  assertNonEmpty(input.vendorBillId, "vendorBillId");
+  assertNonEmpty(input.idempotencyKey, "idempotencyKey");
+  assertExpectedSubledgerVersion(input.expectedVersion, "expectedVersion");
+  assertIsoDate(input.date, "date");
+  if (outcome === "replaced" && !("replacement" in input)) {
+    throw new ErpFinancialsValidationError("Replacing a posted vendor bill requires a replacement bill");
+  }
+
+  return context.database.transaction(async (client) => {
+    await acquireTransactionLock(
+      client,
+      `posted-vendor-bill:${context.tenantId}:${context.companyId}:${context.sourceId}:${input.vendorBillId}`
+    );
+    await assertCompanySourceScope(client, context);
+    const original = await loadPostedVendorBillForLifecycle(client, context, input.vendorBillId);
+    const reversalInput: PostJournalEntryInput = {
+      operation: input.operation,
+      idempotencyKey: `${input.idempotencyKey}:reversal`,
+      date: input.date,
+      memo: input.memo ?? `${outcome} vendor bill ${original.documentId}`,
+      currencyCode: original.currencyCode,
+      accountingBasis: original.journal.accountingBasis,
+      adjustment: true,
+      lines: original.journal.lines
+    };
+    const reversalJournal = normalizeJournalEntry(context, reversalInput);
+    const reversalIdentities = journalIdentities(context, reversalJournal);
+    const reversalLinkType = outcome === "voided" ? "void" : "reversal";
+    const replay = await assertJournalLifecycleSlotAvailable(client, context, {
+      originalTransactionId: original.transactionId,
+      expectedRelatedTransactionId: reversalIdentities.transactionId,
+      expectedLinkType: reversalLinkType,
+      competingLinkTypes: ["reversal", "void"]
+    });
+    assertPostedVendorBillLifecycleState(original, input.expectedVersion, replay);
+
+    await acquireTransactionLock(
+      client,
+      `journal-entry:${context.tenantId}:${context.sourceId}:${reversalJournal.idempotencyKey}`
+    );
+    const reversal = await executePostJournalEntryInTransaction(
+      client,
+      context,
+      reversalInput,
+      reversalJournal,
+      reversalIdentities
+    );
+    const reversalLink = await appendJournalEntryLink(client, context, {
+      originalTransactionId: original.transactionId,
+      relatedTransactionId: reversal.transactionId,
+      linkType: reversalLinkType,
+      eventType: outcome === "voided" ? "vendor_bill.voided" : "vendor_bill.reversed",
+      idempotencyKey: `${input.idempotencyKey}:${reversalLinkType}`,
+      operation: input.operation,
+      ...(original.journal.postedLifecycleEventId === undefined
+        ? {}
+        : { priorEventId: original.journal.postedLifecycleEventId })
+    });
+    const originalVersion = replay
+      ? original.version
+      : await markPostedVendorBillVoided(client, context, original, input.expectedVersion);
+
+    let replacement: SubledgerDocumentResult | undefined;
+    let replacementLink: { readonly linkId: string; readonly eventId: string } | undefined;
+    if (outcome === "replaced") {
+      const replacementInput = (input as ReplacePostedVendorBillInput).replacement;
+      assertReplacementVendorBill(original, replacementInput);
+      const nestedContext: ServiceContext = {
+        ...context,
+        database: { transaction: async <Result>(work: (nestedClient: PostgresQueryClient) => Promise<Result>) => work(client) }
+      };
+      replacement = await createVendorBill(nestedContext, {
+        ...replacementInput,
+        operation: input.operation
+      });
+      await assertJournalLifecycleSlotAvailable(client, context, {
+        originalTransactionId: original.transactionId,
+        expectedRelatedTransactionId: replacement.journal.transactionId,
+        expectedLinkType: "replacement",
+        competingLinkTypes: ["correction", "replacement"]
+      });
+      replacementLink = await appendJournalEntryLink(client, context, {
+        originalTransactionId: original.transactionId,
+        relatedTransactionId: replacement.journal.transactionId,
+        linkType: "replacement",
+        eventType: "vendor_bill.replaced",
+        idempotencyKey: `${input.idempotencyKey}:replacement`,
+        operation: input.operation,
+        priorEventId: reversalLink.eventId
+      });
+    }
+
+    const lifecycle = await appendFinancialLifecycleEvent(client, {
+      tenantId: context.tenantId,
+      companyId: context.companyId,
+      sourceId: context.sourceId,
+      aggregateType: "vendor_bill",
+      aggregateId: original.documentId,
+      eventType: `vendor_bill.${outcome}`,
+      idempotencyKey: `vendor-bill:${input.idempotencyKey}:${outcome}`,
+      operation: input.operation,
+      recordedAt: context.now(),
+      priorEventId: replacementLink?.eventId ?? reversalLink.eventId,
+      payload: {
+        originalVendorBillId: original.documentId,
+        originalTransactionId: original.transactionId,
+        replacementVendorBillId: replacement?.documentId ?? null,
+        reversalTransactionId: reversal.transactionId
+      }
+    });
+    await appendServiceOutboxEvent(client, context, {
+      eventType: `vendor_bill.${outcome}`,
+      aggregateType: "vendor_bill",
+      aggregateId: original.documentId,
+      idempotencyKey: `vendor-bill:${input.idempotencyKey}:outbox:${outcome}`,
+      payload: {
+        originalVendorBillId: original.documentId,
+        replacementVendorBillId: replacement?.documentId ?? null,
+        reversalTransactionId: reversal.transactionId
+      }
+    });
+
+    return {
+      status: replay
+        ? outcome === "voided" ? "already_voided" : "already_replaced"
+        : outcome,
+      outcome,
+      originalVendorBillId: original.documentId,
+      originalTransactionId: original.transactionId,
+      originalVersion,
+      reversal,
+      ...(replacement === undefined ? {} : { replacement }),
+      journalEntryLinkIds: [reversalLink.linkId, ...(replacementLink === undefined ? [] : [replacementLink.linkId])],
+      lifecycleEventIds: [
+        reversal.lifecycleEventId,
+        reversalLink.eventId,
+        ...(replacement === undefined ? [] : [replacement.journal.lifecycleEventId]),
+        ...(replacementLink === undefined ? [] : [replacementLink.eventId]),
+        lifecycle.eventId
+      ]
+    };
+  });
+}
+
+async function loadPostedVendorBillForLifecycle(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  documentId: string
+): Promise<LoadedPostedVendorBill> {
+  const result = await client.query(
+    `select * from "erp_financials"."subledger_documents"
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3 and "subledger_document_id" = $4
+for update`,
+    [context.tenantId, context.companyId, context.sourceId, documentId]
+  );
+  const row = result.rows[0];
+  if (row === undefined || row.document_type !== "vendor_bill") {
+    throw new ErpFinancialsError(
+      "missing_document",
+      `Posted vendor bill ${documentId} does not exist in the write source`,
+      { details: { vendorBillId: documentId } }
+    );
+  }
+  const transactionId = storedString(row.transaction_id, "transaction_id");
+  const status = storedString(row.status, "status");
+  if (!["open", "partially_applied", "settled", "voided"].includes(status)) {
+    throw new Error(`Posted vendor bill ${documentId} has invalid status ${status}`);
+  }
+  return {
+    documentId,
+    transactionId,
+    vendorId: storedString(row.party_id, "party_id"),
+    currencyCode: storedString(row.currency_code, "currency_code"),
+    originalAmount: storedMoney(row.original_amount, "original_amount"),
+    openAmount: storedMoney(row.open_amount, "open_amount"),
+    status: status as LoadedPostedVendorBill["status"],
+    version: storedInteger(row.version, "version"),
+    journal: await loadPostedJournalForLifecycle(
+      client,
+      context,
+      transactionId,
+      [subledgerTransactionType("vendor_bill")]
+    )
+  };
+}
+
+function assertPostedVendorBillLifecycleState(
+  bill: LoadedPostedVendorBill,
+  expectedVersion: number,
+  replay: boolean
+): void {
+  if (replay) {
+    if (bill.status !== "voided") {
+      throw new ErpFinancialsError(
+        "terminal_state_conflict",
+        `Vendor bill ${bill.documentId} has lifecycle links but is not voided`
+      );
+    }
+    return;
+  }
+  if (bill.version !== expectedVersion) {
+    throw new ErpFinancialsError(
+      "optimistic_concurrency_conflict",
+      `Vendor bill expected version ${String(expectedVersion)}, found ${String(bill.version)}`,
+      { retryable: true, details: { actualVersion: bill.version, expectedVersion, vendorBillId: bill.documentId } }
+    );
+  }
+  if (bill.status !== "open" || bill.openAmount !== bill.originalAmount) {
+    throw new ErpFinancialsError(
+      "terminal_state_conflict",
+      "An applied or partially applied vendor bill cannot be voided or replaced; unapply it first",
+      { details: { status: bill.status, vendorBillId: bill.documentId } }
+    );
+  }
+}
+
+function assertReplacementVendorBill(
+  bill: LoadedPostedVendorBill,
+  replacement: ReplacePostedVendorBillInput["replacement"]
+): void {
+  if (replacement.vendorId !== bill.vendorId) {
+    throw new ErpFinancialsError(
+      "scope_mismatch",
+      "A replacement vendor bill must keep the original vendor",
+      { details: { actualVendorId: replacement.vendorId, expectedVendorId: bill.vendorId } }
+    );
+  }
+  const currencyCode = replacement.currencyCode ?? bill.currencyCode;
+  if (currencyCode !== bill.currencyCode) {
+    throw new ErpFinancialsError(
+      "currency_not_supported",
+      "A replacement vendor bill must keep the original currency",
+      { details: { actualCurrencyCode: currencyCode, expectedCurrencyCode: bill.currencyCode } }
+    );
+  }
+}
+
+async function markPostedVendorBillVoided(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  bill: LoadedPostedVendorBill,
+  expectedVersion: number
+): Promise<number> {
+  await client.query("select set_config('erp_financials.application_balance_update', 'on', true)");
+  try {
+    const result = await client.query(
+      `update "erp_financials"."subledger_documents"
+set "open_amount" = 0, "status" = 'voided', "version" = "version" + 1, "updated_at" = $5
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
+  and "subledger_document_id" = $4 and "version" = $6 and "document_type" = 'vendor_bill'
+  and "status" = 'open' and "open_amount" = "original_amount"
+returning "version"`,
+      [context.tenantId, context.companyId, context.sourceId, bill.documentId, context.now(), expectedVersion]
+    );
+    const row = result.rows[0];
+    if (row === undefined) {
+      throw new ErpFinancialsError(
+        "optimistic_concurrency_conflict",
+        `Vendor bill ${bill.documentId} changed concurrently`,
+        { retryable: true, details: { expectedVersion, vendorBillId: bill.documentId } }
+      );
+    }
+    return storedInteger(row.version, "version");
+  } finally {
+    await client.query("select set_config('erp_financials.application_balance_update', 'off', true)");
+  }
+}
 
 type LoadedIssuedAdjustment = {
   readonly documentId: string;

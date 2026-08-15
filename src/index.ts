@@ -299,7 +299,13 @@ export type {
   Page,
   PageRequest,
   PaymentListItem,
-  PaymentSummary
+  PaymentSummary,
+  VendorBillApplicationReadModel,
+  VendorBillDetail,
+  VendorBillLineReadModel,
+  VendorBillListItem,
+  VendorBillStatus,
+  VendorBillSummary
 } from "./sdk-read-models.js";
 export type {
   InvoiceDraft,
@@ -567,10 +573,13 @@ export type {
   PostJournalEntryInput,
   PostJournalEntryLineInput,
   PostJournalEntryResult,
+  PostedVendorBillLifecycleResult,
+  ReplaceIssuedVendorBillInput,
   ReplaceJournalEntryInput,
   ReplaceIssuedAdjustmentInput,
   ReplaceIssuedCreditMemoInput,
   ReplaceIssuedRefundInput,
+  ReplacePostedVendorBillInput,
   RecordBillPaymentInput,
   RecordCustomerPaymentInput,
   RecordDepositInput,
@@ -586,7 +595,9 @@ export type {
   UpsertAccountTreeResult,
   VoidIssuedAdjustmentInput,
   VoidIssuedCreditMemoInput,
-  VoidIssuedRefundInput
+  VoidIssuedRefundInput,
+  VoidIssuedVendorBillInput,
+  VoidPostedVendorBillInput
 } from "./erp-financials-service.js";
 export type {
   BuildCoreErpPersistenceEvidenceInput,

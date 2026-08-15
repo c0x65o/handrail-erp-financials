@@ -27,7 +27,17 @@ import type {
   QuickBooksFullSyncRunResult,
   QuickBooksFullSyncWorker,
   QuickBooksIncrementalSyncRunResult,
-  QuickBooksIncrementalSyncWorker
+  QuickBooksIncrementalSyncWorker,
+  PostedVendorBillLifecycleResult,
+  ReplaceIssuedVendorBillInput,
+  ReplacePostedVendorBillInput,
+  VendorBillApplicationReadModel,
+  VendorBillDetail,
+  VendorBillLineReadModel,
+  VendorBillListItem,
+  VendorBillSummary,
+  VoidIssuedVendorBillInput,
+  VoidPostedVendorBillInput
 } from "@handrail/erp-financials";
 
 export const coreErpPersistenceEvidenceImports = {
@@ -68,4 +78,14 @@ export type CoreErpPersistenceEvidenceImports = {
   readonly drilldownSurface: CoreErpReportDrilldownSurface;
   readonly drilldownEntry: CoreErpReportDrilldownSurfaceEntry;
   readonly reconciliationDrilldownSurface: CoreErpReportReconciliationDrilldownSurface;
+  readonly vendorBill: VendorBillListItem;
+  readonly vendorBillDetail: VendorBillDetail;
+  readonly vendorBillLine: VendorBillLineReadModel;
+  readonly vendorBillApplication: VendorBillApplicationReadModel;
+  readonly vendorBillSummary: VendorBillSummary;
+  readonly voidPostedVendorBillInput: VoidPostedVendorBillInput;
+  readonly voidIssuedVendorBillInput: VoidIssuedVendorBillInput;
+  readonly replacePostedVendorBillInput: ReplacePostedVendorBillInput;
+  readonly replaceIssuedVendorBillInput: ReplaceIssuedVendorBillInput;
+  readonly postedVendorBillLifecycleResult: PostedVendorBillLifecycleResult;
 };

@@ -760,6 +760,92 @@ describe("reusable ERP Financials service", () => {
     expect(database.transactionCalls).toBe(7);
   });
 
+  it("enforces versions and voids an unapplied posted vendor bill with a compensating journal", async () => {
+    const database = subledgerDatabase();
+    const financials = service(database);
+    const bill = await financials.vendorBills.create({
+      operation: operation("request-bill-to-void"),
+      idempotencyKey: "bill-to-void",
+      date: "2026-08-04",
+      dueDate: "2026-09-03",
+      vendorId: "vendor_northwind",
+      payableAccount: { accountId: "acct_payable" },
+      expenseLines: [{ accountId: "acct_expense", amount: "25.00" }]
+    });
+    const command = {
+      operation: approvedOperation("request-void-bill"),
+      vendorBillId: bill.documentId,
+      expectedVersion: 1,
+      idempotencyKey: "void-bill",
+      date: "2026-08-14",
+      memo: "Void duplicate vendor bill"
+    } as const;
+
+    await expect(financials.vendorBills.voidPosted({ ...command, expectedVersion: 2 })).rejects.toMatchObject({
+      code: "optimistic_concurrency_conflict",
+      details: { actualVersion: 1, expectedVersion: 2, vendorBillId: bill.documentId }
+    });
+
+    await expect(financials.vendorBills.voidIssued(command)).resolves.toMatchObject({
+      status: "voided",
+      outcome: "voided",
+      originalVendorBillId: bill.documentId,
+      originalVersion: 2
+    });
+    expect(subledgerRow(database, bill.documentId)).toMatchObject({
+      status: "voided",
+      open_amount: "0.00",
+      version: 2
+    });
+    await expect(financials.vendorBills.voidPosted(command)).resolves.toMatchObject({
+      status: "already_voided",
+      reversal: { status: "already_posted" }
+    });
+  });
+
+  it("replaces an unapplied posted vendor bill and preserves vendor scope", async () => {
+    const database = subledgerDatabase();
+    const financials = service(database);
+    const bill = await financials.vendorBills.create({
+      operation: operation("request-bill-to-replace"),
+      idempotencyKey: "bill-to-replace",
+      date: "2026-08-04",
+      dueDate: "2026-09-03",
+      vendorId: "vendor_northwind",
+      payableAccount: { accountId: "acct_payable" },
+      expenseLines: [{ accountId: "acct_expense", amount: "25.00" }]
+    });
+    const command = {
+      operation: approvedOperation("request-replace-bill"),
+      vendorBillId: bill.documentId,
+      expectedVersion: 1,
+      idempotencyKey: "replace-bill",
+      date: "2026-08-14",
+      replacement: {
+        idempotencyKey: "replacement-bill",
+        date: "2026-08-14" as const,
+        dueDate: "2026-09-14" as const,
+        documentNumber: "BILL-100-CORRECTED",
+        vendorId: "vendor_northwind",
+        payableAccount: { accountId: "acct_payable" },
+        expenseLines: [{ accountId: "acct_expense", amount: "30.00" }]
+      }
+    } as const;
+
+    await expect(financials.vendorBills.replaceIssued(command)).resolves.toMatchObject({
+      status: "replaced",
+      outcome: "replaced",
+      originalVendorBillId: bill.documentId,
+      originalVersion: 2,
+      replacement: {
+        documentType: "vendor_bill",
+        originalAmount: "30.00",
+        version: 1
+      }
+    });
+    expect(database.client.journalLinks.map((link) => link.link_type)).toEqual(["reversal", "replacement"]);
+  });
+
   it("voids an unapplied issued credit through one compensating canonical lifecycle", async () => {
     const database = subledgerDatabase();
     const financials = service(database);

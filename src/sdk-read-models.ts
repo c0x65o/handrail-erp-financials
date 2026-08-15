@@ -61,6 +61,81 @@ export type InvoiceDetail = InvoiceListItem & {
   readonly lines: readonly CommercialDocumentLineReadModel[];
 };
 
+export type VendorBillStatus = "open" | "overdue" | "partial" | "paid" | "voided" | "replaced";
+
+const VENDOR_BILL_STATUSES: ReadonlySet<VendorBillStatus> = new Set([
+  "open",
+  "overdue",
+  "partial",
+  "paid",
+  "voided",
+  "replaced"
+]);
+
+export type VendorBillListItem = {
+  /** Canonical ERP Financials bill identifier. */
+  readonly billId: string;
+  readonly sourceId: string;
+  readonly sourceProvenance: "posted";
+  readonly transactionId: string;
+  readonly vendorId: string;
+  readonly vendorName?: string;
+  readonly documentNumber?: string;
+  readonly documentDate: IsoDate;
+  readonly dueDate: IsoDate;
+  readonly currencyCode: IsoCurrencyCode;
+  readonly originalAmount: DecimalString;
+  readonly openAmount: DecimalString;
+  readonly status: VendorBillStatus;
+  readonly version: number;
+};
+
+export type VendorBillLineReadModel = CommercialDocumentLineReadModel & {
+  /** Stable account key from the source system; falls back to sourceId:accountId for legacy facts. */
+  readonly sourceAccountKey: string;
+  readonly bookAccountKey?: string;
+  readonly accountMappingProvenance: "reporting_book_mapping" | "source_account";
+  readonly accountMappingId?: string;
+  readonly sourceItemId?: string;
+  readonly itemName?: string;
+  readonly itemCategoryAccountId?: string;
+  readonly categoryMappingProvenance: "item_expense_account" | "line_account_override" | "uncategorized";
+};
+
+export type VendorBillApplicationReadModel = {
+  readonly applicationId: string;
+  readonly sourcePaymentId: string;
+  readonly applicationDate: IsoDate;
+  readonly amount: DecimalString;
+  readonly status: "applied" | "unapplied" | "voided";
+  readonly version: number;
+};
+
+export type VendorBillDetail = VendorBillListItem & {
+  readonly memo?: string;
+  readonly lines: readonly VendorBillLineReadModel[];
+  readonly applications: readonly VendorBillApplicationReadModel[];
+};
+
+export type VendorBillSummary = {
+  readonly asOfDate: IsoDate;
+  readonly periodStart: IsoDate;
+  readonly periodEnd: IsoDate;
+  readonly currencyCode: IsoCurrencyCode;
+  readonly outstandingAmount: DecimalString;
+  readonly outstandingVendorBillCount: number;
+  readonly overdueAmount: DecimalString;
+  readonly overdueVendorBillCount: number;
+  /** Cumulative amount applied to non-voided bills as of asOfDate. */
+  readonly paidAmount: DecimalString;
+  /** Amount applied during periodStart..periodEnd that remains applied as of asOfDate. */
+  readonly paidInPeriodAmount: DecimalString;
+  readonly paidInPeriodVendorBillCount: number;
+  readonly settledVendorBillCount: number;
+  readonly voidedVendorBillCount: number;
+  readonly replacedVendorBillCount: number;
+};
+
 export type PaymentListItem = {
   readonly paymentId: string;
   readonly sourceId: string;
@@ -295,6 +370,14 @@ export type FinancialReadModels = {
   listInvoices(input?: PageRequest & { readonly status?: InvoiceListStatus; readonly asOfDate?: IsoDate }): Promise<Page<InvoiceListItem>>;
   getInvoice(invoiceId: string, asOfDate?: IsoDate): Promise<InvoiceDetail>;
   getInvoiceSummary(input?: { readonly asOfDate?: IsoDate }): Promise<InvoiceSummary>;
+  listVendorBills(input?: PageRequest & { readonly status?: VendorBillStatus; readonly asOfDate?: IsoDate; readonly vendorId?: string }): Promise<Page<VendorBillListItem>>;
+  getVendorBill(billId: string, asOfDate?: IsoDate): Promise<VendorBillDetail>;
+  getVendorBillSummary(input?: {
+    readonly asOfDate?: IsoDate;
+    readonly periodStart?: IsoDate;
+    readonly periodEnd?: IsoDate;
+    readonly vendorId?: string;
+  }): Promise<VendorBillSummary>;
   listPayments(input?: PageRequest & { readonly paymentType?: PaymentListItem["paymentType"] }): Promise<Page<PaymentListItem>>;
   getPaymentSummary(input: { readonly periodStart: IsoDate; readonly periodEnd: IsoDate }): Promise<PaymentSummary>;
   listAdjustments(input?: PageRequest & { readonly adjustmentType?: AdjustmentType; readonly status?: AdjustmentStatus }): Promise<Page<AdjustmentListItem>>;
@@ -329,6 +412,9 @@ export function createFinancialReadModels(input: Scope): FinancialReadModels {
     listInvoices: (request = {}) => listInvoices(input, request),
     getInvoice: (invoiceId, asOfDate) => getInvoice(input, invoiceId, asOfDate),
     getInvoiceSummary: (request = {}) => getInvoiceSummary(input, request),
+    listVendorBills: (request = {}) => listVendorBills(input, request),
+    getVendorBill: (billId, asOfDate) => getVendorBill(input, billId, asOfDate),
+    getVendorBillSummary: (request = {}) => getVendorBillSummary(input, request),
     listPayments: (request = {}) => listPayments(input, request),
     getPaymentSummary: (request) => getPaymentSummary(input, request),
     listAdjustments: (request = {}) => listAdjustments(input, request),
@@ -529,6 +615,329 @@ from posted`,
       unsentDraftCount: integer(row.draft_count, "draft_count"),
       collectedAmount: money(row.collected_amount, "collected_amount"),
       settledInvoiceCount: integer(row.settled_count, "settled_count")
+    };
+  });
+}
+
+async function listVendorBills(
+  scope: Scope,
+  input: PageRequest & {
+    readonly status?: VendorBillStatus;
+    readonly asOfDate?: IsoDate;
+    readonly vendorId?: string;
+    readonly billId?: string;
+  }
+): Promise<Page<VendorBillListItem>> {
+  const page = pageInput(input, "vendor-bills", scope.bookId);
+  const asOfDate = input.asOfDate ?? today();
+  assertDate(asOfDate, "asOfDate");
+  if (input.vendorId !== undefined) assertNonEmpty(input.vendorId, "vendorId");
+  if (input.status !== undefined && !VENDOR_BILL_STATUSES.has(input.status)) {
+    throw new ErpFinancialsError("invalid_input", `Unsupported vendor bill status ${input.status}`);
+  }
+  return scope.database.transaction(async (client) => {
+    const book = await resolveBook(client, scope);
+    const result = await client.query(
+      `with bill_balances as (
+  select document."subledger_document_id" as "bill_id", document."source_id", document."transaction_id",
+    document."party_id", party."display_name" as "party_name", document."document_number",
+    document."document_date", document."due_date", document."currency_code", document."original_amount",
+    greatest(document."original_amount" - coalesce(applied."amount", 0), 0)::numeric as "calculated_open_amount",
+    document."version",
+    coalesce(terminal."correction_date", case
+      when document."status" = 'voided' and document."updated_at" < ($4::date + interval '1 day')
+        then document."updated_at"::date
+      else null
+    end) as "correction_date",
+    replacement."has_replacement"
+  from "erp_financials"."subledger_documents" document
+  join "erp_financials"."reporting_book_sources" source
+    on source."tenant_id" = document."tenant_id" and source."company_id" = document."company_id"
+   and source."book_id" = $3 and source."source_id" = document."source_id"
+   and (source."effective_from" is null or source."effective_from" <= document."document_date")
+   and (source."effective_through" is null or source."effective_through" >= document."document_date")
+  left join "erp_financials"."parties" party
+    on party."tenant_id" = document."tenant_id" and party."source_id" = document."source_id"
+   and party."party_id" = document."party_id" and party."party_type" = 'vendor'
+  left join lateral (
+    select sum(application."applied_amount") as "amount"
+    from "erp_financials"."subledger_applications" application
+    join "erp_financials"."financial_lifecycle_events" applied_event
+      on applied_event."tenant_id" = application."tenant_id" and applied_event."company_id" = application."company_id"
+     and applied_event."source_id" = application."source_id" and applied_event."event_id" = application."applied_event_id"
+    left join "erp_financials"."financial_lifecycle_events" ended_event
+      on ended_event."tenant_id" = application."tenant_id" and ended_event."company_id" = application."company_id"
+     and ended_event."source_id" = application."source_id" and ended_event."event_id" = application."ended_event_id"
+    where application."tenant_id" = document."tenant_id" and application."company_id" = document."company_id"
+      and application."source_id" = document."source_id" and application."target_document_id" = document."subledger_document_id"
+      and application."application_type" = 'bill_payment_to_bill' and application."application_date" <= $4::date
+      and applied_event."occurred_at" < ($4::date + interval '1 day')
+      and (ended_event."event_id" is null or ended_event."occurred_at" >= ($4::date + interval '1 day'))
+  ) applied on true
+  left join lateral (
+    select related."transaction_date" as "correction_date"
+    from "erp_financials"."journal_entry_links" link
+    join "erp_financials"."transactions" related
+      on related."tenant_id" = link."tenant_id" and related."source_id" = link."source_id"
+     and related."transaction_id" = link."related_transaction_id"
+    where link."tenant_id" = document."tenant_id" and link."company_id" = document."company_id"
+      and link."source_id" = document."source_id" and link."original_transaction_id" = document."transaction_id"
+      and link."link_type" in ('reversal', 'void')
+    order by related."transaction_date", link."created_at" limit 1
+  ) terminal on true
+  left join lateral (
+    select true as "has_replacement" from "erp_financials"."journal_entry_links" link
+    where link."tenant_id" = document."tenant_id" and link."company_id" = document."company_id"
+      and link."source_id" = document."source_id" and link."original_transaction_id" = document."transaction_id"
+      and link."link_type" = 'replacement' limit 1
+  ) replacement on true
+  where document."tenant_id" = $1 and document."company_id" = $2 and document."document_type" = 'vendor_bill'
+    and document."currency_code" = $5 and document."document_date" <= $4::date
+    and ($6::text is null or document."party_id" = $6)
+    and ($10::text is null or document."subledger_document_id" = $10)
+), bill_rows as (
+  select *,
+    case when "correction_date" <= $4::date then 0 else "calculated_open_amount" end as "open_amount",
+    case
+      when "correction_date" <= $4::date and "has_replacement" then 'replaced'
+      when "correction_date" <= $4::date then 'voided'
+      when "calculated_open_amount" = 0 then 'paid'
+      when "due_date" < $4::date then 'overdue'
+      when "calculated_open_amount" < "original_amount" then 'partial'
+      else 'open'
+    end as "status"
+  from bill_balances
+)
+select * from bill_rows
+where ($7::text is null or "status" = $7)
+  and ($8::date is null or ("document_date", "bill_id") < ($8::date, $9::text))
+order by "document_date" desc, "bill_id" desc
+limit $11`,
+      [
+        scope.tenantId,
+        scope.companyId,
+        scope.bookId,
+        asOfDate,
+        book.currencyCode,
+        input.vendorId,
+        input.status,
+        page.date,
+        page.id,
+        input.billId,
+        page.limit + 1
+      ]
+    );
+    return toPage(result.rows.map(vendorBillFromRow), page.limit, "vendor-bills", scope.bookId, (item) => ({
+      date: item.documentDate,
+      id: item.billId
+    }));
+  });
+}
+
+async function getVendorBill(
+  scope: Scope,
+  billId: string,
+  asOfDate = today()
+): Promise<VendorBillDetail> {
+  assertNonEmpty(billId, "billId");
+  assertDate(asOfDate, "asOfDate");
+  const page = await listVendorBills(scope, { billId, limit: 1, asOfDate });
+  const bill = page.items[0];
+  if (bill === undefined) {
+    throw new ErpFinancialsError(
+      "missing_document",
+      `Vendor bill ${billId} does not exist in reporting book ${scope.bookId} as of ${asOfDate}`,
+      { details: { asOfDate, billId, bookId: scope.bookId } }
+    );
+  }
+  return scope.database.transaction(async (client) => {
+    const header = await client.query(
+      `select transaction."memo"
+from "erp_financials"."subledger_documents" document
+join "erp_financials"."transactions" transaction
+  on transaction."tenant_id" = document."tenant_id" and transaction."source_id" = document."source_id"
+ and transaction."transaction_id" = document."transaction_id"
+where document."tenant_id" = $1 and document."company_id" = $2 and document."source_id" = $3
+  and document."subledger_document_id" = $4 and document."document_type" = 'vendor_bill'`,
+      [scope.tenantId, scope.companyId, bill.sourceId, bill.billId]
+    );
+    const lines = await client.query(
+      `select line."subledger_document_line_id" as "line_id", line.*,
+  account."source_account_id", mapping."book_account_mapping_id", mapping."book_account_key",
+  item."source_item_id", item."name" as "item_name", item."expense_account_id" as "item_expense_account_id"
+from "erp_financials"."subledger_document_lines" line
+join "erp_financials"."accounts" account
+  on account."tenant_id" = line."tenant_id" and account."source_id" = line."source_id"
+ and account."account_id" = line."account_id"
+left join "erp_financials"."reporting_book_account_mappings" mapping
+  on mapping."tenant_id" = line."tenant_id" and mapping."company_id" = line."company_id"
+ and mapping."book_id" = $3 and mapping."source_id" = line."source_id" and mapping."account_id" = line."account_id"
+left join "erp_financials"."items" item
+  on item."tenant_id" = line."tenant_id" and item."source_id" = line."source_id" and item."item_id" = line."item_id"
+where line."tenant_id" = $1 and line."company_id" = $2 and line."source_id" = $4
+  and line."subledger_document_id" = $5
+order by line."line_number"`,
+      [scope.tenantId, scope.companyId, scope.bookId, bill.sourceId, bill.billId]
+    );
+    const applications = await client.query(
+      `select application."subledger_application_id" as "application_id",
+  application."source_document_id" as "source_payment_id", application."application_date",
+  application."applied_amount", application."version",
+  case when ended_event."occurred_at" < ($5::date + interval '1 day') then application."status" else 'applied' end as "status"
+from "erp_financials"."subledger_applications" application
+join "erp_financials"."financial_lifecycle_events" applied_event
+  on applied_event."tenant_id" = application."tenant_id" and applied_event."company_id" = application."company_id"
+ and applied_event."source_id" = application."source_id" and applied_event."event_id" = application."applied_event_id"
+left join "erp_financials"."financial_lifecycle_events" ended_event
+  on ended_event."tenant_id" = application."tenant_id" and ended_event."company_id" = application."company_id"
+ and ended_event."source_id" = application."source_id" and ended_event."event_id" = application."ended_event_id"
+where application."tenant_id" = $1 and application."company_id" = $2 and application."source_id" = $3
+  and application."target_document_id" = $4 and application."application_type" = 'bill_payment_to_bill'
+  and application."application_date" <= $5::date and applied_event."occurred_at" < ($5::date + interval '1 day')
+order by application."application_date", application."subledger_application_id"`,
+      [scope.tenantId, scope.companyId, bill.sourceId, bill.billId, asOfDate]
+    );
+    const memo = optionalString(header.rows[0]?.memo);
+    return {
+      ...bill,
+      ...(memo === undefined ? {} : { memo }),
+      lines: lines.rows.map(vendorBillLineFromRow),
+      applications: applications.rows.map(vendorBillApplicationFromRow)
+    };
+  });
+}
+
+async function getVendorBillSummary(
+  scope: Scope,
+  input: {
+    readonly asOfDate?: IsoDate;
+    readonly periodStart?: IsoDate;
+    readonly periodEnd?: IsoDate;
+    readonly vendorId?: string;
+  }
+): Promise<VendorBillSummary> {
+  const asOfDate = input.asOfDate ?? today();
+  assertDate(asOfDate, "asOfDate");
+  const periodEnd = input.periodEnd ?? asOfDate;
+  const periodStart = input.periodStart ?? `${periodEnd.slice(0, 7)}-01`;
+  assertWindow(periodStart, periodEnd);
+  if (periodEnd > asOfDate) {
+    throw new ErpFinancialsError("invalid_input", "periodEnd must be on or before asOfDate");
+  }
+  if (input.vendorId !== undefined) assertNonEmpty(input.vendorId, "vendorId");
+  return scope.database.transaction(async (client) => {
+    const book = await resolveBook(client, scope);
+    const result = await client.query(
+      `with bills as (
+  select document."original_amount", document."due_date",
+    greatest(document."original_amount" - coalesce(applied."amount", 0), 0)::numeric as "open_amount",
+    coalesce(period_applied."amount", 0)::numeric as "paid_in_period_amount",
+    coalesce(terminal."correction_date", case
+      when document."status" = 'voided' and document."updated_at" < ($4::date + interval '1 day')
+        then document."updated_at"::date
+      else null
+    end) as "correction_date",
+    replacement."has_replacement"
+  from "erp_financials"."subledger_documents" document
+  join "erp_financials"."reporting_book_sources" source
+    on source."tenant_id" = document."tenant_id" and source."company_id" = document."company_id"
+   and source."book_id" = $3 and source."source_id" = document."source_id"
+   and (source."effective_from" is null or source."effective_from" <= document."document_date")
+   and (source."effective_through" is null or source."effective_through" >= document."document_date")
+  left join lateral (
+    select sum(application."applied_amount") as "amount"
+    from "erp_financials"."subledger_applications" application
+    join "erp_financials"."financial_lifecycle_events" applied_event
+      on applied_event."tenant_id" = application."tenant_id" and applied_event."company_id" = application."company_id"
+     and applied_event."source_id" = application."source_id" and applied_event."event_id" = application."applied_event_id"
+    left join "erp_financials"."financial_lifecycle_events" ended_event
+      on ended_event."tenant_id" = application."tenant_id" and ended_event."company_id" = application."company_id"
+     and ended_event."source_id" = application."source_id" and ended_event."event_id" = application."ended_event_id"
+    where application."tenant_id" = document."tenant_id" and application."company_id" = document."company_id"
+      and application."source_id" = document."source_id" and application."target_document_id" = document."subledger_document_id"
+      and application."application_type" = 'bill_payment_to_bill' and application."application_date" <= $4::date
+      and applied_event."occurred_at" < ($4::date + interval '1 day')
+      and (ended_event."event_id" is null or ended_event."occurred_at" >= ($4::date + interval '1 day'))
+  ) applied on true
+  left join lateral (
+    select sum(application."applied_amount") as "amount"
+    from "erp_financials"."subledger_applications" application
+    join "erp_financials"."financial_lifecycle_events" applied_event
+      on applied_event."tenant_id" = application."tenant_id" and applied_event."company_id" = application."company_id"
+     and applied_event."source_id" = application."source_id" and applied_event."event_id" = application."applied_event_id"
+    left join "erp_financials"."financial_lifecycle_events" ended_event
+      on ended_event."tenant_id" = application."tenant_id" and ended_event."company_id" = application."company_id"
+     and ended_event."source_id" = application."source_id" and ended_event."event_id" = application."ended_event_id"
+    where application."tenant_id" = document."tenant_id" and application."company_id" = document."company_id"
+      and application."source_id" = document."source_id" and application."target_document_id" = document."subledger_document_id"
+      and application."application_type" = 'bill_payment_to_bill'
+      and application."application_date" between $7::date and $8::date
+      and applied_event."occurred_at" < ($4::date + interval '1 day')
+      and (ended_event."event_id" is null or ended_event."occurred_at" >= ($4::date + interval '1 day'))
+  ) period_applied on true
+  left join lateral (
+    select related."transaction_date" as "correction_date"
+    from "erp_financials"."journal_entry_links" link
+    join "erp_financials"."transactions" related
+      on related."tenant_id" = link."tenant_id" and related."source_id" = link."source_id"
+     and related."transaction_id" = link."related_transaction_id"
+    where link."tenant_id" = document."tenant_id" and link."company_id" = document."company_id"
+      and link."source_id" = document."source_id" and link."original_transaction_id" = document."transaction_id"
+      and link."link_type" in ('reversal', 'void')
+    order by related."transaction_date", link."created_at" limit 1
+  ) terminal on true
+  left join lateral (
+    select true as "has_replacement" from "erp_financials"."journal_entry_links" link
+    where link."tenant_id" = document."tenant_id" and link."company_id" = document."company_id"
+      and link."source_id" = document."source_id" and link."original_transaction_id" = document."transaction_id"
+      and link."link_type" = 'replacement' limit 1
+  ) replacement on true
+  where document."tenant_id" = $1 and document."company_id" = $2 and document."document_type" = 'vendor_bill'
+    and document."currency_code" = $5 and document."document_date" <= $4::date
+    and ($6::text is null or document."party_id" = $6)
+)
+select
+  coalesce(sum("open_amount") filter (where "correction_date" is null or "correction_date" > $4::date), 0) as "outstanding_amount",
+  count(*) filter (where "open_amount" > 0 and ("correction_date" is null or "correction_date" > $4::date))::integer as "outstanding_count",
+  coalesce(sum("open_amount") filter (where "open_amount" > 0 and "due_date" < $4::date
+    and ("correction_date" is null or "correction_date" > $4::date)), 0) as "overdue_amount",
+  count(*) filter (where "open_amount" > 0 and "due_date" < $4::date
+    and ("correction_date" is null or "correction_date" > $4::date))::integer as "overdue_count",
+  coalesce(sum("original_amount" - "open_amount") filter (where "correction_date" is null or "correction_date" > $4::date), 0) as "paid_amount",
+  coalesce(sum("paid_in_period_amount") filter (where "correction_date" is null or "correction_date" > $4::date), 0) as "paid_in_period_amount",
+  count(*) filter (where "paid_in_period_amount" > 0
+    and ("correction_date" is null or "correction_date" > $4::date))::integer as "paid_in_period_count",
+  count(*) filter (where "open_amount" = 0 and ("correction_date" is null or "correction_date" > $4::date))::integer as "settled_count",
+  count(*) filter (where "correction_date" <= $4::date and "has_replacement" is not true)::integer as "voided_count",
+  count(*) filter (where "correction_date" <= $4::date and "has_replacement")::integer as "replaced_count"
+from bills`,
+      [
+        scope.tenantId,
+        scope.companyId,
+        scope.bookId,
+        asOfDate,
+        book.currencyCode,
+        input.vendorId,
+        periodStart,
+        periodEnd
+      ]
+    );
+    const row = requiredRow(result.rows[0], "vendor bill summary");
+    return {
+      asOfDate,
+      periodStart,
+      periodEnd,
+      currencyCode: book.currencyCode,
+      outstandingAmount: money(row.outstanding_amount, "outstanding_amount"),
+      outstandingVendorBillCount: integer(row.outstanding_count, "outstanding_count"),
+      overdueAmount: money(row.overdue_amount, "overdue_amount"),
+      overdueVendorBillCount: integer(row.overdue_count, "overdue_count"),
+      paidAmount: money(row.paid_amount, "paid_amount"),
+      paidInPeriodAmount: money(row.paid_in_period_amount, "paid_in_period_amount"),
+      paidInPeriodVendorBillCount: integer(row.paid_in_period_count, "paid_in_period_count"),
+      settledVendorBillCount: integer(row.settled_count, "settled_count"),
+      voidedVendorBillCount: integer(row.voided_count, "voided_count"),
+      replacedVendorBillCount: integer(row.replaced_count, "replaced_count")
     };
   });
 }
@@ -1204,6 +1613,66 @@ function invoiceFromRow(row: Readonly<Record<string, unknown>>): InvoiceListItem
     originalAmount: money(row.original_amount, "original_amount"),
     openAmount: money(row.open_amount, "open_amount"),
     status: status as InvoiceListStatus,
+    version: integer(row.version, "version")
+  };
+}
+
+function vendorBillFromRow(row: Readonly<Record<string, unknown>>): VendorBillListItem {
+  const vendorName = optionalString(row.party_name);
+  const documentNumber = optionalString(row.document_number);
+  return {
+    billId: string(row.bill_id, "bill_id"),
+    sourceId: string(row.source_id, "source_id"),
+    sourceProvenance: "posted",
+    transactionId: string(row.transaction_id, "transaction_id"),
+    vendorId: string(row.party_id, "party_id"),
+    ...(vendorName === undefined ? {} : { vendorName }),
+    ...(documentNumber === undefined ? {} : { documentNumber }),
+    documentDate: date(row.document_date, "document_date"),
+    dueDate: date(row.due_date, "due_date"),
+    currencyCode: string(row.currency_code, "currency_code"),
+    originalAmount: money(row.original_amount, "original_amount"),
+    openAmount: money(row.open_amount, "open_amount"),
+    status: string(row.status, "status") as VendorBillStatus,
+    version: integer(row.version, "version")
+  };
+}
+
+function vendorBillLineFromRow(row: Readonly<Record<string, unknown>>): VendorBillLineReadModel {
+  const line = commercialLineFromRow(row);
+  const sourceItemId = optionalString(row.source_item_id);
+  const itemName = optionalString(row.item_name);
+  const itemCategoryAccountId = optionalString(row.item_expense_account_id);
+  const bookAccountKey = optionalString(row.book_account_key);
+  const accountMappingId = optionalString(row.book_account_mapping_id);
+  const sourceAccountId = optionalString(row.source_account_id);
+  const sourceId = string(row.source_id, "source_id");
+  return {
+    ...line,
+    sourceAccountKey: sourceAccountId ?? `${sourceId}:${line.accountId}`,
+    ...(bookAccountKey === undefined ? {} : { bookAccountKey }),
+    accountMappingProvenance: accountMappingId === undefined ? "source_account" : "reporting_book_mapping",
+    ...(accountMappingId === undefined ? {} : { accountMappingId }),
+    ...(sourceItemId === undefined ? {} : { sourceItemId }),
+    ...(itemName === undefined ? {} : { itemName }),
+    ...(itemCategoryAccountId === undefined ? {} : { itemCategoryAccountId }),
+    categoryMappingProvenance: line.itemId === undefined
+      ? "uncategorized"
+      : itemCategoryAccountId === line.accountId
+        ? "item_expense_account"
+        : "line_account_override"
+  };
+}
+
+function vendorBillApplicationFromRow(
+  row: Readonly<Record<string, unknown>>
+): VendorBillApplicationReadModel {
+  return {
+    applicationId: string(row.application_id, "application_id"),
+    sourcePaymentId: string(row.source_payment_id, "source_payment_id"),
+    applicationDate: date(row.application_date, "application_date"),
+    amount: money(row.applied_amount, "applied_amount"),
+    status: string(row.status, "status") as VendorBillApplicationReadModel["status"],
     version: integer(row.version, "version")
   };
 }
