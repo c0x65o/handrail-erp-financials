@@ -127,6 +127,10 @@ const migrationFiles = {
   sdkV1FoundationV14: new URL(
     "../migrations/future-erp/20260812070000_add_sdk_v1_foundation.sql",
     import.meta.url
+  ),
+  receivablesProvenanceV15: new URL(
+    "../migrations/future-erp/20260815010000_add_receivables_provenance_reads.sql",
+    import.meta.url
   )
 } as const;
 
@@ -211,6 +215,13 @@ export const POSTGRES_MIGRATIONS: readonly PostgresMigrationDefinition[] = [
     13,
     14,
     migrationFiles.sdkV1FoundationV14
+  ),
+  migration(
+    "20260815010000_add_receivables_provenance_reads",
+    "Add immutable invoice unit-cost provenance",
+    14,
+    15,
+    migrationFiles.receivablesProvenanceV15
   )
 ] as const;
 

@@ -501,12 +501,12 @@ async function writeDraftLines(
     await client.query(
       `insert into "erp_financials"."invoice_draft_lines" (
   "invoice_draft_line_id", "tenant_id", "company_id", "book_id", "source_id", "invoice_draft_id", "line_number",
-  "account_id", "item_id", "description", "quantity", "unit_amount", "discount_amount", "tax_code", "tax_amount",
+  "account_id", "item_id", "description", "quantity", "unit_amount", "unit_cost", "discount_amount", "tax_code", "tax_amount",
   "service_period_start", "service_period_end", "dimension_refs", "line_amount"
-) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
+) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
       [stableId("invoice_draft_line", scope.tenantId, scope.companyId, scope.bookId, invoiceDraftId, String(lineNumber)),
         scope.tenantId, scope.companyId, scope.bookId, scope.sourceId, invoiceDraftId, lineNumber, line.accountId,
-        line.itemId, line.description, line.quantity, line.unitAmount, line.discountAmount, line.taxCode, line.taxAmount,
+        line.itemId, line.description, line.quantity, line.unitAmount, line.unitCost, line.discountAmount, line.taxCode, line.taxAmount,
         line.servicePeriodStart, line.servicePeriodEnd, JSON.stringify(line.dimensionRefs), line.amount]
     );
   }
@@ -608,7 +608,8 @@ function normalizeLineForComparison(line: SubledgerAmountLine): JsonValue {
     servicePeriodStart: line.servicePeriodStart ?? null,
     taxAmount: line.taxAmount ?? "0.00",
     taxCode: line.taxCode ?? null,
-    unitAmount: line.unitAmount ?? line.amount
+    unitAmount: line.unitAmount ?? line.amount,
+    unitCost: line.unitCost ?? null
   };
 }
 
@@ -671,12 +672,14 @@ function lineInputFromRow(row: Readonly<Record<string, unknown>>): SubledgerAmou
   const taxCode = optionalString(row.tax_code);
   const start = optionalDate(row.service_period_start, "service_period_start");
   const end = optionalDate(row.service_period_end, "service_period_end");
+  const unitCost = row.unit_cost === null || row.unit_cost === undefined ? undefined : decimal(row.unit_cost, "unit_cost");
   const dimensionRefs: unknown = typeof row.dimension_refs === "string" ? JSON.parse(row.dimension_refs) as unknown : row.dimension_refs;
   if (!Array.isArray(dimensionRefs)) throw new Error("Stored dimension_refs must be an array");
   return {
     accountId: string(row.account_id, "account_id"), amount: money(row.line_amount, "line_amount"),
     ...(itemId === undefined ? {} : { itemId }), ...(description === undefined ? {} : { description }),
     quantity: decimal(row.quantity, "quantity"), unitAmount: money(row.unit_amount, "unit_amount"),
+    ...(unitCost === undefined ? {} : { unitCost }),
     discountAmount: money(row.discount_amount, "discount_amount"), ...(taxCode === undefined ? {} : { taxCode }),
     taxAmount: money(row.tax_amount, "tax_amount"), ...(start === undefined ? {} : { servicePeriodStart: start }),
     ...(end === undefined ? {} : { servicePeriodEnd: end }), dimensionRefs
@@ -722,6 +725,7 @@ function lineReadModel(row: Readonly<Record<string, unknown>>): CommercialDocume
     accountId: input.accountId, ...(input.itemId === undefined ? {} : { itemId: input.itemId }),
     ...(input.description === undefined ? {} : { description: input.description }), quantity: input.quantity ?? "1",
     unitAmount: input.unitAmount ?? input.amount, discountAmount: input.discountAmount ?? "0.00",
+    ...(input.unitCost === undefined ? {} : { unitCost: input.unitCost }),
     ...(input.taxCode === undefined ? {} : { taxCode: input.taxCode }), taxAmount: input.taxAmount ?? "0.00",
     ...(input.servicePeriodStart === undefined ? {} : { servicePeriodStart: input.servicePeriodStart }),
     ...(input.servicePeriodEnd === undefined ? {} : { servicePeriodEnd: input.servicePeriodEnd }),

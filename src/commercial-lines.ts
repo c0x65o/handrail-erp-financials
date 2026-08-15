@@ -8,6 +8,8 @@ export type CommercialDocumentLineInput = {
   readonly description?: string;
   readonly quantity?: DecimalString;
   readonly unitAmount?: DecimalString;
+  /** Exact per-unit cost provenance; never participates in customer-facing line arithmetic. */
+  readonly unitCost?: DecimalString;
   readonly discountAmount?: DecimalString;
   readonly taxCode?: string;
   readonly taxAmount?: DecimalString;
@@ -22,6 +24,7 @@ export type NormalizedCommercialDocumentLine = {
   readonly description?: string;
   readonly quantity: DecimalString;
   readonly unitAmount: DecimalString;
+  readonly unitCost?: DecimalString;
   readonly discountAmount: DecimalString;
   readonly taxCode?: string;
   readonly taxAmount: DecimalString;
@@ -49,6 +52,9 @@ export function normalizeCommercialDocumentLine(
   const taxAmount = input.taxAmount ?? "0.00";
   const quantityScaled = parseQuantity(quantity, `${field}.quantity`);
   const unitMinor = parseMoney(unitAmount, `${field}.unitAmount`, true);
+  const unitCost = input.unitCost === undefined
+    ? undefined
+    : parseExactUnitCost(input.unitCost, `${field}.unitCost`);
   const discountMinor = parseMoney(discountAmount, `${field}.discountAmount`, true);
   const taxMinor = parseMoney(taxAmount, `${field}.taxAmount`, true);
   const extendedMinor = divideRoundedHalfUp(quantityScaled * unitMinor, 10_000n);
@@ -87,6 +93,7 @@ export function normalizeCommercialDocumentLine(
     ...(input.description === undefined ? {} : { description: input.description }),
     quantity: quantityString(quantityScaled),
     unitAmount: money(unitMinor),
+    ...(unitCost === undefined ? {} : { unitCost }),
     discountAmount: money(discountMinor),
     ...(input.taxCode === undefined ? {} : { taxCode: input.taxCode }),
     taxAmount: money(taxMinor),
@@ -94,6 +101,16 @@ export function normalizeCommercialDocumentLine(
     ...(input.servicePeriodEnd === undefined ? {} : { servicePeriodEnd: input.servicePeriodEnd }),
     dimensionRefs: input.dimensionRefs ?? []
   };
+}
+
+function parseExactUnitCost(value: string, field: string): DecimalString {
+  if (!/^\d+(?:\.\d{1,6})?$/u.test(value)) {
+    throw new ErpFinancialsError(
+      "invalid_input",
+      `${field} must be a nonnegative decimal with at most six fractional digits`
+    );
+  }
+  return value;
 }
 
 function parseMoney(value: string, field: string, allowZero: boolean): bigint {

@@ -24,6 +24,11 @@ import type {
   CoreErpReportReconciliationDrilldownSurface,
   CoreErpReportRollupBucket,
   CoreErpTenantReadAccess,
+  CustomerPaymentDetail,
+  CustomerPaymentProvenance,
+  InvoiceDeliveryEvent,
+  PaymentApplicationDetail,
+  PaymentApplicationListItem,
   QuickBooksFullSyncRunResult,
   QuickBooksFullSyncWorker,
   QuickBooksIncrementalSyncRunResult,
@@ -36,6 +41,10 @@ import type {
   VendorBillLineReadModel,
   VendorBillListItem,
   VendorBillSummary,
+  WriteOffDetail,
+  WriteOffListItem,
+  ReplaceIssuedWriteOffInput,
+  VoidIssuedWriteOffInput,
   VoidIssuedVendorBillInput,
   VoidPostedVendorBillInput
 } from "@handrail/erp-financials";
@@ -88,4 +97,13 @@ export type CoreErpPersistenceEvidenceImports = {
   readonly replacePostedVendorBillInput: ReplacePostedVendorBillInput;
   readonly replaceIssuedVendorBillInput: ReplaceIssuedVendorBillInput;
   readonly postedVendorBillLifecycleResult: PostedVendorBillLifecycleResult;
+  readonly invoiceDelivery: InvoiceDeliveryEvent;
+  readonly customerPayment: CustomerPaymentDetail;
+  readonly customerPaymentProvenance: CustomerPaymentProvenance;
+  readonly paymentApplication: PaymentApplicationListItem;
+  readonly paymentApplicationDetail: PaymentApplicationDetail;
+  readonly writeOff: WriteOffListItem;
+  readonly writeOffDetail: WriteOffDetail;
+  readonly voidIssuedWriteOffInput: VoidIssuedWriteOffInput;
+  readonly replaceIssuedWriteOffInput: ReplaceIssuedWriteOffInput;
 };

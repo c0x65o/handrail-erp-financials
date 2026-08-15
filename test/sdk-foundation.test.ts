@@ -21,6 +21,7 @@ describe("pre-v1 SDK foundation", () => {
       amount: "24.50",
       quantity: "2.5",
       unitAmount: "10.00",
+      unitCost: "6.125000",
       discountAmount: "2.00",
       taxAmount: "1.50",
       itemId: "item_1"
@@ -28,9 +29,15 @@ describe("pre-v1 SDK foundation", () => {
       amount: "24.50",
       quantity: "2.5",
       unitAmount: "10.00",
+      unitCost: "6.125000",
       discountAmount: "2.00",
       taxAmount: "1.50"
     });
+
+    expect(() => normalizeCommercialDocumentLine({
+      amount: "10.00",
+      unitCost: "1.1234567"
+    })).toThrow("at most six fractional digits");
 
     const invalidLine = () => normalizeCommercialDocumentLine({
       amount: "24.49",

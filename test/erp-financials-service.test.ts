@@ -487,7 +487,26 @@ describe("reusable ERP Financials service", () => {
       customerId: "customer_acme",
       amount: "60.00",
       cashAccount: { accountId: "acct_cash" },
-      receivableAccount: { accountId: "acct_receivable" }
+      receivableAccount: { accountId: "acct_receivable" },
+      provenance: {
+        externalBankMatch: {
+          externalMatchId: "bank-match-1001",
+          bankStatementLineId: "bank-line-1001",
+          matchedAt: "2026-08-05T14:00:00.000Z"
+        },
+        deposit: { depositId: "deposit-1001", depositedAt: "2026-08-06T14:00:00.000Z" }
+      }
+    });
+
+    expect(JSON.parse(String(subledgerRow(database, payment.documentId).metadata))).toEqual({
+      customerPaymentProvenance: {
+        externalBankMatch: {
+          externalMatchId: "bank-match-1001",
+          bankStatementLineId: "bank-line-1001",
+          matchedAt: "2026-08-05T14:00:00.000Z"
+        },
+        deposit: { depositId: "deposit-1001", depositedAt: "2026-08-06T14:00:00.000Z" }
+      }
     });
 
     const applied = await financials.paymentApplications.apply({
@@ -939,6 +958,42 @@ describe("reusable ERP Financials service", () => {
     });
     expect(subledgerRow(database, refund.documentId)).toMatchObject({ status: "voided", version: 2 });
     expect(database.client.journalLinks.map((link) => link.link_type)).toEqual(["reversal", "replacement"]);
+  });
+
+  it("voids a posted write-off through an approved compensating lifecycle", async () => {
+    const database = subledgerDatabase();
+    const financials = service(database);
+    const writeOff = await financials.writeOffs.record({
+      operation: operation("request-write-off-to-void"),
+      idempotencyKey: "write-off-to-void",
+      date: "2026-08-03",
+      partyId: "customer_acme",
+      amount: "9.00",
+      balanceType: "receivable",
+      balanceAccount: { accountId: "acct_receivable" },
+      writeOffAccount: { accountId: "acct_expense" },
+      reason: "Duplicate write-off"
+    });
+
+    const result = await financials.writeOffs.voidIssued({
+      operation: approvedOperation("request-void-write-off"),
+      writeOffDocumentId: writeOff.documentId,
+      expectedVersion: 1,
+      idempotencyKey: "void-write-off",
+      date: "2026-08-14",
+      memo: "Reverse duplicate write-off"
+    });
+
+    expect(result).toMatchObject({
+      status: "voided",
+      adjustmentType: "write_off",
+      originalAdjustmentDocumentId: writeOff.documentId,
+      originalVersion: 2
+    });
+    expect(subledgerRow(database, writeOff.documentId)).toMatchObject({ status: "voided", version: 2 });
+    expect(database.client.journalLinks).toEqual([
+      expect.objectContaining({ original_transaction_id: writeOff.journal.transactionId, link_type: "void" })
+    ]);
   });
 
   it("rejects voiding a credit while it has an active application", async () => {

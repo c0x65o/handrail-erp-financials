@@ -214,6 +214,22 @@ export type RecordCustomerPaymentInput = SubledgerDocumentInputCommon & {
   readonly amount: DecimalString;
   readonly cashAccount: ErpFinancialsAccountReference;
   readonly receivableAccount: ErpFinancialsAccountReference;
+  /** Bounded external reconciliation references; never raw provider payloads or credentials. */
+  readonly provenance?: CustomerPaymentProvenance;
+};
+
+export type CustomerPaymentProvenance = {
+  readonly externalBankMatch?: {
+    readonly externalMatchId: string;
+    readonly bankStatementLineId?: string;
+    readonly providerReference?: string;
+    readonly matchedAt?: IsoDateTime;
+  };
+  readonly deposit?: {
+    readonly depositId: string;
+    readonly externalDepositReference?: string;
+    readonly depositedAt?: IsoDateTime;
+  };
 };
 
 type IssueCreditMemoCommon = SubledgerDocumentInputCommon & {
@@ -241,9 +257,12 @@ export type IssueRefundInput = SubledgerDocumentInputCommon & {
   readonly amount: DecimalString;
   readonly receivableAccount: ErpFinancialsAccountReference;
   readonly cashAccount: ErpFinancialsAccountReference;
+  readonly relatedInvoiceId?: string;
+  readonly refundMethod?: string;
+  readonly lifecycleReference?: string;
 };
 
-export type IssuedAdjustmentType = "credit" | "refund";
+export type IssuedAdjustmentType = "credit" | "refund" | "write_off";
 
 export type VoidIssuedAdjustmentInput = {
   readonly operation: FinancialOperationContext;
@@ -271,7 +290,11 @@ export type ReplaceIssuedRefundInput = VoidIssuedRefundInput & {
 
 export type ReplaceIssuedAdjustmentInput =
   | (ReplaceIssuedCreditMemoInput & { readonly adjustmentType: "credit" })
-  | (ReplaceIssuedRefundInput & { readonly adjustmentType: "refund" });
+  | (ReplaceIssuedRefundInput & { readonly adjustmentType: "refund" })
+  | (ReplaceIssuedWriteOffInput & {
+      readonly adjustmentType: "write_off";
+      readonly adjustmentDocumentId: string;
+    });
 
 export type IssuedAdjustmentLifecycleResult = {
   readonly status: "voided" | "already_voided" | "replaced" | "already_replaced";
@@ -338,6 +361,16 @@ export type RecordWriteOffInput = SubledgerDocumentInputCommon & {
   readonly balanceType: "receivable" | "payable";
   readonly balanceAccount: ErpFinancialsAccountReference;
   readonly writeOffAccount: ErpFinancialsAccountReference;
+  readonly relatedInvoiceId?: string;
+  readonly reason?: string;
+};
+
+export type VoidIssuedWriteOffInput = Omit<VoidIssuedAdjustmentInput, "adjustmentType" | "adjustmentDocumentId"> & {
+  readonly writeOffDocumentId: string;
+};
+
+export type ReplaceIssuedWriteOffInput = VoidIssuedWriteOffInput & {
+  readonly replacement: WithoutFinancialOperation<RecordWriteOffInput>;
 };
 
 export type RecordDepositInput = SubledgerDocumentInputCommon & {
@@ -445,7 +478,11 @@ export type ErpFinancials = {
     replacePosted(input: ReplacePostedVendorBillInput): Promise<PostedVendorBillLifecycleResult>;
   };
   readonly billPayments: { record(input: RecordBillPaymentInput): Promise<SubledgerDocumentResult> };
-  readonly writeOffs: { record(input: RecordWriteOffInput): Promise<SubledgerDocumentResult> };
+  readonly writeOffs: {
+    record(input: RecordWriteOffInput): Promise<SubledgerDocumentResult>;
+    voidIssued(input: VoidIssuedWriteOffInput): Promise<IssuedAdjustmentLifecycleResult>;
+    replaceIssued(input: ReplaceIssuedWriteOffInput): Promise<IssuedAdjustmentLifecycleResult>;
+  };
   readonly deposits: { record(input: RecordDepositInput): Promise<SubledgerDocumentResult> };
   readonly transfers: { record(input: RecordTransferInput): Promise<SubledgerDocumentResult> };
   readonly paymentApplications: {
@@ -610,7 +647,19 @@ export function createErpFinancials(input: CreateErpFinancialsInput): ErpFinanci
       replacePosted: (workflowInput) => runPostedVendorBillLifecycle(context, "replaced", workflowInput)
     },
     billPayments: { record: (documentInput) => recordBillPayment(context, documentInput) },
-    writeOffs: { record: (documentInput) => recordWriteOff(context, documentInput) },
+    writeOffs: {
+      record: (documentInput) => recordWriteOff(context, documentInput),
+      voidIssued: (workflowInput) => runIssuedAdjustmentLifecycle(context, "voided", {
+        ...workflowInput,
+        adjustmentDocumentId: workflowInput.writeOffDocumentId,
+        adjustmentType: "write_off"
+      }),
+      replaceIssued: (workflowInput) => runIssuedAdjustmentLifecycle(context, "replaced", {
+        ...workflowInput,
+        adjustmentDocumentId: workflowInput.writeOffDocumentId,
+        adjustmentType: "write_off"
+      })
+    },
     deposits: { record: (documentInput) => recordDeposit(context, documentInput) },
     transfers: { record: (documentInput) => recordTransfer(context, documentInput) },
     paymentApplications: {
@@ -833,7 +882,7 @@ type SubledgerDocumentWrite = {
   readonly currencyCode: IsoCurrencyCode;
   readonly amount: DecimalString;
   readonly documentStartsOpen: boolean;
-  readonly metadata: Readonly<Record<string, string | number | boolean | null>>;
+  readonly metadata: Readonly<Record<string, JsonValue>>;
   readonly journalLines: readonly PostJournalEntryLineInput[];
   readonly documentLines?: readonly (ErpFinancialsAccountReference & NormalizedCommercialDocumentLine)[];
   readonly memo?: string;
@@ -867,8 +916,16 @@ async function recordCustomerPayment(
   input: RecordCustomerPaymentInput
 ): Promise<SubledgerDocumentResult> {
   const amount = normalizedPositiveMoney(input.amount, "amount");
+  const provenance = paymentProvenance(input.provenance);
   return createSubledgerDocument(context, {
-    ...commonSubledgerDocument(context, input, "customer_payment", amount, true),
+    ...commonSubledgerDocument(
+      context,
+      input,
+      "customer_payment",
+      amount,
+      true,
+      provenance === undefined ? {} : { customerPaymentProvenance: provenance }
+    ),
     partyId: input.customerId,
     journalLines: [
       { ...input.cashAccount, debit: amount, partyId: input.customerId },
@@ -917,8 +974,20 @@ async function issueCreditMemo(
 
 async function issueRefund(context: ServiceContext, input: IssueRefundInput): Promise<SubledgerDocumentResult> {
   const amount = normalizedPositiveMoney(input.amount, "amount");
+  const refundProvenance = optionalReferenceProvenance({
+    relatedInvoiceId: input.relatedInvoiceId,
+    refundMethod: input.refundMethod,
+    lifecycleReference: input.lifecycleReference
+  }, "refund");
   return createSubledgerDocument(context, {
-    ...commonSubledgerDocument(context, input, "refund", amount, false),
+    ...commonSubledgerDocument(
+      context,
+      input,
+      "refund",
+      amount,
+      false,
+      refundProvenance === undefined ? {} : { refundProvenance }
+    ),
     partyId: input.customerId,
     journalLines: [
       { ...input.receivableAccount, debit: amount, partyId: input.customerId },
@@ -980,7 +1049,15 @@ async function recordWriteOff(context: ServiceContext, input: RecordWriteOffInpu
           { ...input.writeOffAccount, credit: amount, partyId: input.partyId }
         ];
   return createSubledgerDocument(context, {
-    ...commonSubledgerDocument(context, input, "write_off", amount, false),
+    ...commonSubledgerDocument(context, input, "write_off", amount, false, {
+      writeOffProvenance: {
+        balanceType: input.balanceType,
+        balanceAccountId: resolveAccountId(context, input.balanceAccount),
+        writeOffAccountId: resolveAccountId(context, input.writeOffAccount),
+        ...(input.relatedInvoiceId === undefined ? {} : { relatedInvoiceId: nonEmpty(input.relatedInvoiceId, "relatedInvoiceId") }),
+        ...(input.reason === undefined ? {} : { reason: nonEmpty(input.reason, "reason") })
+      }
+    }),
     partyId: input.partyId,
     journalLines
   });
@@ -1015,13 +1092,15 @@ function commonSubledgerDocument(
   input: SubledgerDocumentInputCommon,
   documentType: SubledgerDocumentType,
   amount: DecimalString,
-  documentStartsOpen: boolean
+  documentStartsOpen: boolean,
+  metadata: Readonly<Record<string, JsonValue>> = {}
 ): Omit<SubledgerDocumentWrite, "journalLines"> {
   assertFinancialOperationContext(input.operation);
   assertNonEmpty(input.idempotencyKey, "idempotencyKey");
   assertIsoDate(input.date, "date");
   const currencyCode = input.currencyCode ?? context.currencyCode;
   assertCurrencyAllowed(context, currencyCode);
+  assertBoundedMetadata(metadata);
   return {
     documentType,
     idempotencyKey: input.idempotencyKey,
@@ -1030,7 +1109,7 @@ function commonSubledgerDocument(
     currencyCode,
     amount,
     documentStartsOpen,
-    metadata: {},
+    metadata,
     ...(input.memo === undefined ? {} : { memo: input.memo }),
     operation: input.operation
   };
@@ -1072,6 +1151,7 @@ async function createSubledgerDocument(
     );
     await assertCompanySourceScope(client, context);
     await assertSubledgerParty(client, context, input.partyId, input.documentType);
+    await assertRelatedInvoiceReference(client, context, input.partyId, input.metadata);
     const posted = await executePostJournalEntryInTransaction(client, context, journalInput, journal, identities);
     const openAmount = input.documentStartsOpen ? input.amount : "0.00";
     const documentStatus = input.documentStartsOpen ? "open" : "settled";
@@ -1122,13 +1202,45 @@ returning *`,
       storedOptionalDate(existing.due_date, "due_date") !== input.dueDate ||
       storedOptionalString(existing.document_number) !== input.documentNumber ||
       storedOptionalString(existing.party_id) !== input.partyId ||
-      storedString(existing.currency_code, "currency_code") !== input.currencyCode
+      storedString(existing.currency_code, "currency_code") !== input.currencyCode ||
+      stableJson(storedJson(existing.metadata)) !== stableJson(input.metadata)
     ) {
       throw new ErpFinancialsIdempotencyConflictError(input.idempotencyKey);
     }
     await appendSubledgerDocumentOutboxEvent(client, context, input, documentId, posted.transactionId);
     return documentResult(existing, { ...posted, status: "already_posted" });
   });
+}
+
+async function assertRelatedInvoiceReference(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  partyId: string | undefined,
+  metadata: Readonly<Record<string, JsonValue>>
+): Promise<void> {
+  const containers = [metadata.refundProvenance, metadata.writeOffProvenance];
+  const container = containers.find((value) => typeof value === "object" && value !== null && !Array.isArray(value));
+  const relatedInvoiceId = container === undefined
+    ? undefined
+    : (container as Readonly<Record<string, JsonValue>>).relatedInvoiceId;
+  if (relatedInvoiceId === undefined) return;
+  if (typeof relatedInvoiceId !== "string" || partyId === undefined) {
+    throw new ErpFinancialsValidationError("relatedInvoiceId requires a customer-scoped invoice reference");
+  }
+  const result = await client.query(
+    `select "subledger_document_id" from "erp_financials"."subledger_documents"
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
+  and "subledger_document_id" = $4 and "document_type" = 'invoice' and "party_id" = $5
+for key share`,
+    [context.tenantId, context.companyId, context.sourceId, relatedInvoiceId, partyId]
+  );
+  if (result.rows[0] === undefined) {
+    throw new ErpFinancialsValidationError(
+      "relatedInvoiceId does not reference an invoice for the same customer in this company/source scope",
+      "missing_document",
+      { relatedInvoiceId }
+    );
+  }
 }
 
 async function appendSubledgerDocumentOutboxEvent(
@@ -1158,9 +1270,9 @@ async function writeSubledgerDocumentLines(
     await client.query(
       `insert into "erp_financials"."subledger_document_lines" (
   "subledger_document_line_id", "tenant_id", "company_id", "source_id", "subledger_document_id", "line_number",
-  "account_id", "item_id", "description", "quantity", "unit_amount", "discount_amount", "tax_code", "tax_amount",
+  "account_id", "item_id", "description", "quantity", "unit_amount", "unit_cost", "discount_amount", "tax_code", "tax_amount",
   "service_period_start", "service_period_end", "dimension_refs", "line_amount"
-) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
       [
         scopedRecordId(context, "subledger_document_line", `${documentId}:${String(lineNumber)}`),
         context.tenantId,
@@ -1173,6 +1285,7 @@ async function writeSubledgerDocumentLines(
         line.description,
         line.quantity,
         line.unitAmount,
+        line.unitCost,
         line.discountAmount,
         line.taxCode,
         line.taxAmount,
@@ -1531,6 +1644,56 @@ function assertSubledgerMatchInput(match: ApplySubledgerPaymentInput["match"]): 
       throw new ErpFinancialsValidationError("match.evidence exceeds 4096 bytes");
     }
   }
+}
+
+function paymentProvenance(
+  provenance: CustomerPaymentProvenance | undefined
+): CustomerPaymentProvenance | undefined {
+  if (provenance === undefined) return undefined;
+  if (provenance.externalBankMatch !== undefined) {
+    nonEmpty(provenance.externalBankMatch.externalMatchId, "provenance.externalBankMatch.externalMatchId");
+    optionalNonEmpty(provenance.externalBankMatch.bankStatementLineId, "provenance.externalBankMatch.bankStatementLineId");
+    optionalNonEmpty(provenance.externalBankMatch.providerReference, "provenance.externalBankMatch.providerReference");
+    if (provenance.externalBankMatch.matchedAt !== undefined) {
+      assertIsoDateTime(provenance.externalBankMatch.matchedAt, "provenance.externalBankMatch.matchedAt");
+    }
+  }
+  if (provenance.deposit !== undefined) {
+    nonEmpty(provenance.deposit.depositId, "provenance.deposit.depositId");
+    optionalNonEmpty(provenance.deposit.externalDepositReference, "provenance.deposit.externalDepositReference");
+    if (provenance.deposit.depositedAt !== undefined) {
+      assertIsoDateTime(provenance.deposit.depositedAt, "provenance.deposit.depositedAt");
+    }
+  }
+  assertBoundedMetadata({ customerPaymentProvenance: provenance });
+  return provenance;
+}
+
+function optionalReferenceProvenance(
+  values: Readonly<Record<string, string | undefined>>,
+  field: string
+): Readonly<Record<string, JsonValue>> | undefined {
+  const entries = Object.entries(values).filter((entry): entry is [string, string] => entry[1] !== undefined);
+  if (entries.length === 0) return undefined;
+  const result = Object.fromEntries(entries.map(([key, value]) => [key, nonEmpty(value, `${field}.${key}`)]));
+  assertBoundedMetadata(result);
+  return result;
+}
+
+function assertBoundedMetadata(metadata: Readonly<Record<string, JsonValue>>): void {
+  assertNoCredentialKeys(metadata);
+  if (Buffer.byteLength(JSON.stringify(metadata), "utf8") > 4096) {
+    throw new ErpFinancialsValidationError("subledger metadata exceeds 4096 bytes");
+  }
+}
+
+function nonEmpty(value: string, field: string): string {
+  assertNonEmpty(value, field);
+  return value;
+}
+
+function optionalNonEmpty(value: string | undefined, field: string): void {
+  if (value !== undefined) assertNonEmpty(value, field);
 }
 
 async function assertAcceptedSubledgerMatch(
@@ -2062,7 +2225,7 @@ returning "version"`,
 
 type LoadedIssuedAdjustment = {
   readonly documentId: string;
-  readonly documentType: "credit_memo" | "refund";
+  readonly documentType: "credit_memo" | "refund" | "write_off";
   readonly transactionId: string;
   readonly partyId: string;
   readonly currencyCode: IsoCurrencyCode;
@@ -2147,7 +2310,10 @@ async function runIssuedAdjustmentLifecycle(
     let replacementLink: { readonly linkId: string; readonly eventId: string } | undefined;
     if (outcome === "replaced") {
       const replacementInput = (input as ReplaceIssuedAdjustmentInput).replacement;
-      assertReplacementAdjustmentParty(original, replacementInput.customerId);
+      const replacementPartyId = input.adjustmentType === "write_off"
+        ? (replacementInput as ReplaceIssuedWriteOffInput["replacement"]).partyId
+        : (replacementInput as ReplaceIssuedCreditMemoInput["replacement"] | ReplaceIssuedRefundInput["replacement"]).customerId;
+      assertReplacementAdjustmentParty(original, replacementPartyId);
       const nestedContext: ServiceContext = {
         ...context,
         database: { transaction: async <Result>(work: (nestedClient: PostgresQueryClient) => Promise<Result>) => work(client) }
@@ -2157,8 +2323,11 @@ async function runIssuedAdjustmentLifecycle(
             ...(replacementInput as ReplaceIssuedCreditMemoInput["replacement"]),
             operation: input.operation
           })
-        : await issueRefund(nestedContext, {
+        : input.adjustmentType === "refund" ? await issueRefund(nestedContext, {
             ...(replacementInput as ReplaceIssuedRefundInput["replacement"]),
+            operation: input.operation
+          }) : await recordWriteOff(nestedContext, {
+            ...(replacementInput as ReplaceIssuedWriteOffInput["replacement"]),
             operation: input.operation
           });
       await assertJournalLifecycleSlotAvailable(client, context, {
@@ -2245,14 +2414,14 @@ for update`,
     [context.tenantId, context.companyId, context.sourceId, documentId]
   );
   const row = result.rows[0];
-  if (row === undefined || (row.document_type !== "credit_memo" && row.document_type !== "refund")) {
+  if (row === undefined || !["credit_memo", "refund", "write_off"].includes(String(row.document_type))) {
     throw new ErpFinancialsError(
       "missing_document",
       `Issued adjustment ${documentId} does not exist in the write source`,
       { details: { adjustmentDocumentId: documentId } }
     );
   }
-  const documentType = row.document_type;
+  const documentType = row.document_type as LoadedIssuedAdjustment["documentType"];
   const transactionId = storedString(row.transaction_id, "transaction_id");
   const journal = await loadPostedJournalForLifecycle(
     client,
@@ -2282,7 +2451,9 @@ function assertIssuedAdjustmentType(
   adjustment: LoadedIssuedAdjustment,
   expectedType: IssuedAdjustmentType
 ): void {
-  const actualType: IssuedAdjustmentType = adjustment.documentType === "credit_memo" ? "credit" : "refund";
+  const actualType: IssuedAdjustmentType = adjustment.documentType === "credit_memo"
+    ? "credit"
+    : adjustment.documentType === "refund" ? "refund" : "write_off";
   if (actualType !== expectedType) {
     throw new ErpFinancialsError(
       "invalid_input",
@@ -2350,7 +2521,7 @@ set "open_amount" = 0, "status" = 'voided', "version" = "version" + 1, "updated_
 where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
   and "subledger_document_id" = $4 and "version" = $6
   and (("document_type" = 'credit_memo' and "status" = 'open' and "open_amount" = "original_amount")
-    or ("document_type" = 'refund' and "status" = 'settled' and "open_amount" = 0))
+    or ("document_type" in ('refund', 'write_off') and "status" = 'settled' and "open_amount" = 0))
 returning "version"`,
       [context.tenantId, context.companyId, context.sourceId, adjustment.documentId, context.now(), expectedVersion]
     );

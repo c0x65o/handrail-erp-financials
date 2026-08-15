@@ -53,8 +53,8 @@ export type PostgresTableManifest = {
 };
 
 export type PostgresSchemaManifest = {
-  readonly manifestVersion: "2026-08-12.sdk-v1-foundation";
-  readonly schemaVersion: 14;
+  readonly manifestVersion: "2026-08-15.receivables-provenance";
+  readonly schemaVersion: 15;
   readonly dialect: "postgres";
   readonly namespace: "erp_financials";
   readonly requiredTriggers: readonly PostgresTriggerManifest[];
@@ -144,8 +144,8 @@ const table = (
 });
 
 export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
-  manifestVersion: "2026-08-12.sdk-v1-foundation",
-  schemaVersion: 14,
+  manifestVersion: "2026-08-15.receivables-provenance",
+  schemaVersion: 15,
   dialect: "postgres",
   namespace: "erp_financials",
   requiredTriggers: [
@@ -2366,6 +2366,7 @@ function sdkV1LineTables(): readonly PostgresTableManifest[] {
     text("description", true),
     numeric("quantity"),
     numeric("unit_amount"),
+    numeric("unit_cost", true),
     numeric("discount_amount"),
     text("tax_code", true),
     numeric("tax_amount"),
@@ -2389,6 +2390,10 @@ function sdkV1LineTables(): readonly PostgresTableManifest[] {
       ],
       [
         ...amountConstraints("invoice_draft_lines"),
+        {
+          name: "invoice_draft_lines_unit_cost_check",
+          sql: "unit_cost is null or (unit_cost >= 0 and scale(unit_cost) <= 6)"
+        },
         {
           name: "invoice_draft_lines_service_period_check",
           sql: "service_period_start is null or service_period_end is null or service_period_start <= service_period_end"
@@ -2433,6 +2438,10 @@ function sdkV1LineTables(): readonly PostgresTableManifest[] {
       ],
       [
         ...amountConstraints("subledger_document_lines"),
+        {
+          name: "subledger_document_lines_unit_cost_check",
+          sql: "unit_cost is null or (unit_cost >= 0 and scale(unit_cost) <= 6)"
+        },
         foreignKey(
           "subledger_document_lines_document_scope_fk",
           ["tenant_id", "company_id", "source_id", "subledger_document_id"],

@@ -15,7 +15,7 @@ dependencies.
 
 ## Setup order
 
-1. Run `migratePostgresSchema(...)` through schema version 14.
+1. Run `migratePostgresSchema(...)` through schema version 15.
 2. Create the canonical company, sources, and company/source bindings.
 3. Define one reporting book and its base currency/accounting basis.
 4. Bind every provenance source to the book with effective dates.
@@ -99,7 +99,8 @@ cutover and two source charts mapped onto one book chart.
   approved unmatch, and ignore.
 - `queries`: cursor-paginated invoices, vendor bills, payments, credits/refunds, general
   ledger, chart of accounts, financial statements, dashboard, A/R and A/P
-  aging, bank review, exact bill/adjustment detail, and exact
+  aging, bank review, invoice delivery history, customer-payment/application
+  detail, write-off detail, exact bill/adjustment detail, and exact
   invoice/vendor-bill/payment/ledger card summaries for host screens.
 - `outbox`: leased claim/publish/fail operations.
 - `createRuntime(...)`: bounded event delivery and retry routing for a cron,
@@ -125,8 +126,10 @@ posts the journal, creates the subledger document and immutable lines, links the
 draft, records lifecycle evidence, and appends an outbox event in one database
 transaction.
 
-Commercial lines retain quantity, unit amount, discount, tax, item, description,
-service period, dimensions, account, and final amount. The SDK validates
+Commercial lines retain quantity, unit amount, optional exact unit cost (up to
+six fractional digits), discount, tax, item, description, service period,
+dimensions, account, and final amount. Unit cost is provenance and does not
+change customer-facing line arithmetic. The SDK validates
 `amount = round(quantity × unitAmount) - discount + tax` using integer arithmetic.
 
 An entirely open issued invoice can be voided automatically. The SDK recreates
@@ -136,7 +139,8 @@ silently voided; the host must choose an explicit remaining-credit/refund
 workflow because customer cash has already changed the accounting outcome.
 
 Invoice list status is derived as draft, open, sent, overdue, partial, paid, or
-voided. Delivery attempts are append-only evidence rather than a mutable flag.
+voided. `queries.listInvoiceDeliveries(...)` returns append-only event identity,
+status, channel, recipient reference, occurrence time, and lifecycle reference.
 
 ## Credits and refunds
 
@@ -165,7 +169,22 @@ candidate state, validates document type/party/currency/amount/version, inserts
 the canonical subledger application, updates both open balances through database
 triggers, records lifecycle evidence, and appends the outbox event atomically.
 
-`payment_applications` remains in schema v14 only for compatibility with the
+`queries.getCustomerPayment(...)`, `queries.listPaymentApplications(...)`, and
+`queries.getPaymentApplication(...)` are the canonical reload paths. Customer
+payment recording accepts bounded bank-match/deposit references. Application
+reads return the exact amount, source/target documents, status/version, terminal
+lifecycle links, and bounded match decision evidence.
+
+Write-offs accept bounded reason, related-invoice, balance-account, and
+write-off-account provenance. `queries.listWriteOffs(...)` and
+`queries.getWriteOff(...)` expose that provenance with durable actor/approver
+evidence and correction links. `commands.writeOffs.voidIssued(...)` and
+`replaceIssued(...)` require independent approval and use compensating journals;
+posted write-offs are never edited or deleted directly. Refund detail likewise
+returns its bounded related-invoice, method, lifecycle reference, and durable
+operation provenance.
+
+`payment_applications` remains in schema v15 only for compatibility with the
 older canonical contract. New native writes use `subledger_applications`; hosts
 must not write both representations.
 
@@ -207,7 +226,7 @@ does not claim that a cron or queue has been deployed.
 
 ## Compatibility and readiness boundary
 
-Schema v14 is the pre-v1 foundation. Before publishing 1.0, prove this exact SDK
+Schema v15 is the pre-v1 foundation. Before publishing 1.0, prove this exact SDK
 surface in the first ERP application and treat feedback as contract feedback,
 not a reason to add host-local SQL. Breaking changes remain possible before 1.0.
 

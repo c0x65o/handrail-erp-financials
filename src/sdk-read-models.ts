@@ -6,6 +6,7 @@ import type {
   DecimalString,
   IsoCurrencyCode,
   IsoDate,
+  IsoDateTime,
   JsonValue
 } from "./canonical-model.js";
 import type { ErpFinancialsTransactionRunner } from "./erp-financials-service.js";
@@ -47,6 +48,8 @@ export type CommercialDocumentLineReadModel = {
   readonly description?: string;
   readonly quantity: DecimalString;
   readonly unitAmount: DecimalString;
+  /** Immutable exact unit cost captured on the commercial line, when supplied. */
+  readonly unitCost?: DecimalString;
   readonly discountAmount: DecimalString;
   readonly taxCode?: string;
   readonly taxAmount: DecimalString;
@@ -59,6 +62,16 @@ export type CommercialDocumentLineReadModel = {
 export type InvoiceDetail = InvoiceListItem & {
   readonly memo?: string;
   readonly lines: readonly CommercialDocumentLineReadModel[];
+};
+
+export type InvoiceDeliveryEvent = {
+  readonly deliveryEventId: string;
+  readonly invoiceId: string;
+  readonly status: "sent" | "delivered" | "failed";
+  readonly channel: string;
+  readonly recipientRef?: string;
+  readonly occurredAt: IsoDateTime;
+  readonly lifecycleEventId: string;
 };
 
 export type VendorBillStatus = "open" | "overdue" | "partial" | "paid" | "voided" | "replaced";
@@ -151,6 +164,90 @@ export type PaymentListItem = {
   readonly matchedApplicationCount: number;
 };
 
+export type CustomerPaymentProvenanceReadModel = {
+  readonly externalBankMatch?: {
+    readonly externalMatchId: string;
+    readonly bankStatementLineId?: string;
+    readonly providerReference?: string;
+    readonly matchedAt?: IsoDateTime;
+  };
+  readonly deposit?: {
+    readonly depositId: string;
+    readonly externalDepositReference?: string;
+    readonly depositedAt?: IsoDateTime;
+  };
+};
+
+export type PaymentApplicationMatchProvenance = {
+  readonly matchCandidateId: string;
+  readonly matchDecisionId: string;
+  readonly method: "automatic" | "manual";
+  readonly score: DecimalString;
+  readonly evidence?: JsonValue;
+};
+
+export type PaymentApplicationListItem = {
+  readonly applicationId: string;
+  readonly sourceId: string;
+  readonly applicationType: "customer_payment_to_invoice" | "bill_payment_to_bill" | "credit_to_invoice";
+  readonly status: "applied" | "unapplied" | "voided";
+  readonly version: number;
+  readonly applicationDate: IsoDate;
+  readonly sourcePaymentId: string;
+  readonly targetDocumentId: string;
+  readonly amount: DecimalString;
+  readonly currencyCode: IsoCurrencyCode;
+  readonly appliedLifecycleEventId: string;
+  readonly endedLifecycleEventId?: string;
+  readonly matchProvenance?: PaymentApplicationMatchProvenance;
+};
+
+export type PaymentApplicationDetail = PaymentApplicationListItem;
+
+export type CustomerPaymentDetail = PaymentListItem & {
+  readonly transactionId: string;
+  readonly version: number;
+  readonly lifecycleEventId: string;
+  readonly memo?: string;
+  readonly provenance?: CustomerPaymentProvenanceReadModel;
+  readonly applications: readonly PaymentApplicationListItem[];
+};
+
+export type FinancialLifecycleProvenance = {
+  readonly lifecycleEventId: string;
+  readonly actorRef: string;
+  readonly approverRef?: string;
+  readonly requestId: string;
+  readonly reasonCode: string;
+};
+
+export type WriteOffListItem = {
+  readonly writeOffId: string;
+  readonly sourceId: string;
+  readonly transactionId: string;
+  readonly customerId: string;
+  readonly customerName?: string;
+  readonly relatedInvoiceId?: string;
+  readonly documentNumber?: string;
+  readonly writeOffDate: IsoDate;
+  readonly currencyCode: IsoCurrencyCode;
+  readonly amount: DecimalString;
+  readonly status: "settled" | "voided" | "replaced";
+  readonly version: number;
+  readonly reason?: string;
+  readonly reversalTransactionId?: string;
+  readonly replacementWriteOffId?: string;
+  readonly replacesWriteOffId?: string;
+};
+
+export type WriteOffDetail = WriteOffListItem & {
+  readonly memo?: string;
+  readonly balanceType: "receivable" | "payable";
+  readonly balanceAccountId: string;
+  readonly writeOffAccountId: string;
+  readonly lifecycle: FinancialLifecycleProvenance;
+};
+
 export type AdjustmentType = "credit" | "refund";
 
 export type AdjustmentStatus = "open" | "partially_applied" | "settled" | "voided" | "replaced";
@@ -201,6 +298,12 @@ export type AdjustmentDetail = AdjustmentListItem & {
   readonly lines: readonly CommercialDocumentLineReadModel[];
   readonly postings: readonly AdjustmentPostingReadModel[];
   readonly applications: readonly AdjustmentApplicationReadModel[];
+  readonly lifecycle?: FinancialLifecycleProvenance;
+  readonly refundProvenance?: {
+    readonly relatedInvoiceId?: string;
+    readonly refundMethod?: string;
+    readonly lifecycleReference?: string;
+  };
 };
 
 export type InvoiceSummary = {
@@ -369,6 +472,7 @@ export type BankReconciliationSummary = {
 export type FinancialReadModels = {
   listInvoices(input?: PageRequest & { readonly status?: InvoiceListStatus; readonly asOfDate?: IsoDate }): Promise<Page<InvoiceListItem>>;
   getInvoice(invoiceId: string, asOfDate?: IsoDate): Promise<InvoiceDetail>;
+  listInvoiceDeliveries(invoiceId: string, input?: PageRequest): Promise<Page<InvoiceDeliveryEvent>>;
   getInvoiceSummary(input?: { readonly asOfDate?: IsoDate }): Promise<InvoiceSummary>;
   listVendorBills(input?: PageRequest & { readonly status?: VendorBillStatus; readonly asOfDate?: IsoDate; readonly vendorId?: string }): Promise<Page<VendorBillListItem>>;
   getVendorBill(billId: string, asOfDate?: IsoDate): Promise<VendorBillDetail>;
@@ -379,9 +483,19 @@ export type FinancialReadModels = {
     readonly vendorId?: string;
   }): Promise<VendorBillSummary>;
   listPayments(input?: PageRequest & { readonly paymentType?: PaymentListItem["paymentType"] }): Promise<Page<PaymentListItem>>;
+  getCustomerPayment(paymentId: string): Promise<CustomerPaymentDetail>;
+  listPaymentApplications(input?: PageRequest & {
+    readonly applicationType?: PaymentApplicationListItem["applicationType"];
+    readonly status?: PaymentApplicationListItem["status"];
+    readonly sourcePaymentId?: string;
+    readonly targetDocumentId?: string;
+  }): Promise<Page<PaymentApplicationListItem>>;
+  getPaymentApplication(applicationId: string): Promise<PaymentApplicationDetail>;
   getPaymentSummary(input: { readonly periodStart: IsoDate; readonly periodEnd: IsoDate }): Promise<PaymentSummary>;
   listAdjustments(input?: PageRequest & { readonly adjustmentType?: AdjustmentType; readonly status?: AdjustmentStatus }): Promise<Page<AdjustmentListItem>>;
   getAdjustment(adjustmentId: string): Promise<AdjustmentDetail>;
+  listWriteOffs(input?: PageRequest & { readonly customerId?: string; readonly status?: WriteOffListItem["status"] }): Promise<Page<WriteOffListItem>>;
+  getWriteOff(writeOffId: string): Promise<WriteOffDetail>;
   listGeneralLedger(input: PageRequest & { readonly periodStart: IsoDate; readonly periodEnd: IsoDate; readonly accountKey?: string }): Promise<Page<GeneralLedgerLine>>;
   getGeneralLedgerSummary(input: { readonly periodStart: IsoDate; readonly periodEnd: IsoDate }): Promise<GeneralLedgerSummary>;
   listChartOfAccounts(input?: { readonly asOfDate?: IsoDate; readonly includeInactive?: boolean }): Promise<readonly ChartOfAccountsItem[]>;
@@ -411,14 +525,20 @@ export function createFinancialReadModels(input: Scope): FinancialReadModels {
   return {
     listInvoices: (request = {}) => listInvoices(input, request),
     getInvoice: (invoiceId, asOfDate) => getInvoice(input, invoiceId, asOfDate),
+    listInvoiceDeliveries: (invoiceId, request = {}) => listInvoiceDeliveries(input, invoiceId, request),
     getInvoiceSummary: (request = {}) => getInvoiceSummary(input, request),
     listVendorBills: (request = {}) => listVendorBills(input, request),
     getVendorBill: (billId, asOfDate) => getVendorBill(input, billId, asOfDate),
     getVendorBillSummary: (request = {}) => getVendorBillSummary(input, request),
     listPayments: (request = {}) => listPayments(input, request),
+    getCustomerPayment: (paymentId) => getCustomerPayment(input, paymentId),
+    listPaymentApplications: (request = {}) => listPaymentApplications(input, request),
+    getPaymentApplication: (applicationId) => getPaymentApplication(input, applicationId),
     getPaymentSummary: (request) => getPaymentSummary(input, request),
     listAdjustments: (request = {}) => listAdjustments(input, request),
     getAdjustment: (adjustmentId) => getAdjustment(input, adjustmentId),
+    listWriteOffs: (request = {}) => listWriteOffs(input, request),
+    getWriteOff: (writeOffId) => getWriteOff(input, writeOffId),
     listGeneralLedger: (request) => listGeneralLedger(input, request),
     getGeneralLedgerSummary: (request) => getGeneralLedgerSummary(input, request),
     listChartOfAccounts: (request = {}) => listChartOfAccounts(input, request),
@@ -540,6 +660,40 @@ async function getInvoice(scope: Scope, invoiceId: string, asOfDate = today()): 
       ...(memo === undefined ? {} : { memo }),
       lines: lines.rows.map(commercialLineFromRow)
     };
+  });
+}
+
+async function listInvoiceDeliveries(
+  scope: Scope,
+  invoiceId: string,
+  input: PageRequest
+): Promise<Page<InvoiceDeliveryEvent>> {
+  assertNonEmpty(invoiceId, "invoiceId");
+  const invoice = await getInvoice(scope, invoiceId);
+  if (invoice.sourceProvenance === "draft") return { items: [] };
+  const page = pageInput(input, `invoice-deliveries:${invoiceId}`, scope.bookId);
+  return scope.database.transaction(async (client) => {
+    const result = await client.query(
+      `select event."delivery_event_id", event."subledger_document_id" as "invoice_id", event."delivery_status",
+  event."channel", event."recipient_ref", event."occurred_at", event."lifecycle_event_id"
+from "erp_financials"."subledger_document_delivery_events" event
+join "erp_financials"."subledger_documents" document
+  on document."tenant_id" = event."tenant_id" and document."company_id" = event."company_id"
+ and document."source_id" = event."source_id" and document."subledger_document_id" = event."subledger_document_id"
+join "erp_financials"."reporting_book_sources" source
+  on source."tenant_id" = document."tenant_id" and source."company_id" = document."company_id"
+ and source."book_id" = $3 and source."source_id" = document."source_id"
+where event."tenant_id" = $1 and event."company_id" = $2 and event."subledger_document_id" = $4
+  and document."document_type" = 'invoice'
+  and ($5::date is null or (event."occurred_at"::date, event."delivery_event_id") < ($5::date, $6::text))
+order by event."occurred_at" desc, event."delivery_event_id" desc
+limit $7`,
+      [scope.tenantId, scope.companyId, scope.bookId, invoiceId, page.date, page.id, page.limit + 1]
+    );
+    return toPage(result.rows.map(invoiceDeliveryFromRow), page.limit, `invoice-deliveries:${invoiceId}`, scope.bookId, (item) => ({
+      date: item.occurredAt.slice(0, 10),
+      id: item.deliveryEventId
+    }));
   });
 }
 
@@ -981,6 +1135,131 @@ limit $8`,
   });
 }
 
+async function getCustomerPayment(scope: Scope, paymentId: string): Promise<CustomerPaymentDetail> {
+  assertNonEmpty(paymentId, "paymentId");
+  return scope.database.transaction(async (client) => {
+    const book = await resolveBook(client, scope);
+    const result = await client.query(
+      `select document."subledger_document_id" as "payment_id", document."source_id", document."document_type",
+  document."transaction_id", document."party_id", party."display_name" as "party_name", document."document_number",
+  document."document_date", document."currency_code", document."original_amount", document."open_amount",
+  document."version", document."lifecycle_event_id", document."metadata", transaction."memo",
+  count(application."subledger_application_id") filter (where application."status" = 'applied')::integer as "application_count"
+from "erp_financials"."subledger_documents" document
+join "erp_financials"."reporting_book_sources" source
+  on source."tenant_id" = document."tenant_id" and source."company_id" = document."company_id"
+ and source."book_id" = $3 and source."source_id" = document."source_id"
+join "erp_financials"."transactions" transaction
+  on transaction."tenant_id" = document."tenant_id" and transaction."source_id" = document."source_id"
+ and transaction."transaction_id" = document."transaction_id"
+left join "erp_financials"."parties" party
+  on party."tenant_id" = document."tenant_id" and party."source_id" = document."source_id" and party."party_id" = document."party_id"
+left join "erp_financials"."subledger_applications" application
+  on application."tenant_id" = document."tenant_id" and application."company_id" = document."company_id"
+ and application."source_id" = document."source_id" and application."source_document_id" = document."subledger_document_id"
+where document."tenant_id" = $1 and document."company_id" = $2 and document."subledger_document_id" = $4
+  and document."document_type" = 'customer_payment' and document."currency_code" = $5
+group by document."subledger_document_id", party."display_name", transaction."memo"`,
+      [scope.tenantId, scope.companyId, scope.bookId, paymentId, book.currencyCode]
+    );
+    const row = result.rows[0];
+    if (row === undefined) {
+      throw new ErpFinancialsError("missing_document", `Customer payment ${paymentId} does not exist in reporting book ${scope.bookId}`, {
+        details: { bookId: scope.bookId, paymentId }
+      });
+    }
+    const applications = await queryPaymentApplications(client, scope, { sourcePaymentId: paymentId });
+    const item = paymentFromRow(row);
+    const memo = optionalString(row.memo);
+    const provenance = customerPaymentProvenanceFromMetadata(row.metadata);
+    return {
+      ...item,
+      transactionId: string(row.transaction_id, "transaction_id"),
+      version: integer(row.version, "version"),
+      lifecycleEventId: string(row.lifecycle_event_id, "lifecycle_event_id"),
+      ...(memo === undefined ? {} : { memo }),
+      ...(provenance === undefined ? {} : { provenance }),
+      applications
+    };
+  });
+}
+
+async function listPaymentApplications(
+  scope: Scope,
+  input: PageRequest & {
+    readonly applicationType?: PaymentApplicationListItem["applicationType"];
+    readonly status?: PaymentApplicationListItem["status"];
+    readonly sourcePaymentId?: string;
+    readonly targetDocumentId?: string;
+    readonly applicationId?: string;
+  }
+): Promise<Page<PaymentApplicationListItem>> {
+  const page = pageInput(input, "payment-applications", scope.bookId);
+  return scope.database.transaction(async (client) => {
+    const rows = await queryPaymentApplications(client, scope, input, page);
+    return toPage(rows, page.limit, "payment-applications", scope.bookId, (item) => ({
+      date: item.applicationDate,
+      id: item.applicationId
+    }));
+  });
+}
+
+async function getPaymentApplication(scope: Scope, applicationId: string): Promise<PaymentApplicationDetail> {
+  assertNonEmpty(applicationId, "applicationId");
+  const page = await listPaymentApplications(scope, { applicationId, limit: 1 });
+  const application = page.items[0];
+  if (application === undefined) {
+    throw new ErpFinancialsError("missing_document", `Payment application ${applicationId} does not exist in reporting book ${scope.bookId}`, {
+      details: { applicationId, bookId: scope.bookId }
+    });
+  }
+  return application;
+}
+
+async function queryPaymentApplications(
+  client: PostgresQueryClient,
+  scope: Scope,
+  input: {
+    readonly applicationType?: PaymentApplicationListItem["applicationType"];
+    readonly status?: PaymentApplicationListItem["status"];
+    readonly sourcePaymentId?: string;
+    readonly targetDocumentId?: string;
+    readonly applicationId?: string;
+  },
+  page?: ReturnType<typeof pageInput>
+): Promise<readonly PaymentApplicationListItem[]> {
+  const result = await client.query(
+    `select application."subledger_application_id" as "application_id", application."source_id",
+  application."application_type", application."status", application."version", application."application_date",
+  application."source_document_id" as "source_payment_id", application."target_document_id",
+  application."applied_amount", application."currency_code", application."applied_event_id", application."ended_event_id",
+  application."match_candidate_id", application."match_decision_id", application."match_method", application."match_score",
+  application."match_evidence"
+from "erp_financials"."subledger_applications" application
+join "erp_financials"."subledger_documents" source_document
+  on source_document."tenant_id" = application."tenant_id" and source_document."company_id" = application."company_id"
+ and source_document."source_id" = application."source_id" and source_document."subledger_document_id" = application."source_document_id"
+join "erp_financials"."subledger_documents" target_document
+  on target_document."tenant_id" = application."tenant_id" and target_document."company_id" = application."company_id"
+ and target_document."source_id" = application."source_id" and target_document."subledger_document_id" = application."target_document_id"
+join "erp_financials"."reporting_book_sources" source
+  on source."tenant_id" = application."tenant_id" and source."company_id" = application."company_id"
+ and source."book_id" = $3 and source."source_id" = application."source_id"
+where application."tenant_id" = $1 and application."company_id" = $2
+  and ($4::text is null or application."application_type" = $4)
+  and ($5::text is null or application."status" = $5)
+  and ($6::text is null or application."source_document_id" = $6)
+  and ($7::text is null or application."target_document_id" = $7)
+  and ($8::text is null or application."subledger_application_id" = $8)
+  and ($9::date is null or (application."application_date", application."subledger_application_id") < ($9::date, $10::text))
+order by application."application_date" desc, application."subledger_application_id" desc
+limit $11`,
+    [scope.tenantId, scope.companyId, scope.bookId, input.applicationType, input.status, input.sourcePaymentId,
+      input.targetDocumentId, input.applicationId, page?.date, page?.id, (page?.limit ?? 100) + 1]
+  );
+  return result.rows.map(paymentApplicationFromRow);
+}
+
 async function listAdjustments(
   scope: Scope,
   input: PageRequest & {
@@ -1088,8 +1367,15 @@ async function getAdjustment(scope: Scope, adjustmentId: string): Promise<Adjust
   }
   return scope.database.transaction(async (client) => {
     const header = await client.query(
-      `select transaction."memo"
+      `select transaction."memo", document."metadata", lifecycle."event_id" as "lifecycle_event_id",
+  lifecycle."actor_ref", lifecycle."approver_ref", lifecycle."request_id", lifecycle."reason_code"
 from "erp_financials"."transactions" transaction
+join "erp_financials"."subledger_documents" document
+  on document."tenant_id" = transaction."tenant_id" and document."source_id" = transaction."source_id"
+ and document."transaction_id" = transaction."transaction_id"
+join "erp_financials"."financial_lifecycle_events" lifecycle
+  on lifecycle."tenant_id" = document."tenant_id" and lifecycle."company_id" = document."company_id"
+ and lifecycle."source_id" = document."source_id" and lifecycle."event_id" = document."lifecycle_event_id"
 where transaction."tenant_id" = $1 and transaction."source_id" = $2 and transaction."transaction_id" = $3`,
       [scope.tenantId, adjustment.sourceId, adjustment.transactionId]
     );
@@ -1129,13 +1415,124 @@ where application."tenant_id" = $1 and application."company_id" = $2 and applica
 order by application."application_date", application."subledger_application_id"`,
       [scope.tenantId, scope.companyId, adjustment.sourceId, adjustment.adjustmentId]
     );
-    const memo = optionalString(header.rows[0]?.memo);
+    const headerRow = header.rows[0];
+    const memo = optionalString(headerRow?.memo);
+    const lifecycle = headerRow?.lifecycle_event_id === undefined ? undefined : lifecycleFromRow(headerRow);
+    const refundProvenance = adjustment.adjustmentType === "refund"
+      ? refundProvenanceFromMetadata(headerRow?.metadata)
+      : undefined;
     return {
       ...adjustment,
       ...(memo === undefined ? {} : { memo }),
       lines: lines.rows.map(commercialLineFromRow),
       postings: postings.rows.map(adjustmentPostingFromRow),
-      applications: applications.rows.map(adjustmentApplicationFromRow)
+      applications: applications.rows.map(adjustmentApplicationFromRow),
+      ...(lifecycle === undefined ? {} : { lifecycle }),
+      ...(refundProvenance === undefined ? {} : { refundProvenance })
+    };
+  });
+}
+
+async function listWriteOffs(
+  scope: Scope,
+  input: PageRequest & { readonly customerId?: string; readonly status?: WriteOffListItem["status"]; readonly writeOffId?: string }
+): Promise<Page<WriteOffListItem>> {
+  const page = pageInput(input, "write-offs", scope.bookId);
+  return scope.database.transaction(async (client) => {
+    const book = await resolveBook(client, scope);
+    const result = await client.query(
+      `with write_off_rows as (
+  select document."subledger_document_id" as "write_off_id", document."source_id", document."transaction_id",
+    document."party_id", party."display_name" as "party_name", document."document_number", document."document_date",
+    document."currency_code", document."original_amount", document."version", document."metadata",
+    void_link."related_transaction_id" as "reversal_transaction_id",
+    replacement."subledger_document_id" as "replacement_write_off_id",
+    replaced_original."subledger_document_id" as "replaces_write_off_id",
+    case when replacement."subledger_document_id" is not null then 'replaced' else document."status" end as "status"
+  from "erp_financials"."subledger_documents" document
+  join "erp_financials"."reporting_book_sources" source
+    on source."tenant_id" = document."tenant_id" and source."company_id" = document."company_id"
+   and source."book_id" = $3 and source."source_id" = document."source_id"
+  left join "erp_financials"."parties" party
+    on party."tenant_id" = document."tenant_id" and party."source_id" = document."source_id" and party."party_id" = document."party_id"
+  left join lateral (
+    select link."related_transaction_id" from "erp_financials"."journal_entry_links" link
+    where link."tenant_id" = document."tenant_id" and link."company_id" = document."company_id"
+      and link."source_id" = document."source_id" and link."original_transaction_id" = document."transaction_id"
+      and link."link_type" in ('reversal', 'void') limit 1
+  ) void_link on true
+  left join lateral (
+    select link."related_transaction_id" from "erp_financials"."journal_entry_links" link
+    where link."tenant_id" = document."tenant_id" and link."company_id" = document."company_id"
+      and link."source_id" = document."source_id" and link."original_transaction_id" = document."transaction_id"
+      and link."link_type" = 'replacement' limit 1
+  ) replacement_link on true
+  left join "erp_financials"."subledger_documents" replacement
+    on replacement."tenant_id" = document."tenant_id" and replacement."company_id" = document."company_id"
+   and replacement."source_id" = document."source_id" and replacement."transaction_id" = replacement_link."related_transaction_id"
+   and replacement."document_type" = 'write_off'
+  left join lateral (
+    select link."original_transaction_id" from "erp_financials"."journal_entry_links" link
+    where link."tenant_id" = document."tenant_id" and link."company_id" = document."company_id"
+      and link."source_id" = document."source_id" and link."related_transaction_id" = document."transaction_id"
+      and link."link_type" = 'replacement' limit 1
+  ) replaced_link on true
+  left join "erp_financials"."subledger_documents" replaced_original
+    on replaced_original."tenant_id" = document."tenant_id" and replaced_original."company_id" = document."company_id"
+   and replaced_original."source_id" = document."source_id" and replaced_original."transaction_id" = replaced_link."original_transaction_id"
+   and replaced_original."document_type" = 'write_off'
+  where document."tenant_id" = $1 and document."company_id" = $2 and document."document_type" = 'write_off'
+    and document."currency_code" = $4 and ($9::text is null or document."subledger_document_id" = $9)
+)
+select * from write_off_rows
+where ($5::text is null or "party_id" = $5) and ($6::text is null or "status" = $6)
+  and ($7::date is null or ("document_date", "write_off_id") < ($7::date, $8::text))
+order by "document_date" desc, "write_off_id" desc
+limit $10`,
+      [scope.tenantId, scope.companyId, scope.bookId, book.currencyCode, input.customerId, input.status,
+        page.date, page.id, input.writeOffId, page.limit + 1]
+    );
+    return toPage(result.rows.map(writeOffFromRow), page.limit, "write-offs", scope.bookId, (item) => ({
+      date: item.writeOffDate,
+      id: item.writeOffId
+    }));
+  });
+}
+
+async function getWriteOff(scope: Scope, writeOffId: string): Promise<WriteOffDetail> {
+  assertNonEmpty(writeOffId, "writeOffId");
+  const page = await listWriteOffs(scope, { writeOffId, limit: 1 });
+  const writeOff = page.items[0];
+  if (writeOff === undefined) {
+    throw new ErpFinancialsError("missing_document", `Write-off ${writeOffId} does not exist in reporting book ${scope.bookId}`, {
+      details: { bookId: scope.bookId, writeOffId }
+    });
+  }
+  return scope.database.transaction(async (client) => {
+    const result = await client.query(
+      `select transaction."memo", document."metadata", lifecycle."event_id" as "lifecycle_event_id",
+  lifecycle."actor_ref", lifecycle."approver_ref", lifecycle."request_id", lifecycle."reason_code"
+from "erp_financials"."subledger_documents" document
+join "erp_financials"."transactions" transaction
+  on transaction."tenant_id" = document."tenant_id" and transaction."source_id" = document."source_id"
+ and transaction."transaction_id" = document."transaction_id"
+join "erp_financials"."financial_lifecycle_events" lifecycle
+  on lifecycle."tenant_id" = document."tenant_id" and lifecycle."company_id" = document."company_id"
+ and lifecycle."source_id" = document."source_id" and lifecycle."event_id" = document."lifecycle_event_id"
+where document."tenant_id" = $1 and document."company_id" = $2 and document."source_id" = $3
+  and document."subledger_document_id" = $4 and document."document_type" = 'write_off'`,
+      [scope.tenantId, scope.companyId, writeOff.sourceId, writeOffId]
+    );
+    const row = requiredRow(result.rows[0], "write-off detail");
+    const provenance = requiredObjectProperty(row.metadata, "writeOffProvenance");
+    const memo = optionalString(row.memo);
+    return {
+      ...writeOff,
+      ...(memo === undefined ? {} : { memo }),
+      balanceType: string(provenance.balanceType, "writeOffProvenance.balanceType") as WriteOffDetail["balanceType"],
+      balanceAccountId: string(provenance.balanceAccountId, "writeOffProvenance.balanceAccountId"),
+      writeOffAccountId: string(provenance.writeOffAccountId, "writeOffProvenance.writeOffAccountId"),
+      lifecycle: lifecycleFromRow(row)
     };
   });
 }
@@ -1617,6 +2014,19 @@ function invoiceFromRow(row: Readonly<Record<string, unknown>>): InvoiceListItem
   };
 }
 
+function invoiceDeliveryFromRow(row: Readonly<Record<string, unknown>>): InvoiceDeliveryEvent {
+  const recipientRef = optionalString(row.recipient_ref);
+  return {
+    deliveryEventId: string(row.delivery_event_id, "delivery_event_id"),
+    invoiceId: string(row.invoice_id, "invoice_id"),
+    status: string(row.delivery_status, "delivery_status") as InvoiceDeliveryEvent["status"],
+    channel: string(row.channel, "channel"),
+    ...(recipientRef === undefined ? {} : { recipientRef }),
+    occurredAt: isoDateTime(row.occurred_at, "occurred_at"),
+    lifecycleEventId: string(row.lifecycle_event_id, "lifecycle_event_id")
+  };
+}
+
 function vendorBillFromRow(row: Readonly<Record<string, unknown>>): VendorBillListItem {
   const vendorName = optionalString(row.party_name);
   const documentNumber = optionalString(row.document_number);
@@ -1695,6 +2105,63 @@ function paymentFromRow(row: Readonly<Record<string, unknown>>): PaymentListItem
     unappliedAmount: unapplied,
     status: unapplied === "0.00" ? "applied" : unapplied === amount ? "unapplied" : "partial",
     matchedApplicationCount: integer(row.application_count, "application_count")
+  };
+}
+
+function paymentApplicationFromRow(row: Readonly<Record<string, unknown>>): PaymentApplicationListItem {
+  const endedLifecycleEventId = optionalString(row.ended_event_id);
+  const matchCandidateId = optionalString(row.match_candidate_id);
+  const evidence = optionalJson(row.match_evidence);
+  const matchProvenance = matchCandidateId === undefined ? undefined : {
+    matchCandidateId,
+    matchDecisionId: string(row.match_decision_id, "match_decision_id"),
+    method: string(row.match_method, "match_method") as PaymentApplicationMatchProvenance["method"],
+    score: decimal(row.match_score, "match_score"),
+    ...(evidence === undefined ? {} : { evidence })
+  };
+  return {
+    applicationId: string(row.application_id, "application_id"),
+    sourceId: string(row.source_id, "source_id"),
+    applicationType: string(row.application_type, "application_type") as PaymentApplicationListItem["applicationType"],
+    status: string(row.status, "status") as PaymentApplicationListItem["status"],
+    version: integer(row.version, "version"),
+    applicationDate: date(row.application_date, "application_date"),
+    sourcePaymentId: string(row.source_payment_id, "source_payment_id"),
+    targetDocumentId: string(row.target_document_id, "target_document_id"),
+    amount: money(row.applied_amount, "applied_amount"),
+    currencyCode: string(row.currency_code, "currency_code"),
+    appliedLifecycleEventId: string(row.applied_event_id, "applied_event_id"),
+    ...(endedLifecycleEventId === undefined ? {} : { endedLifecycleEventId }),
+    ...(matchProvenance === undefined ? {} : { matchProvenance })
+  };
+}
+
+function writeOffFromRow(row: Readonly<Record<string, unknown>>): WriteOffListItem {
+  const metadata = requiredObjectProperty(row.metadata, "writeOffProvenance");
+  const customerName = optionalString(row.party_name);
+  const documentNumber = optionalString(row.document_number);
+  const relatedInvoiceId = optionalString(metadata.relatedInvoiceId);
+  const reason = optionalString(metadata.reason);
+  const reversalTransactionId = optionalString(row.reversal_transaction_id);
+  const replacementWriteOffId = optionalString(row.replacement_write_off_id);
+  const replacesWriteOffId = optionalString(row.replaces_write_off_id);
+  return {
+    writeOffId: string(row.write_off_id, "write_off_id"),
+    sourceId: string(row.source_id, "source_id"),
+    transactionId: string(row.transaction_id, "transaction_id"),
+    customerId: string(row.party_id, "party_id"),
+    ...(customerName === undefined ? {} : { customerName }),
+    ...(relatedInvoiceId === undefined ? {} : { relatedInvoiceId }),
+    ...(documentNumber === undefined ? {} : { documentNumber }),
+    writeOffDate: date(row.document_date, "document_date"),
+    currencyCode: string(row.currency_code, "currency_code"),
+    amount: money(row.original_amount, "original_amount"),
+    status: string(row.status, "status") as WriteOffListItem["status"],
+    version: integer(row.version, "version"),
+    ...(reason === undefined ? {} : { reason }),
+    ...(reversalTransactionId === undefined ? {} : { reversalTransactionId }),
+    ...(replacementWriteOffId === undefined ? {} : { replacementWriteOffId }),
+    ...(replacesWriteOffId === undefined ? {} : { replacesWriteOffId })
   };
 }
 
@@ -2009,6 +2476,9 @@ function commercialLineFromRow(row: Readonly<Record<string, unknown>>): Commerci
   const taxCode = optionalString(row.tax_code);
   const servicePeriodStart = optionalDate(row.service_period_start, "service_period_start");
   const servicePeriodEnd = optionalDate(row.service_period_end, "service_period_end");
+  const unitCost = row.unit_cost === null || row.unit_cost === undefined
+    ? undefined
+    : decimal(row.unit_cost, "unit_cost");
   const dimensionRefs = typeof row.dimension_refs === "string" ? JSON.parse(row.dimension_refs) as JsonValue : row.dimension_refs as JsonValue;
   return {
     lineId: string(row.line_id, "line_id"),
@@ -2018,6 +2488,7 @@ function commercialLineFromRow(row: Readonly<Record<string, unknown>>): Commerci
     ...(description === undefined ? {} : { description }),
     quantity: decimal(row.quantity, "quantity"),
     unitAmount: money(row.unit_amount, "unit_amount"),
+    ...(unitCost === undefined ? {} : { unitCost }),
     discountAmount: money(row.discount_amount, "discount_amount"),
     ...(taxCode === undefined ? {} : { taxCode }),
     taxAmount: money(row.tax_amount, "tax_amount"),
@@ -2120,6 +2591,88 @@ function optionalString(value: unknown): string | undefined {
   if (value === null || value === undefined) return undefined;
   if (typeof value !== "string") throw new Error("Stored optional value must be a string");
   return value;
+}
+
+function isoDateTime(value: unknown, field: string): IsoDateTime {
+  const result = value instanceof Date ? value.toISOString() : string(value, field);
+  const parsed = new Date(result);
+  if (Number.isNaN(parsed.getTime()) || !/^\d{4}-\d{2}-\d{2}T/u.test(result)) {
+    throw new Error(`Stored ${field} must be an ISO date-time`);
+  }
+  return result;
+}
+
+function optionalJson(value: unknown): JsonValue | undefined {
+  if (value === null || value === undefined) return undefined;
+  return (typeof value === "string" ? JSON.parse(value) : value) as JsonValue;
+}
+
+function jsonObject(value: unknown, field: string): Readonly<Record<string, JsonValue>> {
+  const parsed = typeof value === "string" ? JSON.parse(value) as unknown : value;
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`Stored ${field} must be a JSON object`);
+  }
+  return parsed as Readonly<Record<string, JsonValue>>;
+}
+
+function requiredObjectProperty(value: unknown, property: string): Readonly<Record<string, JsonValue>> {
+  const object = jsonObject(value, "metadata");
+  return jsonObject(object[property], `metadata.${property}`);
+}
+
+function customerPaymentProvenanceFromMetadata(value: unknown): CustomerPaymentProvenanceReadModel | undefined {
+  const metadata = jsonObject(value, "metadata");
+  const raw = metadata.customerPaymentProvenance;
+  if (raw === undefined) return undefined;
+  const provenance = jsonObject(raw, "metadata.customerPaymentProvenance");
+  const bank = provenance.externalBankMatch === undefined
+    ? undefined
+    : jsonObject(provenance.externalBankMatch, "metadata.customerPaymentProvenance.externalBankMatch");
+  const deposit = provenance.deposit === undefined
+    ? undefined
+    : jsonObject(provenance.deposit, "metadata.customerPaymentProvenance.deposit");
+  const bankStatementLineId = optionalString(bank?.bankStatementLineId);
+  const providerReference = optionalString(bank?.providerReference);
+  const externalDepositReference = optionalString(deposit?.externalDepositReference);
+  return {
+    ...(bank === undefined ? {} : { externalBankMatch: {
+      externalMatchId: string(bank.externalMatchId, "externalMatchId"),
+      ...(bankStatementLineId === undefined ? {} : { bankStatementLineId }),
+      ...(providerReference === undefined ? {} : { providerReference }),
+      ...(bank.matchedAt === undefined ? {} : { matchedAt: isoDateTime(bank.matchedAt, "matchedAt") })
+    } }),
+    ...(deposit === undefined ? {} : { deposit: {
+      depositId: string(deposit.depositId, "depositId"),
+      ...(externalDepositReference === undefined ? {} : { externalDepositReference }),
+      ...(deposit.depositedAt === undefined ? {} : { depositedAt: isoDateTime(deposit.depositedAt, "depositedAt") })
+    } })
+  };
+}
+
+function refundProvenanceFromMetadata(value: unknown): AdjustmentDetail["refundProvenance"] | undefined {
+  if (value === undefined || value === null) return undefined;
+  const metadata = jsonObject(value, "metadata");
+  if (metadata.refundProvenance === undefined) return undefined;
+  const provenance = jsonObject(metadata.refundProvenance, "metadata.refundProvenance");
+  const relatedInvoiceId = optionalString(provenance.relatedInvoiceId);
+  const refundMethod = optionalString(provenance.refundMethod);
+  const lifecycleReference = optionalString(provenance.lifecycleReference);
+  return {
+    ...(relatedInvoiceId === undefined ? {} : { relatedInvoiceId }),
+    ...(refundMethod === undefined ? {} : { refundMethod }),
+    ...(lifecycleReference === undefined ? {} : { lifecycleReference })
+  };
+}
+
+function lifecycleFromRow(row: Readonly<Record<string, unknown>>): FinancialLifecycleProvenance {
+  const approverRef = optionalString(row.approver_ref);
+  return {
+    lifecycleEventId: string(row.lifecycle_event_id, "lifecycle_event_id"),
+    actorRef: string(row.actor_ref, "actor_ref"),
+    ...(approverRef === undefined ? {} : { approverRef }),
+    requestId: string(row.request_id, "request_id"),
+    reasonCode: string(row.reason_code, "reason_code")
+  };
 }
 
 function date(value: unknown, field: string): IsoDate {
