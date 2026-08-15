@@ -9,6 +9,7 @@ import type { FinancialOperationContext } from "./financial-lifecycle.js";
 
 export type ReportingBookStatus = "active" | "archived";
 export type ReportingBookSourceRole = "historical" | "active" | "adjustment";
+export type ReportingBookAccountRole = "header" | "posting";
 
 export type ReportingBook = {
   readonly bookId: string;
@@ -57,9 +58,11 @@ export type ReportingBookAccount = {
   readonly classification: AccountClassification;
   readonly accountType?: string;
   readonly accountSubtype?: string;
+  readonly accountRole: ReportingBookAccountRole;
   readonly parentBookAccountKey?: string;
   readonly currencyCode?: IsoCurrencyCode;
   readonly active: boolean;
+  readonly version: number;
   readonly createdAt: IsoDateTime;
   readonly updatedAt: IsoDateTime;
 };
@@ -73,9 +76,12 @@ export type DefineReportingBookAccountInput = {
   readonly classification: AccountClassification;
   readonly accountType?: string;
   readonly accountSubtype?: string;
+  readonly accountRole: ReportingBookAccountRole;
   readonly parentBookAccountKey?: string;
   readonly currencyCode?: IsoCurrencyCode;
   readonly active?: boolean;
+  /** Use 0 to create; pass the returned version for every subsequent mutation. */
+  readonly expectedVersion: number;
 };
 
 export type DefineReportingBookInput = {
@@ -148,17 +154,27 @@ async function defineBookAccount(
   assertNonEmpty(input.bookAccountKey, "bookAccountKey");
   assertNonEmpty(input.name, "name");
   assertClassification(input.classification);
+  assertAccountRole(input.accountRole);
+  assertExpectedVersion(input.expectedVersion);
+  if (input.accountNumber !== undefined) {
+    assertNonEmpty(input.accountNumber, "accountNumber");
+    if (input.accountNumber !== input.accountNumber.trim()) {
+      throw new ErpFinancialsError("invalid_input", "accountNumber must not have leading or trailing whitespace");
+    }
+  }
   if (input.parentBookAccountKey === input.bookAccountKey) {
     throw new ErpFinancialsError("invalid_account_hierarchy", "A reporting-book account cannot be its own parent");
   }
   const bookAccountId = stableId("book_account", tenantId, companyId, input.bookId, input.bookAccountKey);
   const timestamp = now();
-  return database.transaction(async (client) => {
+  try {
+    return await database.transaction(async (client) => {
     await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [
       `reporting-book-accounts:${tenantId}:${companyId}:${input.bookId}`
     ]);
     const bookAndParent = await client.query(
-      `select book."base_currency_code", parent."classification" as "parent_classification"
+      `select book."base_currency_code", parent."classification" as "parent_classification",
+  parent."account_role" as "parent_account_role", parent."active" as "parent_active"
 from "erp_financials"."reporting_books" book
 left join "erp_financials"."reporting_book_accounts" parent
   on parent."tenant_id" = book."tenant_id" and parent."company_id" = book."company_id" and parent."book_id" = book."book_id"
@@ -178,34 +194,102 @@ where book."tenant_id" = $1 and book."company_id" = $2 and book."book_id" = $3`,
     if (parentClassification !== undefined && parentClassification !== input.classification) {
       throw new ErpFinancialsError("invalid_account_hierarchy", "A book account and its parent must share a classification");
     }
+    if (input.parentBookAccountKey !== undefined &&
+      (bookRow.parent_account_role !== "header" || bookRow.parent_active !== true)) {
+      throw new ErpFinancialsError("invalid_account_hierarchy", "A reporting-book parent must be an active header account");
+    }
+    const mutationChecksum = accountMutationChecksum(input);
+    const currentResult = await client.query(
+      `select * from "erp_financials"."reporting_book_accounts"
+where "tenant_id" = $1 and "company_id" = $2 and "book_id" = $3 and "book_account_key" = $4
+for update`,
+      [tenantId, companyId, input.bookId, input.bookAccountKey]
+    );
+    const currentAccount = currentResult.rows[0];
+    if (currentAccount !== undefined && currentAccount.last_operation_request_id === input.operation.requestId) {
+      if (currentAccount.last_operation_checksum !== mutationChecksum) {
+        throw new ErpFinancialsError("idempotency_conflict", "The reporting-book account request id was reused with different input", {
+          details: { bookAccountKey: input.bookAccountKey, bookId: input.bookId, requestId: input.operation.requestId }
+        });
+      }
+      return reportingBookAccountFromRow(currentAccount);
+    }
+    const actualVersion = currentAccount === undefined ? 0 : integerField(currentAccount, "version");
+    if (actualVersion !== input.expectedVersion) {
+      throw new ErpFinancialsError("optimistic_concurrency_conflict", `Reporting-book account ${input.bookAccountKey} changed concurrently`, {
+        retryable: true,
+        details: { bookAccountKey: input.bookAccountKey, bookId: input.bookId, expectedVersion: input.expectedVersion, actualVersion }
+      });
+    }
     const result = await client.query(
       `insert into "erp_financials"."reporting_book_accounts" (
   "book_account_id", "tenant_id", "company_id", "book_id", "book_account_key", "account_number", "name",
-  "classification", "account_type", "account_subtype", "parent_book_account_key", "currency_code", "active",
-  "created_at", "updated_at"
-) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $14)
+  "classification", "account_type", "account_subtype", "account_role", "parent_book_account_key", "currency_code", "active",
+  "version", "last_operation_request_id", "last_operation_checksum", "created_at", "updated_at"
+) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 1, $16, $17, $15, $15)
 on conflict ("tenant_id", "company_id", "book_id", "book_account_key") do update
 set "account_number" = excluded."account_number", "name" = excluded."name", "account_type" = excluded."account_type",
-    "account_subtype" = excluded."account_subtype", "parent_book_account_key" = excluded."parent_book_account_key",
-    "active" = excluded."active", "updated_at" = excluded."updated_at"
+    "account_subtype" = excluded."account_subtype", "account_role" = excluded."account_role",
+    "parent_book_account_key" = excluded."parent_book_account_key", "active" = excluded."active",
+    "version" = case
+      when "erp_financials"."reporting_book_accounts"."last_operation_request_id" = excluded."last_operation_request_id"
+       and "erp_financials"."reporting_book_accounts"."last_operation_checksum" = excluded."last_operation_checksum"
+      then "erp_financials"."reporting_book_accounts"."version"
+      else "erp_financials"."reporting_book_accounts"."version" + 1 end,
+    "last_operation_request_id" = excluded."last_operation_request_id",
+    "last_operation_checksum" = excluded."last_operation_checksum",
+    "updated_at" = case
+      when "erp_financials"."reporting_book_accounts"."last_operation_request_id" = excluded."last_operation_request_id"
+       and "erp_financials"."reporting_book_accounts"."last_operation_checksum" = excluded."last_operation_checksum"
+      then "erp_financials"."reporting_book_accounts"."updated_at" else excluded."updated_at" end
 where "erp_financials"."reporting_book_accounts"."classification" = excluded."classification"
   and "erp_financials"."reporting_book_accounts"."currency_code" is not distinct from excluded."currency_code"
+  and (("erp_financials"."reporting_book_accounts"."last_operation_request_id" = excluded."last_operation_request_id"
+    and "erp_financials"."reporting_book_accounts"."last_operation_checksum" = excluded."last_operation_checksum")
+    or ("erp_financials"."reporting_book_accounts"."last_operation_request_id" <> excluded."last_operation_request_id"
+      and "erp_financials"."reporting_book_accounts"."version" = $18))
 returning *`,
       [bookAccountId, tenantId, companyId, input.bookId, input.bookAccountKey, input.accountNumber, input.name,
-        input.classification, input.accountType, input.accountSubtype, input.parentBookAccountKey, input.currencyCode,
-        input.active ?? true, timestamp]
+        input.classification, input.accountType, input.accountSubtype, input.accountRole, input.parentBookAccountKey,
+        input.currencyCode, input.active ?? true, timestamp, input.operation.requestId, mutationChecksum,
+        input.expectedVersion]
     );
     const row = result.rows[0];
     if (row === undefined) {
-      throw new ErpFinancialsError(
-        "idempotency_conflict",
-        `Reporting-book account ${input.bookAccountKey} cannot change classification or currency`,
-        { details: { bookAccountKey: input.bookAccountKey, bookId: input.bookId } }
+      const concurrentResult = await client.query(
+        `select "version", "last_operation_request_id", "last_operation_checksum"
+from "erp_financials"."reporting_book_accounts"
+where "tenant_id" = $1 and "company_id" = $2 and "book_id" = $3 and "book_account_key" = $4`,
+        [tenantId, companyId, input.bookId, input.bookAccountKey]
       );
+      const current = concurrentResult.rows[0];
+      if (current !== undefined && current.last_operation_request_id === input.operation.requestId &&
+        current.last_operation_checksum !== mutationChecksum) {
+        throw new ErpFinancialsError("idempotency_conflict", "The reporting-book account request id was reused with different input", {
+          details: { bookAccountKey: input.bookAccountKey, bookId: input.bookId, requestId: input.operation.requestId }
+        });
+      }
+      throw new ErpFinancialsError("optimistic_concurrency_conflict", `Reporting-book account ${input.bookAccountKey} changed concurrently`, {
+        retryable: true,
+        details: {
+          bookAccountKey: input.bookAccountKey,
+          bookId: input.bookId,
+          expectedVersion: input.expectedVersion,
+          ...(current === undefined ? {} : { actualVersion: integerField(current, "version") })
+        }
+      });
     }
     await assertBookAccountAcyclic(client, tenantId, companyId, input.bookId, input.bookAccountKey);
     return reportingBookAccountFromRow(row);
-  });
+    });
+  } catch (cause) {
+    if (isAccountNumberUniqueViolation(cause)) {
+      throw new ErpFinancialsError("invalid_input", `Account number ${input.accountNumber ?? ""} is already used in reporting book ${input.bookId}`, {
+        details: { accountNumber: input.accountNumber ?? "", bookId: input.bookId }, cause
+      });
+    }
+    throw cause;
+  }
 }
 
 async function defineBook(
@@ -306,7 +390,8 @@ async function mapAccount(
   const timestamp = now();
   return database.transaction(async (client) => {
     const compatibility = await client.query(
-      `select source_account."classification" as "source_classification", book_account."classification" as "book_classification"
+      `select source_account."classification" as "source_classification", book_account."classification" as "book_classification",
+  book_account."account_role" as "book_account_role", book_account."active" as "book_account_active"
 from "erp_financials"."reporting_book_sources" source
 join "erp_financials"."accounts" source_account
   on source_account."tenant_id" = source."tenant_id" and source_account."source_id" = source."source_id" and source_account."account_id" = $5
@@ -322,6 +407,9 @@ where source."tenant_id" = $1 and source."company_id" = $2 and source."book_id" 
     }
     if (compatibilityRow.source_classification !== compatibilityRow.book_classification) {
       throw new ErpFinancialsError("invalid_account_hierarchy", "A source account can only map to a book account with the same classification");
+    }
+    if (compatibilityRow.book_account_role !== "posting" || compatibilityRow.book_account_active !== true) {
+      throw new ErpFinancialsError("invalid_account_hierarchy", "A source account can only map to an active posting account");
     }
     const result = await client.query(
       `insert into "erp_financials"."reporting_book_account_mappings" (
@@ -437,12 +525,37 @@ function reportingBookAccountFromRow(row: Readonly<Record<string, unknown>>): Re
     classification: stringField(row, "classification") as AccountClassification,
     ...(accountType === undefined ? {} : { accountType }),
     ...(accountSubtype === undefined ? {} : { accountSubtype }),
+    accountRole: reportingBookAccountRoleField(row, "account_role"),
     ...(parentBookAccountKey === undefined ? {} : { parentBookAccountKey }),
     ...(currencyCode === undefined ? {} : { currencyCode }),
     active: row.active === true,
+    version: integerField(row, "version"),
     createdAt: dateTimeField(row, "created_at"),
     updatedAt: dateTimeField(row, "updated_at")
   };
+}
+
+function accountMutationChecksum(input: DefineReportingBookAccountInput): string {
+  return createHash("sha256").update(JSON.stringify({
+    bookId: input.bookId,
+    bookAccountKey: input.bookAccountKey,
+    accountNumber: input.accountNumber ?? null,
+    name: input.name,
+    classification: input.classification,
+    accountType: input.accountType ?? null,
+    accountSubtype: input.accountSubtype ?? null,
+    accountRole: input.accountRole,
+    parentBookAccountKey: input.parentBookAccountKey ?? null,
+    currencyCode: input.currencyCode ?? null,
+    active: input.active ?? true,
+    expectedVersion: input.expectedVersion
+  })).digest("hex");
+}
+
+function isAccountNumberUniqueViolation(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const error = value as { readonly code?: unknown; readonly constraint?: unknown };
+  return error.code === "23505" && error.constraint === "reporting_book_accounts_number_uidx";
 }
 
 async function assertBookAccountAcyclic(
@@ -496,6 +609,18 @@ function assertClassification(value: string): asserts value is AccountClassifica
   }
 }
 
+function assertAccountRole(value: string): asserts value is ReportingBookAccountRole {
+  if (value !== "header" && value !== "posting") {
+    throw new ErpFinancialsError("invalid_input", "accountRole must be header or posting");
+  }
+}
+
+function assertExpectedVersion(value: number): void {
+  if (!Number.isInteger(value) || value < 0) {
+    throw new ErpFinancialsError("invalid_input", "expectedVersion must be a nonnegative integer");
+  }
+}
+
 function assertWindow(from: IsoDate | undefined, through: IsoDate | undefined): void {
   if (from !== undefined) assertDate(from, "effectiveFrom");
   if (through !== undefined) assertDate(through, "effectiveThrough");
@@ -538,6 +663,22 @@ function optionalStringField(row: Readonly<Record<string, unknown>>, field: stri
   const value = row[field];
   if (value === null || value === undefined) return undefined;
   return stringField(row, field);
+}
+
+function reportingBookAccountRoleField(
+  row: Readonly<Record<string, unknown>>,
+  field: string
+): ReportingBookAccountRole {
+  const value = stringField(row, field);
+  if (value !== "header" && value !== "posting") throw new Error(`Stored ${field} must be header or posting`);
+  return value;
+}
+
+function integerField(row: Readonly<Record<string, unknown>>, field: string): number {
+  const value = row[field];
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  if (!Number.isInteger(parsed) || parsed < 0) throw new Error(`Stored ${field} must be a nonnegative integer`);
+  return parsed;
 }
 
 function dateTimeField(row: Readonly<Record<string, unknown>>, field: string): IsoDateTime {

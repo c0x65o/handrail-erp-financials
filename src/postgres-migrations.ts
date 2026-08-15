@@ -131,6 +131,10 @@ const migrationFiles = {
   receivablesProvenanceV15: new URL(
     "../migrations/future-erp/20260815010000_add_receivables_provenance_reads.sql",
     import.meta.url
+  ),
+  generalLedgerContractV16: new URL(
+    "../migrations/future-erp/20260815020000_add_general_ledger_contract.sql",
+    import.meta.url
   )
 } as const;
 
@@ -222,6 +226,13 @@ export const POSTGRES_MIGRATIONS: readonly PostgresMigrationDefinition[] = [
     14,
     15,
     migrationFiles.receivablesProvenanceV15
+  ),
+  migration(
+    "20260815020000_add_general_ledger_contract",
+    "Add bounded general-ledger reads and versioned reporting-book accounts",
+    15,
+    16,
+    migrationFiles.generalLedgerContractV16
   )
 ] as const;
 

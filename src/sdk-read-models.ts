@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { ErpFinancialsError } from "./sdk-errors.js";
 
 import type {
@@ -11,6 +13,7 @@ import type {
 } from "./canonical-model.js";
 import type { ErpFinancialsTransactionRunner } from "./erp-financials-service.js";
 import type { PostgresQueryClient } from "./postgres-storage.js";
+import type { ReportingBookAccountRole } from "./reporting-books.js";
 
 export type PageRequest = {
   readonly limit?: number;
@@ -344,12 +347,58 @@ export type GeneralLedgerSummary = {
   readonly difference: DecimalString;
 };
 
+export type GeneralLedgerPolarity = "debit" | "credit";
+
+/**
+ * One validated filter contract is deliberately shared by the ledger page and
+ * its summary cards so a host cannot accidentally summarize a different set of
+ * postings than the rows it displays.
+ */
+export type GeneralLedgerFilters = {
+  readonly periodStart: IsoDate;
+  readonly periodEnd: IsoDate;
+  readonly accountKey?: string;
+  readonly sourceId?: string;
+  readonly transactionType?: string;
+  /** Matches a canonical class dimension by dimensionId or sourceDimensionId. */
+  readonly classId?: string;
+  /** Generic canonical dimension filter; kind and id must be supplied together. */
+  readonly dimensionKind?: string;
+  readonly dimensionId?: string;
+  readonly polarity?: GeneralLedgerPolarity;
+  /** Literal, case-insensitive search. Wildcard characters have no special meaning. */
+  readonly search?: string;
+};
+
+export type GeneralLedgerDimensionProvenance = {
+  readonly dimensionKind: string;
+  readonly dimensionId?: string;
+  readonly sourceDimensionId?: string;
+  readonly name?: string;
+};
+
+export type GeneralLedgerSourceProvenance = {
+  readonly sourceId: string;
+  readonly sourceRole: "historical" | "active" | "adjustment";
+  readonly sourceSystem: string;
+  readonly providerEnvironment: string;
+  readonly sourceTransactionType: string;
+  readonly sourceTransactionId: string;
+  readonly sourcePostingId: string;
+  readonly sourceObjectType?: string;
+  readonly sourceObjectId?: string;
+  readonly sourceUpdatedAt?: IsoDateTime;
+  readonly checksum?: string;
+};
+
 export type GeneralLedgerLine = {
   readonly postingId: string;
   readonly sourceId: string;
   readonly transactionId: string;
   readonly transactionNumber?: string;
   readonly transactionDate: IsoDate;
+  readonly postingDate: IsoDate;
+  readonly transactionType: string;
   readonly accountId: string;
   readonly bookAccountKey: string;
   readonly accountNumber?: string;
@@ -361,6 +410,10 @@ export type GeneralLedgerLine = {
   readonly creditAmount: DecimalString;
   readonly netAmount: DecimalString;
   readonly currencyCode: IsoCurrencyCode;
+  readonly dimensions: readonly GeneralLedgerDimensionProvenance[];
+  /** Number of canonical dimensions omitted after the public per-row bound. */
+  readonly omittedDimensionCount: number;
+  readonly sourceProvenance: GeneralLedgerSourceProvenance;
 };
 
 export type ChartOfAccountsItem = {
@@ -371,6 +424,10 @@ export type ChartOfAccountsItem = {
   readonly classification: AccountClassification;
   readonly type?: string;
   readonly subtype?: string;
+  /** Present for a reporting-book-owned account; absent for an unmapped source fallback. */
+  readonly accountRole?: ReportingBookAccountRole;
+  /** Current mutation version for a reporting-book-owned account. */
+  readonly version?: number;
   readonly parentBookAccountKey?: string;
   readonly active: boolean;
   readonly debitAmount: DecimalString;
@@ -496,8 +553,8 @@ export type FinancialReadModels = {
   getAdjustment(adjustmentId: string): Promise<AdjustmentDetail>;
   listWriteOffs(input?: PageRequest & { readonly customerId?: string; readonly status?: WriteOffListItem["status"] }): Promise<Page<WriteOffListItem>>;
   getWriteOff(writeOffId: string): Promise<WriteOffDetail>;
-  listGeneralLedger(input: PageRequest & { readonly periodStart: IsoDate; readonly periodEnd: IsoDate; readonly accountKey?: string }): Promise<Page<GeneralLedgerLine>>;
-  getGeneralLedgerSummary(input: { readonly periodStart: IsoDate; readonly periodEnd: IsoDate }): Promise<GeneralLedgerSummary>;
+  listGeneralLedger(input: PageRequest & GeneralLedgerFilters): Promise<Page<GeneralLedgerLine>>;
+  getGeneralLedgerSummary(input: GeneralLedgerFilters): Promise<GeneralLedgerSummary>;
   listChartOfAccounts(input?: { readonly asOfDate?: IsoDate; readonly includeInactive?: boolean }): Promise<readonly ChartOfAccountsItem[]>;
   getDashboardSummary(input: { readonly periodStart: IsoDate; readonly asOfDate: IsoDate }): Promise<FinancialDashboardSummary>;
   getFinancialStatement(input: { readonly reportName: FinancialStatementName; readonly periodStart: IsoDate; readonly periodEnd: IsoDate; readonly asOfDate?: IsoDate }): Promise<FinancialStatement>;
@@ -1596,18 +1653,85 @@ from payments`,
 
 async function listGeneralLedger(
   scope: Scope,
-  input: PageRequest & { readonly periodStart: IsoDate; readonly periodEnd: IsoDate; readonly accountKey?: string }
+  input: PageRequest & GeneralLedgerFilters
 ): Promise<Page<GeneralLedgerLine>> {
-  assertWindow(input.periodStart, input.periodEnd);
-  const page = pageInput(input, "general-ledger", scope.bookId);
+  const filters = generalLedgerFilters(input);
+  const pageKind = `general-ledger:${generalLedgerFilterFingerprint(filters)}`;
+  const page = pageInput(input, pageKind, scope.bookId);
   return scope.database.transaction(async (client) => {
     const book = await resolveBook(client, scope);
     const result = await client.query(
-      `select posting."posting_id", posting."source_id", posting."transaction_id", transaction."transaction_number",
-  transaction."transaction_date", posting."account_id",
+      `select posting."posting_id", posting."source_id", posting."source_posting_id", posting."transaction_id",
+  transaction."source_transaction_id", transaction."source_transaction_type", transaction."transaction_number",
+  transaction."transaction_date", posting."posting_date", posting."account_id",
   coalesce(mapping."book_account_key", posting."source_id" || ':' || posting."account_id") as "book_account_key",
   account."account_number", account."name" as "account_name", posting."party_id", posting."item_id",
-  line."description", posting."debit_amount", posting."credit_amount", posting."net_amount", posting."currency_code"
+  line."description", posting."debit_amount", posting."credit_amount", posting."net_amount", posting."currency_code",
+  posting."dimension_refs", source."source_role", accounting_source."source_system",
+  accounting_source."provider_environment",
+  coalesce(posting."source_payload_ref", transaction."source_payload_ref") as "source_payload_ref"
+from "erp_financials"."ledger_postings" posting
+join "erp_financials"."transactions" transaction
+  on transaction."tenant_id" = posting."tenant_id" and transaction."source_id" = posting."source_id" and transaction."transaction_id" = posting."transaction_id"
+join "erp_financials"."accounts" account
+  on account."tenant_id" = posting."tenant_id" and account."source_id" = posting."source_id" and account."account_id" = posting."account_id"
+join "erp_financials"."accounting_sources" accounting_source
+  on accounting_source."tenant_id" = posting."tenant_id" and accounting_source."source_id" = posting."source_id"
+join "erp_financials"."reporting_book_sources" source
+  on source."tenant_id" = $1 and source."company_id" = $2 and source."book_id" = $3 and source."source_id" = posting."source_id"
+ and (source."effective_from" is null or source."effective_from" <= posting."posting_date")
+ and (source."effective_through" is null or source."effective_through" >= posting."posting_date")
+left join "erp_financials"."reporting_book_account_mappings" mapping
+  on mapping."tenant_id" = $1 and mapping."company_id" = $2 and mapping."book_id" = $3
+ and mapping."source_id" = posting."source_id" and mapping."account_id" = posting."account_id"
+left join "erp_financials"."transaction_lines" line
+  on line."tenant_id" = posting."tenant_id" and line."source_id" = posting."source_id" and line."transaction_line_id" = posting."transaction_line_id"
+left join "erp_financials"."parties" party
+  on party."tenant_id" = posting."tenant_id" and party."source_id" = posting."source_id" and party."party_id" = posting."party_id"
+where posting."tenant_id" = $1 and posting."accounting_basis" = $4 and posting."currency_code" = $5
+  and posting."posting_date" between $6::date and $7::date
+  and ($8::text is null or coalesce(mapping."book_account_key", posting."source_id" || ':' || posting."account_id") = $8)
+  and ($9::text is null or posting."source_id" = $9)
+  and ($10::text is null or transaction."source_transaction_type" = $10)
+  and ($11::text is null or exists (
+    select 1 from jsonb_array_elements(coalesce(posting."dimension_refs", '[]'::jsonb)) class_ref
+    where lower(class_ref ->> 'dimensionKind') = 'class'
+      and (class_ref ->> 'dimensionId' = $11 or class_ref ->> 'sourceDimensionId' = $11)
+  ))
+  and ($12::text is null or exists (
+    select 1 from jsonb_array_elements(coalesce(posting."dimension_refs", '[]'::jsonb)) dimension_ref
+    where dimension_ref ->> 'dimensionKind' = $12
+      and (dimension_ref ->> 'dimensionId' = $13 or dimension_ref ->> 'sourceDimensionId' = $13)
+  ))
+  and ($14::text is null or ($14 = 'debit' and posting."debit_amount" > 0) or ($14 = 'credit' and posting."credit_amount" > 0))
+  and ($15::text is null or strpos(lower(concat_ws(' ', transaction."transaction_number", transaction."memo",
+    line."description", account."account_number", account."name", party."display_name", posting."posting_id",
+    transaction."transaction_id")), lower($15)) > 0)
+  and ($16::date is null or (posting."posting_date", posting."posting_id") < ($16::date, $17::text))
+order by posting."posting_date" desc, posting."posting_id" desc
+limit $18`,
+      [scope.tenantId, scope.companyId, scope.bookId, book.accountingBasis, book.currencyCode,
+        filters.periodStart, filters.periodEnd, filters.accountKey, filters.sourceId, filters.transactionType,
+        filters.classId, filters.dimensionKind, filters.dimensionId, filters.polarity, filters.search,
+        page.date, page.id, page.limit + 1]
+    );
+    return toPage(result.rows.map(ledgerLineFromRow), page.limit, pageKind, scope.bookId, (item) => ({
+      date: item.postingDate,
+      id: item.postingId
+    }));
+  });
+}
+
+async function getGeneralLedgerSummary(
+  scope: Scope,
+  input: GeneralLedgerFilters
+): Promise<GeneralLedgerSummary> {
+  const filters = generalLedgerFilters(input);
+  return scope.database.transaction(async (client) => {
+    const book = await resolveBook(client, scope);
+    const result = await client.query(
+      `select count(*)::integer as "posting_count", coalesce(sum(posting."debit_amount"), 0) as "debits",
+  coalesce(sum(posting."credit_amount"), 0) as "credits"
 from "erp_financials"."ledger_postings" posting
 join "erp_financials"."transactions" transaction
   on transaction."tenant_id" = posting."tenant_id" and transaction."source_id" = posting."source_id" and transaction."transaction_id" = posting."transaction_id"
@@ -1622,47 +1746,37 @@ left join "erp_financials"."reporting_book_account_mappings" mapping
  and mapping."source_id" = posting."source_id" and mapping."account_id" = posting."account_id"
 left join "erp_financials"."transaction_lines" line
   on line."tenant_id" = posting."tenant_id" and line."source_id" = posting."source_id" and line."transaction_line_id" = posting."transaction_line_id"
+left join "erp_financials"."parties" party
+  on party."tenant_id" = posting."tenant_id" and party."source_id" = posting."source_id" and party."party_id" = posting."party_id"
 where posting."tenant_id" = $1 and posting."accounting_basis" = $4 and posting."currency_code" = $5
   and posting."posting_date" between $6::date and $7::date
   and ($8::text is null or coalesce(mapping."book_account_key", posting."source_id" || ':' || posting."account_id") = $8)
-  and ($9::date is null or (posting."posting_date", posting."posting_id") < ($9::date, $10::text))
-order by posting."posting_date" desc, posting."posting_id" desc
-limit $11`,
-      [scope.tenantId, scope.companyId, scope.bookId, book.accountingBasis, book.currencyCode, input.periodStart, input.periodEnd, input.accountKey, page.date, page.id, page.limit + 1]
-    );
-    return toPage(result.rows.map(ledgerLineFromRow), page.limit, "general-ledger", scope.bookId, (item) => ({
-      date: item.transactionDate,
-      id: item.postingId
-    }));
-  });
-}
-
-async function getGeneralLedgerSummary(
-  scope: Scope,
-  input: { readonly periodStart: IsoDate; readonly periodEnd: IsoDate }
-): Promise<GeneralLedgerSummary> {
-  assertWindow(input.periodStart, input.periodEnd);
-  return scope.database.transaction(async (client) => {
-    const book = await resolveBook(client, scope);
-    const result = await client.query(
-      `select count(*)::integer as "posting_count", coalesce(sum(posting."debit_amount"), 0) as "debits",
-  coalesce(sum(posting."credit_amount"), 0) as "credits"
-from "erp_financials"."ledger_postings" posting
-join "erp_financials"."reporting_book_sources" source
-  on source."tenant_id" = $1 and source."company_id" = $2 and source."book_id" = $3 and source."source_id" = posting."source_id"
- and (source."effective_from" is null or source."effective_from" <= posting."posting_date")
- and (source."effective_through" is null or source."effective_through" >= posting."posting_date")
-where posting."tenant_id" = $1 and posting."accounting_basis" = $4 and posting."currency_code" = $5
-  and posting."posting_date" between $6::date and $7::date`,
+  and ($9::text is null or posting."source_id" = $9)
+  and ($10::text is null or transaction."source_transaction_type" = $10)
+  and ($11::text is null or exists (
+    select 1 from jsonb_array_elements(coalesce(posting."dimension_refs", '[]'::jsonb)) class_ref
+    where lower(class_ref ->> 'dimensionKind') = 'class'
+      and (class_ref ->> 'dimensionId' = $11 or class_ref ->> 'sourceDimensionId' = $11)
+  ))
+  and ($12::text is null or exists (
+    select 1 from jsonb_array_elements(coalesce(posting."dimension_refs", '[]'::jsonb)) dimension_ref
+    where dimension_ref ->> 'dimensionKind' = $12
+      and (dimension_ref ->> 'dimensionId' = $13 or dimension_ref ->> 'sourceDimensionId' = $13)
+  ))
+  and ($14::text is null or ($14 = 'debit' and posting."debit_amount" > 0) or ($14 = 'credit' and posting."credit_amount" > 0))
+  and ($15::text is null or strpos(lower(concat_ws(' ', transaction."transaction_number", transaction."memo",
+    line."description", account."account_number", account."name", party."display_name", posting."posting_id",
+    transaction."transaction_id")), lower($15)) > 0)`,
       [scope.tenantId, scope.companyId, scope.bookId, book.accountingBasis, book.currencyCode,
-        input.periodStart, input.periodEnd]
+        filters.periodStart, filters.periodEnd, filters.accountKey, filters.sourceId, filters.transactionType,
+        filters.classId, filters.dimensionKind, filters.dimensionId, filters.polarity, filters.search]
     );
     const row = requiredRow(result.rows[0], "general ledger summary");
     const totalDebits = money(row.debits, "debits");
     const totalCredits = money(row.credits, "credits");
     return {
-      periodStart: input.periodStart,
-      periodEnd: input.periodEnd,
+      periodStart: filters.periodStart,
+      periodEnd: filters.periodEnd,
       currencyCode: book.currencyCode,
       postingCount: integer(row.posting_count, "posting_count"),
       totalDebits,
@@ -1688,6 +1802,7 @@ async function listChartOfAccounts(
   coalesce(min(book_account."classification"), min(account."classification")) as "classification",
   coalesce(min(book_account."account_type"), min(account."type")) as "account_type",
   coalesce(min(book_account."account_subtype"), min(account."subtype")) as "account_subtype",
+  min(book_account."account_role") as "account_role", min(book_account."version") as "version",
   min(book_account."parent_book_account_key") as "parent_book_account_key",
   coalesce(bool_or(book_account."active"), bool_or(account."active")) as "active",
   coalesce(sum(posting."debit_amount"), 0) as "debit_amount",
@@ -1714,7 +1829,7 @@ order by min(account."account_number") nulls last, min(account."name"), "book_ac
     );
     const defined = await client.query(
       `select "book_account_key", "account_number", "name" as "account_name", "classification",
-  "account_type", "account_subtype", "parent_book_account_key", "active"
+  "account_type", "account_subtype", "account_role", "version", "parent_book_account_key", "active"
 from "erp_financials"."reporting_book_accounts"
 where "tenant_id" = $1 and "company_id" = $2 and "book_id" = $3 and ($4::boolean or "active")
 order by "account_number" nulls last, "name", "book_account_key"`,
@@ -2223,6 +2338,8 @@ function adjustmentApplicationFromRow(row: Readonly<Record<string, unknown>>): A
 }
 
 function ledgerLineFromRow(row: Readonly<Record<string, unknown>>): GeneralLedgerLine {
+  const dimensions = generalLedgerDimensions(row.dimension_refs);
+  const sourcePayloadRef = optionalRecord(row.source_payload_ref, "source_payload_ref");
   const optionalFields = {
     transactionNumber: optionalString(row.transaction_number),
     accountNumber: optionalString(row.account_number),
@@ -2236,6 +2353,8 @@ function ledgerLineFromRow(row: Readonly<Record<string, unknown>>): GeneralLedge
     transactionId: string(row.transaction_id, "transaction_id"),
     ...(optionalFields.transactionNumber === undefined ? {} : { transactionNumber: optionalFields.transactionNumber }),
     transactionDate: date(row.transaction_date, "transaction_date"),
+    postingDate: date(row.posting_date, "posting_date"),
+    transactionType: boundedStoredString(row.source_transaction_type, "source_transaction_type", 200),
     accountId: string(row.account_id, "account_id"),
     bookAccountKey: string(row.book_account_key, "book_account_key"),
     ...(optionalFields.accountNumber === undefined ? {} : { accountNumber: optionalFields.accountNumber }),
@@ -2246,14 +2365,138 @@ function ledgerLineFromRow(row: Readonly<Record<string, unknown>>): GeneralLedge
     debitAmount: money(row.debit_amount, "debit_amount"),
     creditAmount: money(row.credit_amount, "credit_amount"),
     netAmount: money(row.net_amount, "net_amount"),
-    currencyCode: string(row.currency_code, "currency_code")
+    currencyCode: string(row.currency_code, "currency_code"),
+    dimensions: dimensions.slice(0, GENERAL_LEDGER_MAX_DIMENSIONS),
+    omittedDimensionCount: Math.max(0, dimensions.length - GENERAL_LEDGER_MAX_DIMENSIONS),
+    sourceProvenance: {
+      sourceId: string(row.source_id, "source_id"),
+      sourceRole: reportingBookSourceRole(row.source_role),
+      sourceSystem: boundedStoredString(row.source_system, "source_system", 200),
+      providerEnvironment: boundedStoredString(row.provider_environment, "provider_environment", 100),
+      sourceTransactionType: boundedStoredString(row.source_transaction_type, "source_transaction_type", 200),
+      sourceTransactionId: boundedStoredString(row.source_transaction_id, "source_transaction_id", 300),
+      sourcePostingId: boundedStoredString(row.source_posting_id, "source_posting_id", 300),
+      ...sourceRefFields(sourcePayloadRef)
+    }
   };
+}
+
+const GENERAL_LEDGER_MAX_FILTER_TEXT = 200;
+const GENERAL_LEDGER_MAX_SEARCH_TEXT = 100;
+const GENERAL_LEDGER_MAX_DIMENSIONS = 20;
+const GENERAL_LEDGER_MAX_PROVENANCE_TEXT = 300;
+
+type ValidatedGeneralLedgerFilters = GeneralLedgerFilters;
+
+function generalLedgerFilters(input: GeneralLedgerFilters): ValidatedGeneralLedgerFilters {
+  assertWindow(input.periodStart, input.periodEnd);
+  const accountKey = ledgerFilterText(input.accountKey, "accountKey");
+  const sourceId = ledgerFilterText(input.sourceId, "sourceId");
+  const transactionType = ledgerFilterText(input.transactionType, "transactionType");
+  const classId = ledgerFilterText(input.classId, "classId");
+  const dimensionKind = ledgerFilterText(input.dimensionKind, "dimensionKind");
+  const dimensionId = ledgerFilterText(input.dimensionId, "dimensionId");
+  if ((dimensionKind === undefined) !== (dimensionId === undefined)) {
+    throw new ErpFinancialsError("invalid_input", "dimensionKind and dimensionId must be supplied together");
+  }
+  if (input.polarity !== undefined && !new Set<string>(["debit", "credit"]).has(input.polarity)) {
+    throw new ErpFinancialsError("invalid_input", "polarity must be debit or credit");
+  }
+  const search = ledgerFilterText(input.search, "search", GENERAL_LEDGER_MAX_SEARCH_TEXT);
+  return {
+    periodStart: input.periodStart,
+    periodEnd: input.periodEnd,
+    ...(accountKey === undefined ? {} : { accountKey }),
+    ...(sourceId === undefined ? {} : { sourceId }),
+    ...(transactionType === undefined ? {} : { transactionType }),
+    ...(classId === undefined ? {} : { classId }),
+    ...(dimensionKind === undefined ? {} : { dimensionKind }),
+    ...(dimensionId === undefined ? {} : { dimensionId }),
+    ...(input.polarity === undefined ? {} : { polarity: input.polarity }),
+    ...(search === undefined ? {} : { search })
+  };
+}
+
+function ledgerFilterText(value: string | undefined, field: string, max = GENERAL_LEDGER_MAX_FILTER_TEXT): string | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.trim();
+  if (normalized.length === 0 || normalized.length > max) {
+    throw new ErpFinancialsError("invalid_input", `${field} must contain between 1 and ${String(max)} characters`);
+  }
+  return normalized;
+}
+
+function generalLedgerFilterFingerprint(filters: ValidatedGeneralLedgerFilters): string {
+  return createHash("sha256").update(JSON.stringify(filters)).digest("hex").slice(0, 20);
+}
+
+function generalLedgerDimensions(value: unknown): readonly GeneralLedgerDimensionProvenance[] {
+  const parsed = typeof value === "string" ? JSON.parse(value) as unknown : value;
+  if (parsed === null || parsed === undefined) return [];
+  if (!Array.isArray(parsed)) throw new Error("Stored dimension_refs must be an array");
+  return parsed.map((entry, index) => {
+    if (!isRecord(entry)) throw new Error(`Stored dimension_refs[${String(index)}] must be an object`);
+    const dimensionKind = boundedStoredString(entry.dimensionKind, `dimension_refs[${String(index)}].dimensionKind`, 200);
+    const dimensionId = optionalBoundedStoredString(entry.dimensionId, `dimension_refs[${String(index)}].dimensionId`);
+    const sourceDimensionId = optionalBoundedStoredString(entry.sourceDimensionId, `dimension_refs[${String(index)}].sourceDimensionId`);
+    const name = optionalBoundedStoredString(entry.name, `dimension_refs[${String(index)}].name`);
+    return {
+      dimensionKind,
+      ...(dimensionId === undefined ? {} : { dimensionId }),
+      ...(sourceDimensionId === undefined ? {} : { sourceDimensionId }),
+      ...(name === undefined ? {} : { name })
+    };
+  });
+}
+
+function sourceRefFields(value: Readonly<Record<string, unknown>> | undefined): Partial<GeneralLedgerSourceProvenance> {
+  if (value === undefined) return {};
+  const sourceObjectType = optionalBoundedStoredString(value.sourceObjectType, "source_payload_ref.sourceObjectType");
+  const sourceObjectId = optionalBoundedStoredString(value.sourceObjectId, "source_payload_ref.sourceObjectId");
+  const checksum = optionalBoundedStoredString(value.checksum, "source_payload_ref.checksum");
+  const sourceUpdatedAtValue = optionalString(value.sourceUpdatedAt);
+  if (sourceUpdatedAtValue !== undefined && Number.isNaN(Date.parse(sourceUpdatedAtValue))) {
+    throw new Error("Stored source_payload_ref.sourceUpdatedAt must be a date-time");
+  }
+  return {
+    ...(sourceObjectType === undefined ? {} : { sourceObjectType }),
+    ...(sourceObjectId === undefined ? {} : { sourceObjectId }),
+    ...(sourceUpdatedAtValue === undefined ? {} : { sourceUpdatedAt: sourceUpdatedAtValue }),
+    ...(checksum === undefined ? {} : { checksum })
+  };
+}
+
+function optionalRecord(value: unknown, field: string): Readonly<Record<string, unknown>> | undefined {
+  if (value === null || value === undefined) return undefined;
+  const parsed = typeof value === "string" ? JSON.parse(value) as unknown : value;
+  if (!isRecord(parsed)) throw new Error(`Stored ${field} must be an object`);
+  return parsed;
+}
+
+function boundedStoredString(value: unknown, field: string, max = GENERAL_LEDGER_MAX_PROVENANCE_TEXT): string {
+  const result = string(value, field);
+  if (result.length > max) throw new Error(`Stored ${field} exceeds the public ${String(max)} character bound`);
+  return result;
+}
+
+function optionalBoundedStoredString(value: unknown, field: string): string | undefined {
+  if (value === null || value === undefined) return undefined;
+  return boundedStoredString(value, field);
+}
+
+function reportingBookSourceRole(value: unknown): GeneralLedgerSourceProvenance["sourceRole"] {
+  if (value !== "historical" && value !== "active" && value !== "adjustment") {
+    throw new Error("Stored source_role must be historical, active, or adjustment");
+  }
+  return value;
 }
 
 function chartAccountFromRow(row: Readonly<Record<string, unknown>>, currencyCode: IsoCurrencyCode): ChartOfAccountsItem {
   const accountNumber = optionalString(row.account_number);
   const type = optionalString(row.account_type);
   const subtype = optionalString(row.account_subtype);
+  const accountRole = optionalReportingBookAccountRole(row.account_role);
+  const version = optionalInteger(row.version, "version");
   const parentBookAccountKey = optionalString(row.parent_book_account_key);
   if (!Array.isArray(row.source_account_ids) || !row.source_account_ids.every((value) => typeof value === "string")) {
     throw new Error("Stored source_account_ids must be an array of strings");
@@ -2266,6 +2509,8 @@ function chartAccountFromRow(row: Readonly<Record<string, unknown>>, currencyCod
     classification: string(row.classification, "classification") as AccountClassification,
     ...(type === undefined ? {} : { type }),
     ...(subtype === undefined ? {} : { subtype }),
+    ...(accountRole === undefined ? {} : { accountRole }),
+    ...(version === undefined ? {} : { version }),
     ...(parentBookAccountKey === undefined ? {} : { parentBookAccountKey }),
     active: row.active === true,
     debitAmount: money(row.debit_amount, "debit_amount"),
@@ -2289,6 +2534,8 @@ function mergeBookChartAccounts(
     const accountNumber = optionalString(row.account_number);
     const type = optionalString(row.account_type);
     const subtype = optionalString(row.account_subtype);
+    const accountRole = optionalReportingBookAccountRole(row.account_role);
+    const version = optionalInteger(row.version, "version");
     const parentBookAccountKey = optionalString(row.parent_book_account_key);
     return {
       bookAccountKey,
@@ -2298,6 +2545,8 @@ function mergeBookChartAccounts(
       classification: string(row.classification, "classification") as AccountClassification,
       ...(type === undefined ? {} : { type }),
       ...(subtype === undefined ? {} : { subtype }),
+      ...(accountRole === undefined ? {} : { accountRole }),
+      ...(version === undefined ? {} : { version }),
       ...(parentBookAccountKey === undefined ? {} : { parentBookAccountKey }),
       active: row.active === true,
       debitAmount: source?.debitAmount ?? "0.00",
@@ -2729,6 +2978,17 @@ function integer(value: unknown, field: string): number {
   const result = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
   if (!Number.isInteger(result)) throw new Error(`Stored ${field} must be an integer`);
   return result;
+}
+
+function optionalInteger(value: unknown, field: string): number | undefined {
+  if (value === null || value === undefined) return undefined;
+  return integer(value, field);
+}
+
+function optionalReportingBookAccountRole(value: unknown): ReportingBookAccountRole | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (value !== "header" && value !== "posting") throw new Error("Stored account_role must be header or posting");
+  return value;
 }
 
 function requiredRow(row: Readonly<Record<string, unknown>> | undefined, label: string): Readonly<Record<string, unknown>> {

@@ -337,15 +337,20 @@ where tenant_id = 'tenant_1' and source_id = 'source_1' and transaction_id = 'jo
       effectiveFrom: "2026-01-01"
     });
     for (const account of [
-      { bookAccountKey: "income", name: "Income", classification: "income" as const },
+      {
+        bookAccountKey: "income", accountNumber: "4000", name: "Income", classification: "income" as const,
+        accountRole: "header" as const
+      },
       {
         bookAccountKey: "service_revenue",
+        accountNumber: "4010",
         name: "Service Revenue",
         classification: "income" as const,
+        accountRole: "posting" as const,
         parentBookAccountKey: "income"
       }
     ]) {
-      await sdk.books.defineAccount({ operation, bookId: "book_primary", ...account });
+      await sdk.books.defineAccount({ operation, bookId: "book_primary", expectedVersion: 0, ...account });
     }
     await sdk.books.mapAccount({
       operation,
@@ -353,6 +358,57 @@ where tenant_id = 'tenant_1' and source_id = 'source_1' and transaction_id = 'jo
       sourceId: "source_1",
       accountId: "account_income",
       bookAccountKey: "service_revenue"
+    });
+    await expect(sdk.books.defineAccount({
+      operation: { ...operation, requestId: "account-income-deactivate", correlationId: "account-income-deactivate" },
+      bookId: "book_primary",
+      bookAccountKey: "income",
+      accountNumber: "4000",
+      name: "Income",
+      classification: "income",
+      accountRole: "header",
+      active: false,
+      expectedVersion: 1
+    })).rejects.toThrow("a reporting-book account with children must remain an active header account");
+    await expect(sdk.books.defineAccount({
+      operation: { ...operation, requestId: "account-service-role", correlationId: "account-service-role" },
+      bookId: "book_primary",
+      bookAccountKey: "service_revenue",
+      accountNumber: "4010",
+      name: "Service Revenue",
+      classification: "income",
+      accountRole: "header",
+      parentBookAccountKey: "income",
+      expectedVersion: 1
+    })).rejects.toThrow("a mapped reporting-book account must remain an active posting account");
+    await expect(sdk.books.defineAccount({
+      operation: { ...operation, requestId: "account-number-duplicate", correlationId: "account-number-duplicate" },
+      bookId: "book_primary",
+      bookAccountKey: "duplicate_revenue",
+      accountNumber: "4010",
+      name: "Duplicate Revenue",
+      classification: "income",
+      accountRole: "posting",
+      expectedVersion: 0
+    })).rejects.toMatchObject({ code: "invalid_input" });
+    const renamedAccountInput = {
+      operation: { ...operation, requestId: "account-service-rename", correlationId: "account-service-rename" },
+      bookId: "book_primary",
+      bookAccountKey: "service_revenue",
+      accountNumber: "4010",
+      name: "Consulting Revenue",
+      classification: "income" as const,
+      accountRole: "posting" as const,
+      parentBookAccountKey: "income",
+      expectedVersion: 1
+    };
+    await expect(sdk.books.defineAccount(renamedAccountInput)).resolves.toMatchObject({
+      name: "Consulting Revenue",
+      version: 2
+    });
+    await expect(sdk.books.defineAccount(renamedAccountInput)).resolves.toMatchObject({
+      name: "Consulting Revenue",
+      version: 2
     });
 
     const draft = await sdk.invoices.createDraft({
@@ -454,6 +510,34 @@ where tenant_id = 'tenant_1' and source_id = 'source_1' and transaction_id = 'jo
       totalDebits: "50.00",
       totalCredits: "50.00",
       difference: "0.00"
+    });
+    const ledgerFilters = {
+      periodStart: "2026-08-01",
+      periodEnd: "2026-08-31",
+      accountKey: "service_revenue",
+      sourceId: "source_1",
+      transactionType: "Subledger:invoice",
+      polarity: "credit" as const,
+      search: "INV-1001"
+    };
+    await expect(sdk.queries.listGeneralLedger({ ...ledgerFilters, limit: 25 })).resolves.toMatchObject({
+      items: [{
+        transactionType: "Subledger:invoice",
+        bookAccountKey: "service_revenue",
+        creditAmount: "25.00",
+        sourceProvenance: {
+          sourceId: "source_1",
+          sourceRole: "active",
+          sourceSystem: "native_erp",
+          sourceTransactionType: "Subledger:invoice"
+        }
+      }]
+    });
+    await expect(sdk.queries.getGeneralLedgerSummary(ledgerFilters)).resolves.toMatchObject({
+      postingCount: 1,
+      totalDebits: "0.00",
+      totalCredits: "25.00",
+      difference: "-25.00"
     });
     const statement = await sdk.queries.getFinancialStatement({
       reportName: "profit_and_loss",

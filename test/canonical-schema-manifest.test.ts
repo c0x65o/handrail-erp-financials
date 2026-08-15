@@ -26,11 +26,15 @@ const MIGRATION_LEDGER_UPGRADE_SQL = readFileSync(
   new URL("../migrations/future-erp/20260812010000_add_schema_migration_ledger.sql", import.meta.url),
   "utf8"
 );
+const GENERAL_LEDGER_CONTRACT_UPGRADE_SQL = readFileSync(
+  new URL("../migrations/future-erp/20260815020000_add_general_ledger_contract.sql", import.meta.url),
+  "utf8"
+);
 
 describe("canonical schema manifest", () => {
   it("is versioned and covers the documented canonical entities", () => {
-    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.manifestVersion).toBe("2026-08-15.receivables-provenance");
-    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion).toBe(15);
+    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.manifestVersion).toBe("2026-08-15.general-ledger-contract");
+    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion).toBe(16);
 
     const tableNames = POSTGRES_CANONICAL_SCHEMA_MANIFEST.tables.map((table) => table.name);
 
@@ -239,7 +243,8 @@ describe("canonical schema manifest", () => {
       [11, 12],
       [12, 13],
       [13, 14],
-      [14, 15]
+      [14, 15],
+      [15, 16]
     ]);
     expect(renderPostgresSchemaSql()).toContain('create table if not exists "erp_financials"."schema_migrations"');
     expect(FUTURE_ERP_CANONICAL_SCHEMA_MIGRATION_SQL).not.toMatch(
@@ -258,6 +263,14 @@ describe("canonical schema manifest", () => {
     expect(REPORT_SNAPSHOT_SCOPE_UPGRADE_SQL).toContain("':legacy-line:' || length(lines.\"report_line_id\")::text");
     expect(REPORT_SNAPSHOT_SCOPE_UPGRADE_SQL).toContain("':legacy-total:' || length(totals.\"report_total_id\")::text");
     expect(REPORT_SNAPSHOT_SCOPE_UPGRADE_SQL).toContain('rs."snapshot_source"');
+  });
+
+  it("database-enforces versioned reporting-book account roles and account-number uniqueness", () => {
+    expect(GENERAL_LEDGER_CONTRACT_UPGRADE_SQL).toContain('"reporting_book_accounts_number_uidx"');
+    expect(GENERAL_LEDGER_CONTRACT_UPGRADE_SQL).toContain("parent must be an active header account");
+    expect(GENERAL_LEDGER_CONTRACT_UPGRADE_SQL).toContain("mapped reporting-book account must remain an active posting account");
+    expect(GENERAL_LEDGER_CONTRACT_UPGRADE_SQL).toContain("account type cannot change while children or mappings depend on it");
+    expect(GENERAL_LEDGER_CONTRACT_UPGRADE_SQL).toContain("version must remain stable for a replay or advance by exactly one");
   });
 });
 

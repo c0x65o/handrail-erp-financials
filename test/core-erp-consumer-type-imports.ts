@@ -26,6 +26,10 @@ import type {
   CoreErpTenantReadAccess,
   CustomerPaymentDetail,
   CustomerPaymentProvenance,
+  GeneralLedgerDimensionProvenance,
+  GeneralLedgerFilters,
+  GeneralLedgerLine,
+  GeneralLedgerSourceProvenance,
   InvoiceDeliveryEvent,
   PaymentApplicationDetail,
   PaymentApplicationListItem,
@@ -100,6 +104,10 @@ export type CoreErpPersistenceEvidenceImports = {
   readonly invoiceDelivery: InvoiceDeliveryEvent;
   readonly customerPayment: CustomerPaymentDetail;
   readonly customerPaymentProvenance: CustomerPaymentProvenance;
+  readonly generalLedgerFilters: GeneralLedgerFilters;
+  readonly generalLedgerLine: GeneralLedgerLine;
+  readonly generalLedgerDimension: GeneralLedgerDimensionProvenance;
+  readonly generalLedgerSource: GeneralLedgerSourceProvenance;
   readonly paymentApplication: PaymentApplicationListItem;
   readonly paymentApplicationDetail: PaymentApplicationDetail;
   readonly writeOff: WriteOffListItem;

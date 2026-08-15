@@ -58,7 +58,9 @@ export const ERP_FINANCIALS_SDK_ACCEPTANCE_FIXTURE = {
       bookId: "book_sdk_fixture",
       bookAccountKey: "assets",
       name: "Assets",
-      classification: "asset"
+      classification: "asset",
+      accountRole: "header",
+      expectedVersion: 0
     },
     {
       operation,
@@ -67,6 +69,8 @@ export const ERP_FINANCIALS_SDK_ACCEPTANCE_FIXTURE = {
       accountNumber: "1200",
       name: "Accounts Receivable",
       classification: "asset",
+      accountRole: "posting",
+      expectedVersion: 0,
       parentBookAccountKey: "assets"
     },
     {
@@ -75,7 +79,9 @@ export const ERP_FINANCIALS_SDK_ACCEPTANCE_FIXTURE = {
       bookAccountKey: "service_revenue",
       accountNumber: "4000",
       name: "Service Revenue",
-      classification: "income"
+      classification: "income",
+      accountRole: "posting",
+      expectedVersion: 0
     }
   ] satisfies readonly DefineReportingBookAccountInput[],
   mappings: [

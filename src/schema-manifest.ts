@@ -53,8 +53,8 @@ export type PostgresTableManifest = {
 };
 
 export type PostgresSchemaManifest = {
-  readonly manifestVersion: "2026-08-15.receivables-provenance";
-  readonly schemaVersion: 15;
+  readonly manifestVersion: "2026-08-15.general-ledger-contract";
+  readonly schemaVersion: 16;
   readonly dialect: "postgres";
   readonly namespace: "erp_financials";
   readonly requiredTriggers: readonly PostgresTriggerManifest[];
@@ -144,8 +144,8 @@ const table = (
 });
 
 export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
-  manifestVersion: "2026-08-15.receivables-provenance",
-  schemaVersion: 15,
+  manifestVersion: "2026-08-15.general-ledger-contract",
+  schemaVersion: 16,
   dialect: "postgres",
   namespace: "erp_financials",
   requiredTriggers: [
@@ -325,7 +325,6 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
       table: "reporting_book_accounts",
       timing: "before",
       events: ["insert", "update"],
-      updateColumns: ["tenant_id", "company_id", "book_id", "book_account_key", "classification", "parent_book_account_key"],
       functionName: "validate_reporting_book_account_hierarchy"
     },
     {
@@ -2086,9 +2085,13 @@ function sdkV1Tables(): readonly PostgresTableManifest[] {
         text("classification"),
         text("account_type", true),
         text("account_subtype", true),
+        text("account_role"),
         text("parent_book_account_key", true),
         text("currency_code", true),
         bool("active"),
+        { ...integer("version"), defaultSql: "1" },
+        text("last_operation_request_id"),
+        text("last_operation_checksum"),
         timestamp("created_at"),
         timestamp("updated_at")
       ],
@@ -2101,6 +2104,13 @@ function sdkV1Tables(): readonly PostgresTableManifest[] {
           name: "reporting_book_accounts_no_self_parent_check",
           sql: "parent_book_account_key is null or parent_book_account_key <> book_account_key"
         },
+        { name: "reporting_book_accounts_role_check", sql: "account_role in ('header', 'posting')" },
+        {
+          name: "reporting_book_accounts_number_format_check",
+          sql: "account_number is null or (account_number = btrim(account_number) and account_number <> '')"
+        },
+        { name: "reporting_book_accounts_version_check", sql: "version >= 1" },
+        { name: "reporting_book_accounts_operation_checksum_check", sql: "length(last_operation_checksum) = 64" },
         { name: "reporting_book_accounts_timestamp_check", sql: "updated_at >= created_at" },
         foreignKey(
           "reporting_book_accounts_book_scope_fk",
@@ -2129,6 +2139,12 @@ function sdkV1Tables(): readonly PostgresTableManifest[] {
         {
           name: "reporting_book_accounts_parent_idx",
           columns: ["tenant_id", "company_id", "book_id", "parent_book_account_key"]
+        },
+        {
+          name: "reporting_book_accounts_number_uidx",
+          columns: ["tenant_id", "company_id", "book_id", "account_number"],
+          unique: true,
+          whereSql: "account_number is not null"
         }
       ],
       false

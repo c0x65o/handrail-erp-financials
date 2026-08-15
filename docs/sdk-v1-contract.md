@@ -15,7 +15,7 @@ dependencies.
 
 ## Setup order
 
-1. Run `migratePostgresSchema(...)` through schema version 15.
+1. Run `migratePostgresSchema(...)` through schema version 16.
 2. Create the canonical company, sources, and company/source bindings.
 3. Define one reporting book and its base currency/accounting basis.
 4. Bind every provenance source to the book with effective dates.
@@ -118,6 +118,10 @@ Payment summaries return both numerator and denominator for automatic-match
 rates, plus unapplied cash and unmatched bank-review counts. General-ledger
 summaries return exact cents for debits, credits, and their difference. A host
 must format these values, not recompute or round them in route code.
+
+The strict filtered General ledger and versioned reporting-book account
+administration contract is documented in
+[general-ledger-contract.md](general-ledger-contract.md).
 
 ## Invoice lifecycle
 
