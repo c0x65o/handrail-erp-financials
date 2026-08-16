@@ -284,8 +284,13 @@ export type {
   AdjustmentType,
   BankReconciliationListItem,
   BankReconciliationSummary,
+  BillPaymentAccountEvidence,
   BillPaymentDetail,
   BillPaymentLifecycleEvidence,
+  BillPaymentLifecycleStatus,
+  BillPaymentListItem,
+  BillPaymentMethod,
+  BillPaymentSummary,
   ChartOfAccountsItem,
   CommercialDocumentLineReadModel,
   CustomerPaymentDetail,
@@ -569,6 +574,11 @@ export type {
 } from "./canonical-fact-persistence.js";
 export type {
   CreateErpFinancialsInput,
+  BillPaymentAllocationInput,
+  CancelScheduledBillPaymentInput,
+  CancelledScheduledBillPaymentResult,
+  ClearedBillPaymentResult,
+  ClearScheduledBillPaymentInput,
   CreateInvoiceInput,
   CreateVendorBillInput,
   CustomerPaymentProvenance,
@@ -601,6 +611,7 @@ export type {
   ReplaceIssuedWriteOffInput,
   ReplacePostedVendorBillInput,
   RecordBillPaymentInput,
+  RecordAndApplyBillPaymentInput,
   RecordCustomerPaymentInput,
   RecordDepositInput,
   RecordTransferInput,
@@ -608,6 +619,8 @@ export type {
   ReverseJournalEntryInput,
   SettleInvoiceWriteOffInput,
   SettleInvoiceWriteOffResult,
+  ScheduleBillPaymentInput,
+  ScheduledBillPaymentResult,
   SubledgerAmountLine,
   SubledgerApplicationResult,
   SubledgerApplicationType,
@@ -622,6 +635,8 @@ export type {
   VoidIssuedWriteOffInput,
   VoidIssuedVendorBillInput,
   VoidPostedBillPaymentInput,
+  VoidAndUnapplyBillPaymentInput,
+  VoidAndUnapplyBillPaymentResult,
   VoidPostedVendorBillInput
 } from "./erp-financials-service.js";
 export type {

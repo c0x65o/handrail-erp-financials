@@ -231,18 +231,80 @@ export type FinancialLifecycleProvenance = {
 };
 
 export type BillPaymentLifecycleEvidence = {
-  readonly posted: FinancialLifecycleProvenance;
+  readonly scheduled?: FinancialLifecycleProvenance;
+  readonly cleared?: FinancialLifecycleProvenance;
+  /** Low-level posting event retained for ledger audit compatibility. */
+  readonly posted?: FinancialLifecycleProvenance;
   readonly voided?: FinancialLifecycleProvenance;
   readonly reversalTransactionId?: string;
 };
 
-export type BillPaymentDetail = PaymentListItem & {
+export type BillPaymentLifecycleStatus = "scheduled" | "cleared" | "voided";
+
+export type BillPaymentMethod = "ach" | "card" | "check";
+
+const BILL_PAYMENT_LIFECYCLE_STATUSES: ReadonlySet<BillPaymentLifecycleStatus> = new Set([
+  "scheduled",
+  "cleared",
+  "voided"
+]);
+const BILL_PAYMENT_METHODS: ReadonlySet<BillPaymentMethod> = new Set(["ach", "card", "check"]);
+
+export type BillPaymentAccountEvidence = {
+  readonly accountId: string;
+  readonly postingId?: string;
+  readonly debitAmount?: DecimalString;
+  readonly creditAmount?: DecimalString;
+};
+
+export type BillPaymentListItem = {
+  readonly paymentId: string;
+  readonly sourceId: string;
   readonly paymentType: "bill_payment";
   readonly vendorId: string;
+  /** Compatibility alias for generic payment consumers. */
+  readonly partyId: string;
   readonly vendorName?: string;
+  readonly partyName?: string;
+  readonly documentNumber?: string;
+  readonly paymentDate: IsoDate;
+  readonly currencyCode: IsoCurrencyCode;
+  readonly amount: DecimalString;
+  readonly status: BillPaymentLifecycleStatus;
+  /** Optimistic version of the scheduled/cleared/voided disbursement lifecycle. */
+  readonly version: number;
+  readonly paymentMethod?: BillPaymentMethod;
+  readonly reference?: string;
+  readonly fundingAccountId?: string;
+  readonly payableAccountId?: string;
+  readonly transactionId?: string;
+  readonly unappliedAmount?: DecimalString;
+  readonly documentVersion?: number;
+  readonly lifecycleEventId?: string;
+  readonly applicationStatus?: PaymentStatus;
+  readonly matchedApplicationCount: number;
+};
+
+export type BillPaymentDetail = BillPaymentListItem & {
   readonly memo?: string;
   readonly lifecycle: BillPaymentLifecycleEvidence;
+  readonly fundingAccount?: BillPaymentAccountEvidence;
+  readonly payableAccount?: BillPaymentAccountEvidence;
   readonly applications: readonly PaymentApplicationListItem[];
+};
+
+export type BillPaymentSummary = {
+  readonly periodStart: IsoDate;
+  readonly periodEnd: IsoDate;
+  readonly currencyCode: IsoCurrencyCode;
+  readonly scheduledAmount: DecimalString;
+  readonly scheduledCount: number;
+  readonly clearedAmount: DecimalString;
+  readonly clearedCount: number;
+  readonly voidedAmount: DecimalString;
+  readonly voidedCount: number;
+  readonly totalAmount: DecimalString;
+  readonly totalCount: number;
 };
 
 export type WriteOffListItem = {
@@ -567,8 +629,22 @@ export type FinancialReadModels = {
     readonly periodEnd?: IsoDate;
     readonly status?: PaymentStatus;
   }): Promise<Page<PaymentListItem>>;
+  listBillPayments(input?: PageRequest & {
+    readonly vendorId?: string;
+    readonly periodStart?: IsoDate;
+    readonly periodEnd?: IsoDate;
+    readonly status?: BillPaymentLifecycleStatus;
+    readonly paymentMethod?: BillPaymentMethod;
+  }): Promise<Page<BillPaymentListItem>>;
   getCustomerPayment(paymentId: string): Promise<CustomerPaymentDetail>;
   getBillPayment(paymentId: string): Promise<BillPaymentDetail>;
+  getBillPaymentSummary(input: {
+    readonly periodStart: IsoDate;
+    readonly periodEnd: IsoDate;
+    readonly vendorId?: string;
+    readonly status?: BillPaymentLifecycleStatus;
+    readonly paymentMethod?: BillPaymentMethod;
+  }): Promise<BillPaymentSummary>;
   listPaymentApplications(input?: PageRequest & {
     readonly applicationType?: PaymentApplicationListItem["applicationType"];
     readonly status?: PaymentApplicationListItem["status"];
@@ -616,8 +692,10 @@ export function createFinancialReadModels(input: Scope): FinancialReadModels {
     getVendorBill: (billId, asOfDate) => getVendorBill(input, billId, asOfDate),
     getVendorBillSummary: (request = {}) => getVendorBillSummary(input, request),
     listPayments: (request = {}) => listPayments(input, request),
+    listBillPayments: (request = {}) => listBillPayments(input, request),
     getCustomerPayment: (paymentId) => getCustomerPayment(input, paymentId),
     getBillPayment: (paymentId) => getBillPayment(input, paymentId),
+    getBillPaymentSummary: (request) => getBillPaymentSummary(input, request),
     listPaymentApplications: (request = {}) => listPaymentApplications(input, request),
     getPaymentApplication: (applicationId) => getPaymentApplication(input, applicationId),
     getPaymentSummary: (request) => getPaymentSummary(input, request),
@@ -1267,11 +1345,146 @@ limit $13`,
   });
 }
 
+async function listBillPayments(
+  scope: Scope,
+  input: PageRequest & {
+    readonly vendorId?: string;
+    readonly periodStart?: IsoDate;
+    readonly periodEnd?: IsoDate;
+    readonly status?: BillPaymentLifecycleStatus;
+    readonly paymentMethod?: BillPaymentMethod;
+    readonly paymentId?: string;
+  }
+): Promise<Page<BillPaymentListItem>> {
+  const page = pageInput(input, "bill-payments", scope.bookId);
+  assertBillPaymentFilters(input);
+  if (input.paymentId !== undefined) assertNonEmpty(input.paymentId, "paymentId");
+  return scope.database.transaction(async (client) => {
+    const book = await resolveBook(client, scope);
+    const result = await client.query(
+      `with canonical_bill_payments as (
+select disbursement."bill_payment_id" as "payment_id", disbursement."source_id", disbursement."vendor_id",
+  party."display_name" as "vendor_name", disbursement."document_number", disbursement."payment_date",
+  disbursement."currency_code", disbursement."amount", disbursement."status", disbursement."version",
+  disbursement."payment_method", disbursement."payment_reference", disbursement."funding_account_id",
+  disbursement."payable_account_id", document."open_amount" as "unapplied_amount",
+  coalesce(disbursement."voided_event_id", disbursement."cleared_event_id", disbursement."scheduled_event_id") as "lifecycle_event_id",
+  document."transaction_id", document."version" as "document_version",
+  case when document."subledger_document_id" is null then null
+    when document."status" = 'voided' then 'voided'
+    when document."open_amount" = 0 then 'applied'
+    when document."open_amount" = document."original_amount" then 'unapplied'
+    else 'partial' end as "application_status",
+  count(application."subledger_application_id") filter (where application."status" = 'applied')::integer as "application_count"
+from "erp_financials"."bill_payment_disbursements" disbursement
+join "erp_financials"."reporting_book_sources" source
+  on source."tenant_id" = disbursement."tenant_id" and source."company_id" = disbursement."company_id"
+ and source."book_id" = $3 and source."source_id" = disbursement."source_id"
+ and (source."effective_from" is null or source."effective_from" <= disbursement."payment_date")
+ and (source."effective_through" is null or source."effective_through" >= disbursement."payment_date")
+left join "erp_financials"."subledger_documents" document
+  on document."tenant_id" = disbursement."tenant_id" and document."company_id" = disbursement."company_id"
+ and document."source_id" = disbursement."source_id" and document."subledger_document_id" = disbursement."subledger_document_id"
+left join "erp_financials"."parties" party
+  on party."tenant_id" = disbursement."tenant_id" and party."source_id" = disbursement."source_id"
+ and party."party_id" = disbursement."vendor_id"
+left join "erp_financials"."subledger_applications" application
+  on application."tenant_id" = disbursement."tenant_id" and application."company_id" = disbursement."company_id"
+ and application."source_id" = disbursement."source_id" and application."source_document_id" = disbursement."bill_payment_id"
+where disbursement."tenant_id" = $1 and disbursement."company_id" = $2 and disbursement."currency_code" = $4
+group by disbursement."bill_payment_id", party."display_name", document."subledger_document_id"
+union all
+select document."subledger_document_id", document."source_id", document."party_id", party."display_name",
+  document."document_number", document."document_date", document."currency_code", document."original_amount",
+  case when document."status" = 'voided' then 'voided' else 'cleared' end, document."version",
+  document."metadata" #>> '{billPaymentProvenance,paymentMethod}',
+  document."metadata" #>> '{billPaymentProvenance,reference}',
+  document."metadata" #>> '{billPaymentProvenance,fundingAccountId}',
+  document."metadata" #>> '{billPaymentProvenance,payableAccountId}',
+  document."open_amount", document."lifecycle_event_id", document."transaction_id", document."version",
+  case when document."status" = 'voided' then 'voided'
+    when document."open_amount" = 0 then 'applied'
+    when document."open_amount" = document."original_amount" then 'unapplied'
+    else 'partial' end,
+  count(application."subledger_application_id") filter (where application."status" = 'applied')::integer
+from "erp_financials"."subledger_documents" document
+join "erp_financials"."reporting_book_sources" source
+  on source."tenant_id" = document."tenant_id" and source."company_id" = document."company_id"
+ and source."book_id" = $3 and source."source_id" = document."source_id"
+ and (source."effective_from" is null or source."effective_from" <= document."document_date")
+ and (source."effective_through" is null or source."effective_through" >= document."document_date")
+left join "erp_financials"."parties" party
+  on party."tenant_id" = document."tenant_id" and party."source_id" = document."source_id" and party."party_id" = document."party_id"
+left join "erp_financials"."subledger_applications" application
+  on application."tenant_id" = document."tenant_id" and application."company_id" = document."company_id"
+ and application."source_id" = document."source_id" and application."source_document_id" = document."subledger_document_id"
+where document."tenant_id" = $1 and document."company_id" = $2 and document."document_type" = 'bill_payment'
+  and document."currency_code" = $4 and not exists (
+    select 1 from "erp_financials"."bill_payment_disbursements" disbursement
+    where disbursement."tenant_id" = document."tenant_id" and disbursement."company_id" = document."company_id"
+      and disbursement."source_id" = document."source_id" and disbursement."bill_payment_id" = document."subledger_document_id"
+  )
+group by document."subledger_document_id", party."display_name"
+)
+select * from canonical_bill_payments
+where ($5::text is null or "vendor_id" = $5)
+  and ($6::date is null or "payment_date" >= $6::date)
+  and ($7::date is null or "payment_date" <= $7::date)
+  and ($8::text is null or "status" = $8)
+  and ($9::text is null or "payment_method" = $9)
+  and ($12::text is null or "payment_id" = $12)
+  and ($10::date is null or ("payment_date", "payment_id") < ($10::date, $11::text))
+order by "payment_date" desc, "payment_id" desc
+limit $13`,
+      [
+        scope.tenantId,
+        scope.companyId,
+        scope.bookId,
+        book.currencyCode,
+        input.vendorId,
+        input.periodStart,
+        input.periodEnd,
+        input.status,
+        input.paymentMethod,
+        page.date,
+        page.id,
+        input.paymentId,
+        page.limit + 1
+      ]
+    );
+    return toPage(result.rows.map(billPaymentFromRow), page.limit, "bill-payments", scope.bookId, (item) => ({
+      date: item.paymentDate,
+      id: item.paymentId
+    }));
+  });
+}
+
+function assertBillPaymentFilters(input: {
+  readonly vendorId?: string;
+  readonly periodStart?: IsoDate;
+  readonly periodEnd?: IsoDate;
+  readonly status?: BillPaymentLifecycleStatus;
+  readonly paymentMethod?: BillPaymentMethod;
+}): void {
+  if (input.vendorId !== undefined) assertNonEmpty(input.vendorId, "vendorId");
+  if (input.periodStart !== undefined) assertDate(input.periodStart, "periodStart");
+  if (input.periodEnd !== undefined) assertDate(input.periodEnd, "periodEnd");
+  if (input.periodStart !== undefined && input.periodEnd !== undefined) {
+    assertWindow(input.periodStart, input.periodEnd);
+  }
+  if (input.status !== undefined && !BILL_PAYMENT_LIFECYCLE_STATUSES.has(input.status)) {
+    throw new ErpFinancialsError("invalid_input", `Unsupported bill payment status ${input.status}`);
+  }
+  if (input.paymentMethod !== undefined && !BILL_PAYMENT_METHODS.has(input.paymentMethod)) {
+    throw new ErpFinancialsError("invalid_input", `Unsupported bill payment method ${input.paymentMethod}`);
+  }
+}
+
 async function getBillPayment(scope: Scope, paymentId: string): Promise<BillPaymentDetail> {
   assertNonEmpty(paymentId, "paymentId");
-  const page = await listPayments(scope, { paymentId, paymentType: "bill_payment", limit: 1 });
+  const page = await listBillPayments(scope, { paymentId, limit: 1 });
   const payment = page.items[0];
-  if (payment === undefined || payment.paymentType !== "bill_payment") {
+  if (payment === undefined) {
     throw new ErpFinancialsError(
       "missing_document",
       `Bill payment ${paymentId} does not exist in reporting book ${scope.bookId}`,
@@ -1280,26 +1493,52 @@ async function getBillPayment(scope: Scope, paymentId: string): Promise<BillPaym
   }
   return scope.database.transaction(async (client) => {
     const header = await client.query(
-      `select transaction."memo",
+      `select coalesce(transaction."memo", disbursement."memo") as "memo", disbursement."allocations",
+  scheduled."event_id" as "scheduled_event_id", scheduled."actor_ref" as "scheduled_actor_ref",
+  scheduled."approver_ref" as "scheduled_approver_ref", scheduled."request_id" as "scheduled_request_id",
+  scheduled."reason_code" as "scheduled_reason_code",
+  cleared."event_id" as "cleared_event_id", cleared."actor_ref" as "cleared_actor_ref",
+  cleared."approver_ref" as "cleared_approver_ref", cleared."request_id" as "cleared_request_id",
+  cleared."reason_code" as "cleared_reason_code",
   posted."event_id" as "posted_event_id", posted."actor_ref" as "posted_actor_ref",
   posted."approver_ref" as "posted_approver_ref", posted."request_id" as "posted_request_id",
   posted."reason_code" as "posted_reason_code",
   voided."event_id" as "voided_event_id", voided."actor_ref" as "voided_actor_ref",
   voided."approver_ref" as "voided_approver_ref", voided."request_id" as "voided_request_id",
-  voided."reason_code" as "voided_reason_code", void_link."related_transaction_id" as "reversal_transaction_id"
+  voided."reason_code" as "voided_reason_code", void_link."related_transaction_id" as "reversal_transaction_id",
+  coalesce(disbursement."funding_account_id", document."metadata" #>> '{billPaymentProvenance,fundingAccountId}') as "funding_account_id",
+  funding_posting."posting_id" as "funding_posting_id", funding_posting."debit_amount" as "funding_debit_amount",
+  funding_posting."credit_amount" as "funding_credit_amount",
+  coalesce(disbursement."payable_account_id", document."metadata" #>> '{billPaymentProvenance,payableAccountId}') as "payable_account_id",
+  payable_posting."posting_id" as "payable_posting_id", payable_posting."debit_amount" as "payable_debit_amount",
+  payable_posting."credit_amount" as "payable_credit_amount"
 from "erp_financials"."subledger_documents" document
-join "erp_financials"."transactions" transaction
+full join "erp_financials"."bill_payment_disbursements" disbursement
+  on disbursement."tenant_id" = document."tenant_id" and disbursement."company_id" = document."company_id"
+ and disbursement."source_id" = document."source_id" and disbursement."bill_payment_id" = document."subledger_document_id"
+left join "erp_financials"."transactions" transaction
   on transaction."tenant_id" = document."tenant_id" and transaction."source_id" = document."source_id"
  and transaction."transaction_id" = document."transaction_id"
-join "erp_financials"."financial_lifecycle_events" posted
+left join "erp_financials"."financial_lifecycle_events" scheduled
+  on scheduled."tenant_id" = disbursement."tenant_id" and scheduled."company_id" = disbursement."company_id"
+ and scheduled."source_id" = disbursement."source_id" and scheduled."event_id" = disbursement."scheduled_event_id"
+left join "erp_financials"."financial_lifecycle_events" cleared
+  on cleared."tenant_id" = disbursement."tenant_id" and cleared."company_id" = disbursement."company_id"
+ and cleared."source_id" = disbursement."source_id" and cleared."event_id" = disbursement."cleared_event_id"
+left join "erp_financials"."financial_lifecycle_events" posted
   on posted."tenant_id" = document."tenant_id" and posted."company_id" = document."company_id"
  and posted."source_id" = document."source_id" and posted."event_id" = document."lifecycle_event_id"
 left join lateral (
   select event."event_id", event."actor_ref", event."approver_ref", event."request_id", event."reason_code"
   from "erp_financials"."financial_lifecycle_events" event
-  where event."tenant_id" = document."tenant_id" and event."company_id" = document."company_id"
-    and event."source_id" = document."source_id" and event."aggregate_type" = 'bill_payment'
-    and event."aggregate_id" = document."subledger_document_id" and event."event_type" = 'bill_payment.voided'
+  where event."tenant_id" = coalesce(disbursement."tenant_id", document."tenant_id")
+    and event."company_id" = coalesce(disbursement."company_id", document."company_id")
+    and event."source_id" = coalesce(disbursement."source_id", document."source_id")
+    and (
+      event."event_id" = disbursement."voided_event_id"
+      or (disbursement."voided_event_id" is null and event."aggregate_type" = 'bill_payment'
+        and event."aggregate_id" = document."subledger_document_id" and event."event_type" = 'bill_payment.voided')
+    )
   order by event."occurred_at" desc, event."event_id" desc limit 1
 ) voided on true
 left join lateral (
@@ -1310,27 +1549,138 @@ left join lateral (
     and link."link_type" = 'void'
   order by link."created_at" desc, link."journal_entry_link_id" desc limit 1
 ) void_link on true
-where document."tenant_id" = $1 and document."company_id" = $2 and document."source_id" = $3
-  and document."subledger_document_id" = $4 and document."document_type" = 'bill_payment'`,
+left join lateral (
+  select posting."posting_id", posting."debit_amount", posting."credit_amount"
+  from "erp_financials"."ledger_postings" posting
+  where posting."tenant_id" = document."tenant_id" and posting."source_id" = document."source_id"
+    and posting."transaction_id" = document."transaction_id"
+    and posting."account_id" = coalesce(disbursement."funding_account_id", document."metadata" #>> '{billPaymentProvenance,fundingAccountId}')
+  order by posting."posting_id" limit 1
+) funding_posting on true
+left join lateral (
+  select posting."posting_id", posting."debit_amount", posting."credit_amount"
+  from "erp_financials"."ledger_postings" posting
+  where posting."tenant_id" = document."tenant_id" and posting."source_id" = document."source_id"
+    and posting."transaction_id" = document."transaction_id"
+    and posting."account_id" = coalesce(disbursement."payable_account_id", document."metadata" #>> '{billPaymentProvenance,payableAccountId}')
+  order by posting."posting_id" limit 1
+) payable_posting on true
+where coalesce(disbursement."tenant_id", document."tenant_id") = $1
+  and coalesce(disbursement."company_id", document."company_id") = $2
+  and coalesce(disbursement."source_id", document."source_id") = $3
+  and coalesce(disbursement."bill_payment_id", document."subledger_document_id") = $4
+  and (document."subledger_document_id" is null or document."document_type" = 'bill_payment')`,
       [scope.tenantId, scope.companyId, payment.sourceId, paymentId]
     );
     const row = requiredRow(header.rows[0], `bill payment ${paymentId}`);
-    const voidedEventId = optionalString(row.voided_event_id);
     const reversalTransactionId = optionalString(row.reversal_transaction_id);
     const memo = optionalString(row.memo);
-    const applications = await queryPaymentApplications(client, scope, { sourcePaymentId: paymentId });
+    const applications = orderBillPaymentApplications(
+      await queryPaymentApplications(client, scope, { sourcePaymentId: paymentId }),
+      row.allocations
+    );
+    const scheduled = optionalPrefixedLifecycleFromRow(row, "scheduled");
+    const cleared = optionalPrefixedLifecycleFromRow(row, "cleared");
+    const posted = optionalPrefixedLifecycleFromRow(row, "posted");
+    const voided = optionalPrefixedLifecycleFromRow(row, "voided");
+    const fundingAccount = accountEvidenceFromRow(row, "funding");
+    const payableAccount = accountEvidenceFromRow(row, "payable");
     return {
       ...payment,
-      paymentType: "bill_payment",
-      vendorId: payment.partyId,
-      ...(payment.partyName === undefined ? {} : { vendorName: payment.partyName }),
       ...(memo === undefined ? {} : { memo }),
       lifecycle: {
-        posted: prefixedLifecycleFromRow(row, "posted"),
-        ...(voidedEventId === undefined ? {} : { voided: prefixedLifecycleFromRow(row, "voided") }),
+        ...(scheduled === undefined ? {} : { scheduled }),
+        ...(cleared === undefined ? {} : { cleared }),
+        ...(posted === undefined ? {} : { posted }),
+        ...(voided === undefined ? {} : { voided }),
         ...(reversalTransactionId === undefined ? {} : { reversalTransactionId })
       },
+      ...(fundingAccount === undefined ? {} : { fundingAccount }),
+      ...(payableAccount === undefined ? {} : { payableAccount }),
       applications
+    };
+  });
+}
+
+async function getBillPaymentSummary(
+  scope: Scope,
+  input: {
+    readonly periodStart: IsoDate;
+    readonly periodEnd: IsoDate;
+    readonly vendorId?: string;
+    readonly status?: BillPaymentLifecycleStatus;
+    readonly paymentMethod?: BillPaymentMethod;
+  }
+): Promise<BillPaymentSummary> {
+  assertBillPaymentFilters(input);
+  return scope.database.transaction(async (client) => {
+    const book = await resolveBook(client, scope);
+    const result = await client.query(
+      `with canonical_bill_payments as (
+select disbursement."vendor_id", disbursement."payment_date", disbursement."amount", disbursement."status",
+  disbursement."payment_method"
+from "erp_financials"."bill_payment_disbursements" disbursement
+join "erp_financials"."reporting_book_sources" source
+  on source."tenant_id" = disbursement."tenant_id" and source."company_id" = disbursement."company_id"
+ and source."book_id" = $3 and source."source_id" = disbursement."source_id"
+ and (source."effective_from" is null or source."effective_from" <= disbursement."payment_date")
+ and (source."effective_through" is null or source."effective_through" >= disbursement."payment_date")
+where disbursement."tenant_id" = $1 and disbursement."company_id" = $2 and disbursement."currency_code" = $4
+union all
+select document."party_id", document."document_date", document."original_amount",
+  case when document."status" = 'voided' then 'voided' else 'cleared' end,
+  document."metadata" #>> '{billPaymentProvenance,paymentMethod}'
+from "erp_financials"."subledger_documents" document
+join "erp_financials"."reporting_book_sources" source
+  on source."tenant_id" = document."tenant_id" and source."company_id" = document."company_id"
+ and source."book_id" = $3 and source."source_id" = document."source_id"
+ and (source."effective_from" is null or source."effective_from" <= document."document_date")
+ and (source."effective_through" is null or source."effective_through" >= document."document_date")
+where document."tenant_id" = $1 and document."company_id" = $2 and document."document_type" = 'bill_payment'
+  and document."currency_code" = $4 and not exists (
+    select 1 from "erp_financials"."bill_payment_disbursements" disbursement
+    where disbursement."tenant_id" = document."tenant_id" and disbursement."company_id" = document."company_id"
+      and disbursement."source_id" = document."source_id" and disbursement."bill_payment_id" = document."subledger_document_id"
+  )
+), filtered as (
+  select * from canonical_bill_payments where "payment_date" between $5::date and $6::date
+    and ($7::text is null or "vendor_id" = $7)
+    and ($8::text is null or "status" = $8)
+    and ($9::text is null or "payment_method" = $9)
+)
+select coalesce(sum("amount") filter (where "status" = 'scheduled'), 0)::numeric as "scheduled_amount",
+  count(*) filter (where "status" = 'scheduled')::integer as "scheduled_count",
+  coalesce(sum("amount") filter (where "status" = 'cleared'), 0)::numeric as "cleared_amount",
+  count(*) filter (where "status" = 'cleared')::integer as "cleared_count",
+  coalesce(sum("amount") filter (where "status" = 'voided'), 0)::numeric as "voided_amount",
+  count(*) filter (where "status" = 'voided')::integer as "voided_count",
+  coalesce(sum("amount"), 0)::numeric as "total_amount", count(*)::integer as "total_count"
+from filtered`,
+      [
+        scope.tenantId,
+        scope.companyId,
+        scope.bookId,
+        book.currencyCode,
+        input.periodStart,
+        input.periodEnd,
+        input.vendorId,
+        input.status,
+        input.paymentMethod
+      ]
+    );
+    const row = requiredRow(result.rows[0], "bill payment summary");
+    return {
+      periodStart: input.periodStart,
+      periodEnd: input.periodEnd,
+      currencyCode: book.currencyCode,
+      scheduledAmount: money(row.scheduled_amount, "scheduled_amount"),
+      scheduledCount: integer(row.scheduled_count, "scheduled_count"),
+      clearedAmount: money(row.cleared_amount, "cleared_amount"),
+      clearedCount: integer(row.cleared_count, "cleared_count"),
+      voidedAmount: money(row.voided_amount, "voided_amount"),
+      voidedCount: integer(row.voided_count, "voided_count"),
+      totalAmount: money(row.total_amount, "total_amount"),
+      totalCount: integer(row.total_count, "total_count")
     };
   });
 }
@@ -2372,6 +2722,92 @@ function paymentFromRow(row: Readonly<Record<string, unknown>>): PaymentListItem
   };
 }
 
+function billPaymentFromRow(row: Readonly<Record<string, unknown>>): BillPaymentListItem {
+  const vendorName = optionalString(row.vendor_name);
+  const documentNumber = optionalString(row.document_number);
+  const paymentMethodValue = optionalString(row.payment_method);
+  if (paymentMethodValue !== undefined && !BILL_PAYMENT_METHODS.has(paymentMethodValue as BillPaymentMethod)) {
+    throw new Error(`Stored bill payment method ${paymentMethodValue} is invalid`);
+  }
+  const reference = optionalString(row.payment_reference);
+  const fundingAccountId = optionalString(row.funding_account_id);
+  const payableAccountId = optionalString(row.payable_account_id);
+  const transactionId = optionalString(row.transaction_id);
+  const unappliedAmount = row.unapplied_amount == null ? undefined : money(row.unapplied_amount, "unapplied_amount");
+  const documentVersion = optionalInteger(row.document_version, "document_version");
+  const lifecycleEventId = optionalString(row.lifecycle_event_id);
+  const applicationStatusValue = optionalString(row.application_status);
+  if (applicationStatusValue !== undefined && !PAYMENT_STATUSES.has(applicationStatusValue as PaymentStatus)) {
+    throw new Error(`Stored bill payment application status ${applicationStatusValue} is invalid`);
+  }
+  return {
+    paymentId: string(row.payment_id, "payment_id"),
+    sourceId: string(row.source_id, "source_id"),
+    paymentType: "bill_payment",
+    vendorId: string(row.vendor_id, "vendor_id"),
+    partyId: string(row.vendor_id, "vendor_id"),
+    ...(vendorName === undefined ? {} : { vendorName }),
+    ...(vendorName === undefined ? {} : { partyName: vendorName }),
+    ...(documentNumber === undefined ? {} : { documentNumber }),
+    paymentDate: date(row.payment_date, "payment_date"),
+    currencyCode: string(row.currency_code, "currency_code"),
+    amount: money(row.amount, "amount"),
+    status: string(row.status, "status") as BillPaymentLifecycleStatus,
+    version: integer(row.version, "version"),
+    ...(paymentMethodValue === undefined ? {} : { paymentMethod: paymentMethodValue as BillPaymentMethod }),
+    ...(reference === undefined ? {} : { reference }),
+    ...(fundingAccountId === undefined ? {} : { fundingAccountId }),
+    ...(payableAccountId === undefined ? {} : { payableAccountId }),
+    ...(transactionId === undefined ? {} : { transactionId }),
+    ...(unappliedAmount === undefined ? {} : { unappliedAmount }),
+    ...(documentVersion === undefined ? {} : { documentVersion }),
+    ...(lifecycleEventId === undefined ? {} : { lifecycleEventId }),
+    ...(applicationStatusValue === undefined ? {} : { applicationStatus: applicationStatusValue as PaymentStatus }),
+    matchedApplicationCount: integer(row.application_count, "application_count")
+  };
+}
+
+function orderBillPaymentApplications(
+  applications: readonly PaymentApplicationListItem[],
+  allocationsValue: unknown
+): readonly PaymentApplicationListItem[] {
+  if (allocationsValue === null || allocationsValue === undefined) return applications;
+  const parsed = typeof allocationsValue === "string" ? JSON.parse(allocationsValue) as unknown : allocationsValue;
+  if (!Array.isArray(parsed)) throw new Error("Stored bill payment allocations must be an array");
+  const order = new Map<string, number>();
+  parsed.forEach((allocation, index) => {
+    if (typeof allocation === "object" && allocation !== null && !Array.isArray(allocation)) {
+      const billId = optionalString((allocation as Readonly<Record<string, unknown>>).billId);
+      if (billId !== undefined) order.set(billId, index);
+    }
+  });
+  return [...applications].sort((left, right) =>
+    (order.get(left.targetDocumentId) ?? Number.MAX_SAFE_INTEGER) -
+    (order.get(right.targetDocumentId) ?? Number.MAX_SAFE_INTEGER)
+  );
+}
+
+function accountEvidenceFromRow(
+  row: Readonly<Record<string, unknown>>,
+  prefix: "funding" | "payable"
+): BillPaymentAccountEvidence | undefined {
+  const accountId = optionalString(row[`${prefix}_account_id`]);
+  if (accountId === undefined) return undefined;
+  const postingId = optionalString(row[`${prefix}_posting_id`]);
+  const debitAmount = row[`${prefix}_debit_amount`] == null
+    ? undefined
+    : money(row[`${prefix}_debit_amount`], `${prefix}_debit_amount`);
+  const creditAmount = row[`${prefix}_credit_amount`] == null
+    ? undefined
+    : money(row[`${prefix}_credit_amount`], `${prefix}_credit_amount`);
+  return {
+    accountId,
+    ...(postingId === undefined ? {} : { postingId }),
+    ...(debitAmount === undefined ? {} : { debitAmount }),
+    ...(creditAmount === undefined ? {} : { creditAmount })
+  };
+}
+
 function paymentApplicationFromRow(row: Readonly<Record<string, unknown>>): PaymentApplicationListItem {
   const endedLifecycleEventId = optionalString(row.ended_event_id);
   const matchCandidateId = optionalString(row.match_candidate_id);
@@ -3075,7 +3511,7 @@ function lifecycleFromRow(row: Readonly<Record<string, unknown>>): FinancialLife
 
 function prefixedLifecycleFromRow(
   row: Readonly<Record<string, unknown>>,
-  prefix: "posted" | "voided"
+  prefix: "scheduled" | "cleared" | "posted" | "voided"
 ): FinancialLifecycleProvenance {
   const approverRef = optionalString(row[`${prefix}_approver_ref`]);
   return {
@@ -3085,6 +3521,15 @@ function prefixedLifecycleFromRow(
     requestId: string(row[`${prefix}_request_id`], `${prefix}_request_id`),
     reasonCode: string(row[`${prefix}_reason_code`], `${prefix}_reason_code`)
   };
+}
+
+function optionalPrefixedLifecycleFromRow(
+  row: Readonly<Record<string, unknown>>,
+  prefix: "scheduled" | "cleared" | "posted" | "voided"
+): FinancialLifecycleProvenance | undefined {
+  return optionalString(row[`${prefix}_event_id`]) === undefined
+    ? undefined
+    : prefixedLifecycleFromRow(row, prefix);
 }
 
 function date(value: unknown, field: string): IsoDate {

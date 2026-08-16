@@ -145,8 +145,13 @@ export type {
   AdjustmentType,
   BankReconciliationListItem,
   BankReconciliationSummary,
+  BillPaymentAccountEvidence,
   BillPaymentDetail,
   BillPaymentLifecycleEvidence,
+  BillPaymentLifecycleStatus,
+  BillPaymentListItem,
+  BillPaymentMethod,
+  BillPaymentSummary,
   ChartOfAccountsItem,
   CommercialDocumentLineReadModel,
   CustomerPaymentDetail,
@@ -186,6 +191,12 @@ export type {
   VendorBillSummary
 } from "./sdk-read-models.js";
 export type {
+  BillPaymentAllocationInput,
+  BillPaymentMethod as BillPaymentCommandMethod,
+  CancelScheduledBillPaymentInput,
+  CancelledScheduledBillPaymentResult,
+  ClearedBillPaymentResult,
+  ClearScheduledBillPaymentInput,
   IssuedAdjustmentLifecycleResult,
   IssuedAdjustmentType,
   IssueCreditMemoInput,
@@ -199,6 +210,9 @@ export type {
   ReplaceIssuedRefundInput,
   ReplaceIssuedWriteOffInput,
   ReplacePostedVendorBillInput,
+  RecordAndApplyBillPaymentInput,
+  ScheduleBillPaymentInput,
+  ScheduledBillPaymentResult,
   VoidIssuedAdjustmentInput,
   VoidIssuedBillPaymentInput,
   VoidIssuedCreditMemoInput,
@@ -206,6 +220,8 @@ export type {
   VoidIssuedWriteOffInput,
   VoidIssuedVendorBillInput,
   VoidPostedBillPaymentInput,
+  VoidAndUnapplyBillPaymentInput,
+  VoidAndUnapplyBillPaymentResult,
   VoidPostedVendorBillInput
 } from "./erp-financials-service.js";
 export type {

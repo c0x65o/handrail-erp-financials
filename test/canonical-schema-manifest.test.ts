@@ -37,8 +37,8 @@ const WRITE_OFF_APPLICATION_UPGRADE_SQL = readFileSync(
 
 describe("canonical schema manifest", () => {
   it("is versioned and covers the documented canonical entities", () => {
-    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.manifestVersion).toBe("2026-08-15.write-off-invoice-applications");
-    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion).toBe(17);
+    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.manifestVersion).toBe("2026-08-16.bill-payment-disbursements");
+    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion).toBe(18);
 
     const tableNames = POSTGRES_CANONICAL_SCHEMA_MANIFEST.tables.map((table) => table.name);
 
@@ -60,6 +60,7 @@ describe("canonical schema manifest", () => {
       "journal_entry_links",
       "subledger_documents",
       "subledger_applications",
+      "bill_payment_disbursements",
       "posting_rules",
       "transaction_match_candidates",
       "transaction_match_decisions",
@@ -250,7 +251,8 @@ describe("canonical schema manifest", () => {
       [13, 14],
       [14, 15],
       [15, 16],
-      [16, 17]
+      [16, 17],
+      [17, 18]
     ]);
     expect(renderPostgresSchemaSql()).toContain('create table if not exists "erp_financials"."schema_migrations"');
     expect(FUTURE_ERP_CANONICAL_SCHEMA_MIGRATION_SQL).not.toMatch(

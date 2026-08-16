@@ -139,6 +139,10 @@ const migrationFiles = {
   writeOffInvoiceApplicationsV17: new URL(
     "../migrations/future-erp/20260815030000_add_write_off_invoice_applications.sql",
     import.meta.url
+  ),
+  billPaymentDisbursementsV18: new URL(
+    "../migrations/future-erp/20260816010000_add_bill_payment_disbursements.sql",
+    import.meta.url
   )
 } as const;
 
@@ -244,6 +248,13 @@ export const POSTGRES_MIGRATIONS: readonly PostgresMigrationDefinition[] = [
     16,
     17,
     migrationFiles.writeOffInvoiceApplicationsV17
+  ),
+  migration(
+    "20260816010000_add_bill_payment_disbursements",
+    "Add canonical scheduled and cleared bill payment disbursements",
+    17,
+    18,
+    migrationFiles.billPaymentDisbursementsV18
   )
 ] as const;
 

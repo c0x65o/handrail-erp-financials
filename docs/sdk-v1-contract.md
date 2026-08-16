@@ -15,7 +15,7 @@ dependencies.
 
 ## Setup order
 
-1. Run `migratePostgresSchema(...)` through schema version 17.
+1. Run `migratePostgresSchema(...)` through schema version 18.
 2. Create the canonical company, sources, and company/source bindings.
 3. Define one reporting book and its base currency/accounting basis.
 4. Bind every provenance source to the book with effective dates.
@@ -179,13 +179,31 @@ payment recording accepts bounded bank-match/deposit references. Application
 reads return the exact amount, source/target documents, status/version, terminal
 lifecycle links, and bounded match decision evidence.
 
-Bill-payment hosts use `queries.listPayments(...)` with
-`paymentType: "bill_payment"`; the query applies optional `vendorId`, inclusive
-`periodStart` / `periodEnd`, and lifecycle `status` filters before cursor
-pagination.
-`queries.getBillPayment(...)` returns the canonical transaction, current
-document version/status, exact amount and unapplied balance, vendor, application
-history, posting provenance, and any void event/reversal transaction evidence.
+Bill-payment hosts use the bill-specific `queries.listBillPayments(...)` read.
+It applies optional vendor, inclusive period, `scheduled | cleared | voided`,
+and `ach | card | check` filters before cursor pagination. The generic
+`listPayments(...)` remains available for application-balance views.
+`queries.getBillPayment(...)` returns method and separate reference, funding and
+payable account identities plus exact posting IDs/amounts after clearing,
+ordered covered-bill applications, optimistic lifecycle/document versions, and
+scheduled, cleared, posted, voided, and reversal evidence. The bounded
+`queries.getBillPaymentSummary(...)` computes register KPIs from the complete
+filtered canonical set; hosts must not sum a page of register rows.
+
+`commands.billPayments.recordAndApply(...)` is the normal immediate-payment
+boundary. One payload-bound idempotency key covers the instruction, payment
+journal, ordered applications, balance transitions, lifecycle events, and
+outbox events in one transaction. Each allocation carries a bill ID, exact
+decimal amount, and expected bill version. The command rejects duplicates,
+cross-company/vendor/currency documents, ineligible balances, stale versions,
+and allocation totals that do not equal the payment total. A retry returns
+`already_cleared` without duplicating any fact.
+
+For future payments, `commands.billPayments.schedule(...)` persists a
+non-posting instruction and immutable allocation/provenance evidence.
+`commands.billPayments.clear(...)` optimistically posts and applies that exact
+instruction atomically; `cancel(...)` ends an unposted schedule. Both lifecycle
+commands are replay-safe and reject a different command after state advances.
 
 `commands.billPayments.void(...)` (also exposed as `voidIssued` and
 `voidPosted`) is the correction boundary for an erroneous posted payment. It
@@ -193,8 +211,13 @@ requires independent approval, an expected document version, and an
 idempotency key; it posts a compensating journal and marks the payment voided in
 the same database transaction. Applied or partially applied payments fail
 closed until their active applications are ended through
-`commands.paymentApplications.unapply(...)` or `.void(...)`. Retrying the same
-completed void returns `already_voided` and never posts a second reversal.
+`commands.paymentApplications.unapply(...)` or `.void(...)`. For canonical
+cleared disbursements, `commands.billPayments.voidAndUnapply(...)` is the
+supported compensation boundary: it ends every active application, restores
+the vendor-bill balances, posts the reversal, marks the payment/disbursement
+voided, and emits lifecycle/outbox evidence in one transaction. Retrying the
+same completed command returns `already_voided` and never posts a second
+reversal.
 
 Write-offs accept bounded reason, related-invoice, balance-account, and
 write-off-account provenance. `queries.listWriteOffs(...)` and

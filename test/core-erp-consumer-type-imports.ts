@@ -9,7 +9,13 @@ import {
 import type {
   BuildCoreErpPersistenceEvidenceInput,
   BillPaymentDetail,
+  BillPaymentListItem,
   BillPaymentLifecycleEvidence,
+  BillPaymentLifecycleStatus,
+  BillPaymentSummary,
+  CancelScheduledBillPaymentInput,
+  ClearedBillPaymentResult,
+  ClearScheduledBillPaymentInput,
   CoreErpCanonicalReportGenerationRequest,
   CoreErpCanonicalReportGenerationResult,
   CoreErpCanonicalReportReadModelStorage,
@@ -43,6 +49,7 @@ import type {
   QuickBooksIncrementalSyncWorker,
   PostedVendorBillLifecycleResult,
   PostedBillPaymentLifecycleResult,
+  RecordAndApplyBillPaymentInput,
   ReplaceIssuedVendorBillInput,
   ReplacePostedVendorBillInput,
   VendorBillApplicationReadModel,
@@ -55,9 +62,13 @@ import type {
   ReplaceIssuedWriteOffInput,
   SettleInvoiceWriteOffInput,
   SettleInvoiceWriteOffResult,
+  ScheduleBillPaymentInput,
+  ScheduledBillPaymentResult,
   VoidIssuedWriteOffInput,
   VoidIssuedVendorBillInput,
   VoidIssuedBillPaymentInput,
+  VoidAndUnapplyBillPaymentInput,
+  VoidAndUnapplyBillPaymentResult,
   VoidPostedBillPaymentInput,
   VoidPostedVendorBillInput
 } from "@handrail/erp-financials";
@@ -111,8 +122,19 @@ export type CoreErpPersistenceEvidenceImports = {
   readonly replaceIssuedVendorBillInput: ReplaceIssuedVendorBillInput;
   readonly postedVendorBillLifecycleResult: PostedVendorBillLifecycleResult;
   readonly billPayment: BillPaymentDetail;
+  readonly billPaymentListItem: BillPaymentListItem;
   readonly billPaymentLifecycle: BillPaymentLifecycleEvidence;
+  readonly billPaymentLifecycleStatus: BillPaymentLifecycleStatus;
+  readonly billPaymentSummary: BillPaymentSummary;
   readonly billPaymentStatus: PaymentStatus;
+  readonly recordAndApplyBillPaymentInput: RecordAndApplyBillPaymentInput;
+  readonly scheduleBillPaymentInput: ScheduleBillPaymentInput;
+  readonly scheduledBillPaymentResult: ScheduledBillPaymentResult;
+  readonly clearScheduledBillPaymentInput: ClearScheduledBillPaymentInput;
+  readonly cancelScheduledBillPaymentInput: CancelScheduledBillPaymentInput;
+  readonly clearedBillPaymentResult: ClearedBillPaymentResult;
+  readonly voidAndUnapplyBillPaymentInput: VoidAndUnapplyBillPaymentInput;
+  readonly voidAndUnapplyBillPaymentResult: VoidAndUnapplyBillPaymentResult;
   readonly voidPostedBillPaymentInput: VoidPostedBillPaymentInput;
   readonly voidIssuedBillPaymentInput: VoidIssuedBillPaymentInput;
   readonly postedBillPaymentLifecycleResult: PostedBillPaymentLifecycleResult;

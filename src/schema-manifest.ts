@@ -53,8 +53,8 @@ export type PostgresTableManifest = {
 };
 
 export type PostgresSchemaManifest = {
-  readonly manifestVersion: "2026-08-15.write-off-invoice-applications";
-  readonly schemaVersion: 17;
+  readonly manifestVersion: "2026-08-16.bill-payment-disbursements";
+  readonly schemaVersion: 18;
   readonly dialect: "postgres";
   readonly namespace: "erp_financials";
   readonly requiredTriggers: readonly PostgresTriggerManifest[];
@@ -144,8 +144,8 @@ const table = (
 });
 
 export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
-  manifestVersion: "2026-08-15.write-off-invoice-applications",
-  schemaVersion: 17,
+  manifestVersion: "2026-08-16.bill-payment-disbursements",
+  schemaVersion: 18,
   dialect: "postgres",
   namespace: "erp_financials",
   requiredTriggers: [
@@ -248,6 +248,13 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
       timing: "before",
       events: ["update"],
       functionName: "guard_subledger_application_match_evidence"
+    },
+    {
+      name: "bill_payment_disbursements_guard",
+      table: "bill_payment_disbursements",
+      timing: "before",
+      events: ["update", "delete"],
+      functionName: "guard_bill_payment_disbursement_mutation"
     },
     {
       name: "reporting_book_sources_no_primary_overlap",
@@ -1356,6 +1363,121 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
         {
           name: "subledger_applications_target_status_idx",
           columns: ["tenant_id", "company_id", "source_id", "target_document_id", "status", "application_date"]
+        }
+      ]
+    ),
+    table(
+      "bill_payment_disbursements",
+      "Versioned scheduled-to-cleared vendor disbursements with immutable ordered allocations and payment provenance.",
+      [
+        id("bill_payment_id"),
+        text("tenant_id"),
+        text("company_id"),
+        text("source_id"),
+        text("subledger_document_id", true),
+        text("vendor_id"),
+        date("payment_date"),
+        text("document_number", true),
+        text("memo", true),
+        text("currency_code"),
+        numeric("amount"),
+        text("payment_method"),
+        text("payment_reference", true),
+        text("funding_account_id"),
+        text("payable_account_id"),
+        jsonb("allocations", 8192, false),
+        text("status"),
+        integer("version"),
+        text("idempotency_key"),
+        text("payload_checksum"),
+        text("scheduled_event_id"),
+        text("cleared_event_id", true),
+        text("voided_event_id", true),
+        timestamp("created_at"),
+        timestamp("updated_at")
+      ],
+      [
+        { name: "bill_payment_disbursements_method_check", sql: "payment_method in ('ach', 'card', 'check')" },
+        { name: "bill_payment_disbursements_amount_check", sql: "amount > 0" },
+        {
+          name: "bill_payment_disbursements_allocations_check",
+          sql: "jsonb_typeof(allocations) = 'array' and jsonb_array_length(allocations) > 0"
+        },
+        { name: "bill_payment_disbursements_status_check", sql: "status in ('scheduled', 'cleared', 'voided')" },
+        { name: "bill_payment_disbursements_version_check", sql: "version >= 1" },
+        { name: "bill_payment_disbursements_checksum_check", sql: "length(payload_checksum) = 64" },
+        { name: "bill_payment_disbursements_timestamp_check", sql: "updated_at >= created_at" },
+        {
+          name: "bill_payment_disbursements_state_shape_check",
+          sql: "(status = 'scheduled' and subledger_document_id is null and cleared_event_id is null and voided_event_id is null) or (status = 'cleared' and subledger_document_id is not null and cleared_event_id is not null and voided_event_id is null) or (status = 'voided' and voided_event_id is not null)"
+        },
+        foreignKey(
+          "bill_payment_disbursements_company_source_scope_fk",
+          ["tenant_id", "company_id", "source_id"],
+          "company_sources",
+          ["tenant_id", "company_id", "source_id"]
+        ),
+        foreignKey(
+          "bill_payment_disbursements_document_scope_fk",
+          ["tenant_id", "company_id", "source_id", "subledger_document_id"],
+          "subledger_documents",
+          ["tenant_id", "company_id", "source_id", "subledger_document_id"]
+        ),
+        foreignKey(
+          "bill_payment_disbursements_vendor_scope_fk",
+          ["tenant_id", "source_id", "vendor_id"],
+          "parties",
+          ["tenant_id", "source_id", "party_id"]
+        ),
+        foreignKey(
+          "bill_payment_disbursements_funding_account_scope_fk",
+          ["tenant_id", "source_id", "funding_account_id"],
+          "accounts",
+          ["tenant_id", "source_id", "account_id"]
+        ),
+        foreignKey(
+          "bill_payment_disbursements_payable_account_scope_fk",
+          ["tenant_id", "source_id", "payable_account_id"],
+          "accounts",
+          ["tenant_id", "source_id", "account_id"]
+        ),
+        foreignKey(
+          "bill_payment_disbursements_scheduled_event_scope_fk",
+          ["tenant_id", "company_id", "source_id", "scheduled_event_id"],
+          "financial_lifecycle_events",
+          ["tenant_id", "company_id", "source_id", "event_id"]
+        ),
+        foreignKey(
+          "bill_payment_disbursements_cleared_event_scope_fk",
+          ["tenant_id", "company_id", "source_id", "cleared_event_id"],
+          "financial_lifecycle_events",
+          ["tenant_id", "company_id", "source_id", "event_id"]
+        ),
+        foreignKey(
+          "bill_payment_disbursements_voided_event_scope_fk",
+          ["tenant_id", "company_id", "source_id", "voided_event_id"],
+          "financial_lifecycle_events",
+          ["tenant_id", "company_id", "source_id", "event_id"]
+        )
+      ],
+      [
+        {
+          name: "bill_payment_disbursements_scope_uidx",
+          columns: ["tenant_id", "company_id", "source_id", "bill_payment_id"],
+          unique: true
+        },
+        {
+          name: "bill_payment_disbursements_idempotency_uidx",
+          columns: ["tenant_id", "company_id", "source_id", "idempotency_key"],
+          unique: true
+        },
+        {
+          name: "bill_payment_disbursements_register_idx",
+          columns: ["tenant_id", "company_id", "source_id", "status", "payment_date", "bill_payment_id"]
+        },
+        {
+          name: "bill_payment_disbursements_vendor_idx",
+          columns: ["tenant_id", "company_id", "source_id", "vendor_id", "payment_date"]
         }
       ]
     ),

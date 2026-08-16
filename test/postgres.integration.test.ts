@@ -44,9 +44,9 @@ describeIntegration("ERP Financials real PostgreSQL", () => {
     expect(result.targetVersion).toBe(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion);
     expect(result.applied.at(-1)?.toVersion).toBe(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion);
     expect(schema).toMatchObject({ compatible: true, fixtureSupport: true, issues: [] });
-    expect(history).toMatchObject({ compatible: true, currentVersion: 17, issues: [] });
+    expect(history).toMatchObject({ compatible: true, currentVersion: 18, issues: [] });
     await expect(
-      pool.query("update erp_financials.schema_migrations set name = 'tampered' where to_version = 17")
+      pool.query("update erp_financials.schema_migrations set name = 'tampered' where to_version = 18")
     ).rejects.toThrow("schema migration history is append-only");
   });
 
@@ -479,6 +479,103 @@ where application.subledger_application_id = $1`,
       periodEnd: "2026-08-31",
       status: "voided"
     })).resolves.toMatchObject({ items: [{ paymentId: payment.documentId, version: 2 }] });
+  });
+
+  it("atomically clears ordered vendor bills, exposes provenance and summary, and compensates applications", async () => {
+    await migratePostgresSchema(runner, { appliedByRef: "integration:bill-payment-disbursement" });
+    await seedAccountingScope(pool);
+    const operation = sdkOperation();
+    const sdk = createErpFinancialsSdk({
+      database: runner,
+      tenantId: "tenant_1",
+      companyId: "company_1",
+      bookId: "book_primary",
+      writeSourceId: "source_1",
+      currencyCode: "USD",
+      postingPolicy: "legacy_unrestricted",
+      now: () => "2026-08-12T12:00:00.000Z"
+    });
+    await sdk.books.define({ operation, bookId: "book_primary", name: "Primary", baseCurrencyCode: "USD" });
+    await sdk.books.bindSource({
+      operation,
+      bookId: "book_primary",
+      sourceId: "source_1",
+      sourceRole: "active",
+      effectiveFrom: "2026-01-01"
+    });
+    const firstBill = await sdk.commands.vendorBills.create({
+      operation,
+      idempotencyKey: "integration-disbursement-bill-1",
+      date: "2026-08-01",
+      dueDate: "2026-08-31",
+      vendorId: "vendor_1",
+      payableAccount: { accountId: "account_ap" },
+      expenseLines: [{ accountId: "account_cash", amount: "12.00" }]
+    });
+    const secondBill = await sdk.commands.vendorBills.create({
+      operation,
+      idempotencyKey: "integration-disbursement-bill-2",
+      date: "2026-08-02",
+      dueDate: "2026-08-31",
+      vendorId: "vendor_1",
+      payableAccount: { accountId: "account_ap" },
+      expenseLines: [{ accountId: "account_cash", amount: "8.00" }]
+    });
+    const command = {
+      operation,
+      idempotencyKey: "integration-disbursement",
+      date: "2026-08-10" as const,
+      documentNumber: "PAY-200",
+      vendorId: "vendor_1",
+      amount: "20.00",
+      paymentMethod: "ach" as const,
+      reference: "ACH-200",
+      payableAccount: { accountId: "account_ap" },
+      cashAccount: { accountId: "account_cash" },
+      allocations: [
+        { billId: firstBill.documentId, amount: "12.00", expectedBillVersion: 1 },
+        { billId: secondBill.documentId, amount: "8.00", expectedBillVersion: 1 }
+      ]
+    };
+    const cleared = await sdk.commands.billPayments.recordAndApply(command);
+    await expect(sdk.commands.billPayments.recordAndApply(command)).resolves.toMatchObject({
+      status: "already_cleared",
+      billPaymentId: cleared.billPaymentId
+    });
+    await expect(sdk.queries.getBillPayment(cleared.billPaymentId)).resolves.toMatchObject({
+      status: "cleared",
+      paymentMethod: "ach",
+      reference: "ACH-200",
+      fundingAccount: { accountId: "account_cash", creditAmount: "20.00" },
+      payableAccount: { accountId: "account_ap", debitAmount: "20.00" },
+      applications: [
+        { targetDocumentId: firstBill.documentId, amount: "12.00" },
+        { targetDocumentId: secondBill.documentId, amount: "8.00" }
+      ]
+    });
+    await expect(sdk.queries.getBillPaymentSummary({
+      periodStart: "2026-08-01",
+      periodEnd: "2026-08-31",
+      status: "cleared"
+    })).resolves.toMatchObject({ clearedAmount: "20.00", clearedCount: 1, totalAmount: "20.00", totalCount: 1 });
+
+    const compensated = await sdk.commands.billPayments.voidAndUnapply({
+      operation: { ...operation, requestId: "request:compensate-disbursement" },
+      billPaymentId: cleared.billPaymentId,
+      expectedVersion: 2,
+      idempotencyKey: "integration-compensate-disbursement",
+      date: "2026-08-12",
+      memo: "Rejected ACH"
+    });
+    expect(compensated).toMatchObject({ status: "voided", disbursementVersion: 3 });
+    await expect(sdk.queries.getVendorBill(firstBill.documentId)).resolves.toMatchObject({
+      status: "open",
+      openAmount: "12.00"
+    });
+    await expect(sdk.queries.getVendorBill(secondBill.documentId)).resolves.toMatchObject({
+      status: "open",
+      openAmount: "8.00"
+    });
   });
 
   it("uses the scoped transaction identity index for an important journal lookup", async () => {

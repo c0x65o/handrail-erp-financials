@@ -274,6 +274,10 @@ describe("pre-v1 SDK foundation", () => {
       transactionId: "transaction_payment_1",
       status: "voided",
       version: 2,
+      paymentMethod: "ach",
+      reference: "ACH-100",
+      fundingAccount: { accountId: "account_cash", postingId: "posting_cash" },
+      payableAccount: { accountId: "account_ap", postingId: "posting_ap" },
       memo: "Duplicate payment",
       lifecycle: {
         posted: {
@@ -296,6 +300,23 @@ describe("pre-v1 SDK foundation", () => {
         status: "unapplied",
         version: 2
       })]
+    });
+
+    await expect(queries.getBillPaymentSummary({
+      periodStart: "2026-08-01",
+      periodEnd: "2026-08-31"
+    })).resolves.toEqual({
+      periodStart: "2026-08-01",
+      periodEnd: "2026-08-31",
+      currencyCode: "USD",
+      scheduledAmount: "30.00",
+      scheduledCount: 1,
+      clearedAmount: "20.00",
+      clearedCount: 1,
+      voidedAmount: "10.00",
+      voidedCount: 1,
+      totalAmount: "60.00",
+      totalCount: 3
     });
 
     await expect(queries.listPayments({
@@ -552,9 +573,54 @@ class BillPaymentClient implements PostgresQueryClient {
         application_count: 0
       }] as unknown as Row[] });
     }
-    if (sql.includes('posted."event_id" as "posted_event_id"')) {
+    if (sql.includes("with canonical_bill_payments as") && sql.includes("from filtered")) {
+      return Promise.resolve({ rows: [{
+        scheduled_amount: "30",
+        scheduled_count: 1,
+        cleared_amount: "20",
+        cleared_count: 1,
+        voided_amount: "10",
+        voided_count: 1,
+        total_amount: "60",
+        total_count: 3
+      }] as unknown as Row[] });
+    }
+    if (sql.includes("with canonical_bill_payments as")) {
+      return Promise.resolve({ rows: [{
+        payment_id: "payment_1",
+        source_id: "source_1",
+        vendor_id: "vendor_1",
+        vendor_name: "Northwind Security",
+        document_number: "PAY-100",
+        payment_date: "2026-08-05",
+        currency_code: "USD",
+        amount: "20",
+        status: "voided",
+        version: 2,
+        payment_method: "ach",
+        payment_reference: "ACH-100",
+        funding_account_id: "account_cash",
+        payable_account_id: "account_ap",
+        transaction_id: "transaction_payment_1",
+        document_version: 4,
+        application_status: "voided",
+        application_count: 0
+      }] as unknown as Row[] });
+    }
+    if (sql.includes('scheduled."event_id" as "scheduled_event_id"')) {
       return Promise.resolve({ rows: [{
         memo: "Duplicate payment",
+        allocations: [{ billId: "bill_1", amount: "10.00", expectedBillVersion: 1 }],
+        scheduled_event_id: "event_payment_scheduled",
+        scheduled_actor_ref: "user:clerk",
+        scheduled_approver_ref: null,
+        scheduled_request_id: "request-schedule-payment",
+        scheduled_reason_code: "schedule_bill_payment",
+        cleared_event_id: "event_payment_cleared",
+        cleared_actor_ref: "user:clerk",
+        cleared_approver_ref: null,
+        cleared_request_id: "request-clear-payment",
+        cleared_reason_code: "clear_bill_payment",
         posted_event_id: "event_payment_posted",
         posted_actor_ref: "user:clerk",
         posted_approver_ref: null,
@@ -565,7 +631,15 @@ class BillPaymentClient implements PostgresQueryClient {
         voided_approver_ref: "user:cfo",
         voided_request_id: "request-void-payment",
         voided_reason_code: "duplicate_payment",
-        reversal_transaction_id: "transaction_payment_reversal"
+        reversal_transaction_id: "transaction_payment_reversal",
+        funding_account_id: "account_cash",
+        funding_posting_id: "posting_cash",
+        funding_debit_amount: "0",
+        funding_credit_amount: "20",
+        payable_account_id: "account_ap",
+        payable_posting_id: "posting_ap",
+        payable_debit_amount: "20",
+        payable_credit_amount: "0"
       }] as unknown as Row[] });
     }
     if (sql.includes('from "erp_financials"."subledger_applications" application')) {

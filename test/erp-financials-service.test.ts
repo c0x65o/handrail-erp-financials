@@ -1160,6 +1160,207 @@ describe("reusable ERP Financials service", () => {
     });
   });
 
+  it("records and allocates an ordered vendor disbursement atomically with payload-bound replay", async () => {
+    const database = subledgerDatabase();
+    const financials = service(database);
+    const firstBill = await financials.vendorBills.create({
+      operation: operation("request-first-bill"),
+      idempotencyKey: "first-bill",
+      date: "2026-08-04",
+      dueDate: "2026-09-03",
+      vendorId: "vendor_northwind",
+      payableAccount: { accountId: "acct_payable" },
+      expenseLines: [{ accountId: "acct_expense", amount: "12.00" }]
+    });
+    const secondBill = await financials.vendorBills.create({
+      operation: operation("request-second-bill"),
+      idempotencyKey: "second-bill",
+      date: "2026-08-04",
+      dueDate: "2026-09-03",
+      vendorId: "vendor_northwind",
+      payableAccount: { accountId: "acct_payable" },
+      expenseLines: [{ accountId: "acct_expense", amount: "8.00" }]
+    });
+    const command = {
+      operation: operation("request-settle-bills"),
+      idempotencyKey: "settle-bills",
+      date: "2026-08-10" as const,
+      documentNumber: "PAY-200",
+      vendorId: "vendor_northwind",
+      amount: "20.00",
+      paymentMethod: "ach" as const,
+      reference: "ACH-8871",
+      payableAccount: { accountId: "acct_payable" },
+      cashAccount: { accountId: "acct_cash" },
+      allocations: [
+        { billId: firstBill.documentId, amount: "12.00", expectedBillVersion: 1 },
+        { billId: secondBill.documentId, amount: "8.00", expectedBillVersion: 1 }
+      ]
+    };
+
+    const result = await financials.billPayments.recordAndApply(command);
+    expect(result).toMatchObject({
+      status: "cleared",
+      version: 2,
+      payment: { documentStatus: "settled", openAmount: "0.00", version: 3 },
+      applications: [
+        { targetDocumentId: firstBill.documentId, appliedAmount: "12.00", status: "applied" },
+        { targetDocumentId: secondBill.documentId, appliedAmount: "8.00", status: "applied" }
+      ]
+    });
+    expect(database.client.billPaymentDisbursements).toEqual([
+      expect.objectContaining({
+        bill_payment_id: result.billPaymentId,
+        payment_method: "ach",
+        payment_reference: "ACH-8871",
+        funding_account_id: "acct_cash",
+        payable_account_id: "acct_payable",
+        status: "cleared",
+        version: 2
+      })
+    ]);
+    await expect(financials.billPayments.recordAndApply(command)).resolves.toMatchObject({
+      status: "already_cleared",
+      billPaymentId: result.billPaymentId
+    });
+    expect(database.client.subledgerApplications).toHaveLength(2);
+
+    await expect(financials.billPayments.recordAndApply({
+      ...command,
+      reference: "ACH-DIFFERENT"
+    })).rejects.toBeInstanceOf(ErpFinancialsIdempotencyConflictError);
+  });
+
+  it("rolls back the complete disbursement when any ordered allocation is ineligible", async () => {
+    const database = subledgerDatabase();
+    const financials = service(database);
+    const firstBill = await financials.vendorBills.create({
+      operation: operation("request-atomic-bill-1"), idempotencyKey: "atomic-bill-1", date: "2026-08-04",
+      dueDate: "2026-09-03", vendorId: "vendor_northwind",
+      payableAccount: { accountId: "acct_payable" },
+      expenseLines: [{ accountId: "acct_expense", amount: "12.00" }]
+    });
+    const wrongVendorBill = await financials.vendorBills.create({
+      operation: operation("request-atomic-bill-2"), idempotencyKey: "atomic-bill-2", date: "2026-08-04",
+      dueDate: "2026-09-03", vendorId: "vendor_other",
+      payableAccount: { accountId: "acct_payable" },
+      expenseLines: [{ accountId: "acct_expense", amount: "8.00" }]
+    });
+
+    await expect(financials.billPayments.recordAndApply({
+      operation: operation("request-invalid-atomic-disbursement"),
+      idempotencyKey: "invalid-atomic-disbursement",
+      date: "2026-08-10",
+      vendorId: "vendor_northwind",
+      amount: "20.00",
+      paymentMethod: "ach",
+      payableAccount: { accountId: "acct_payable" },
+      cashAccount: { accountId: "acct_cash" },
+      allocations: [
+        { billId: firstBill.documentId, amount: "12.00", expectedBillVersion: 1 },
+        { billId: wrongVendorBill.documentId, amount: "8.00", expectedBillVersion: 1 }
+      ]
+    })).rejects.toMatchObject({ code: "scope_mismatch" });
+    expect(database.client.billPaymentDisbursements).toHaveLength(0);
+    expect(database.client.subledgerApplications).toHaveLength(0);
+    expect(database.client.subledgerDocuments).toHaveLength(2);
+    expect(database.rollbacks).toBe(1);
+  });
+
+  it("schedules, clears, and atomically compensates an applied bill payment", async () => {
+    const database = subledgerDatabase();
+    const financials = service(database);
+    const bill = await financials.vendorBills.create({
+      operation: operation("request-scheduled-bill"),
+      idempotencyKey: "scheduled-bill",
+      date: "2026-08-04",
+      dueDate: "2026-09-03",
+      vendorId: "vendor_northwind",
+      payableAccount: { accountId: "acct_payable" },
+      expenseLines: [{ accountId: "acct_expense", amount: "20.00" }]
+    });
+    const scheduled = await financials.billPayments.schedule({
+      operation: operation("request-schedule-payment"),
+      idempotencyKey: "scheduled-payment",
+      date: "2026-08-10",
+      vendorId: "vendor_northwind",
+      amount: "20.00",
+      paymentMethod: "check",
+      reference: "1042",
+      payableAccount: { accountId: "acct_payable" },
+      cashAccount: { accountId: "acct_cash" },
+      allocations: [{ billId: bill.documentId, amount: "20.00", expectedBillVersion: 1 }]
+    });
+    expect(scheduled).toMatchObject({ status: "scheduled", version: 1 });
+    expect(database.client.subledgerDocuments).toHaveLength(1);
+
+    const cleared = await financials.billPayments.clear({
+      operation: operation("request-clear-payment"),
+      billPaymentId: scheduled.billPaymentId,
+      expectedVersion: 1,
+      idempotencyKey: "clear-scheduled-payment"
+    });
+    expect(cleared).toMatchObject({ status: "cleared", version: 2 });
+    expect(subledgerRow(database, bill.documentId)).toMatchObject({ status: "settled", open_amount: "0.00" });
+
+    const compensated = await financials.billPayments.voidAndUnapply({
+      operation: approvedOperation("request-compensate-payment"),
+      billPaymentId: scheduled.billPaymentId,
+      expectedVersion: 2,
+      idempotencyKey: "compensate-scheduled-payment",
+      date: "2026-08-14",
+      memo: "Cancelled check"
+    });
+    expect(compensated).toMatchObject({
+      status: "voided",
+      disbursementVersion: 3,
+      endedApplications: [{ status: "voided" }]
+    });
+    expect(subledgerRow(database, bill.documentId)).toMatchObject({ status: "open", open_amount: "20.00" });
+    expect(subledgerRow(database, scheduled.billPaymentId)).toMatchObject({ status: "voided", open_amount: "0.00" });
+    expect(database.client.billPaymentDisbursements[0]).toMatchObject({ status: "voided", version: 3 });
+  });
+
+  it("cancels a scheduled bill payment optimistically and idempotently without posting", async () => {
+    const database = subledgerDatabase();
+    const financials = service(database);
+    const bill = await financials.vendorBills.create({
+      operation: operation("request-cancel-bill"),
+      idempotencyKey: "cancel-bill",
+      date: "2026-08-04",
+      dueDate: "2026-09-03",
+      vendorId: "vendor_northwind",
+      payableAccount: { accountId: "acct_payable" },
+      expenseLines: [{ accountId: "acct_expense", amount: "20.00" }]
+    });
+    const scheduled = await financials.billPayments.schedule({
+      operation: operation("request-schedule-cancelled-payment"),
+      idempotencyKey: "cancelled-payment",
+      date: "2026-08-20",
+      vendorId: "vendor_northwind",
+      amount: "20.00",
+      paymentMethod: "card",
+      reference: "CARD-200",
+      payableAccount: { accountId: "acct_payable" },
+      cashAccount: { accountId: "acct_cash" },
+      allocations: [{ billId: bill.documentId, amount: "20.00", expectedBillVersion: 1 }]
+    });
+    const command = {
+      operation: approvedOperation("request-cancel-scheduled-payment"),
+      billPaymentId: scheduled.billPaymentId,
+      expectedVersion: 1,
+      idempotencyKey: "cancel-scheduled-payment"
+    } as const;
+    await expect(financials.billPayments.cancel(command)).resolves.toMatchObject({ status: "voided", version: 2 });
+    await expect(financials.billPayments.cancel(command)).resolves.toMatchObject({ status: "already_voided", version: 2 });
+    expect(database.client.subledgerDocuments).toHaveLength(1);
+    expect(database.client.billPaymentDisbursements[0]).toMatchObject({
+      status: "voided",
+      subledger_document_id: null,
+      version: 2
+    });
+  });
+
   it("voids an unapplied issued credit through one compensating canonical lifecycle", async () => {
     const database = subledgerDatabase();
     const financials = service(database);
@@ -1484,6 +1685,7 @@ class ServiceTestClient implements PostgresQueryClient {
   journalLinks: Record<string, unknown>[] = [];
   subledgerDocuments: Record<string, unknown>[] = [];
   subledgerApplications: Record<string, unknown>[] = [];
+  billPaymentDisbursements: Record<string, unknown>[] = [];
   financialOutbox: Record<string, unknown>[] = [];
   readonly lifecycleEvents = new Map<string, Record<string, unknown>>();
   postingLockDate?: string;
@@ -1503,6 +1705,7 @@ class ServiceTestClient implements PostgresQueryClient {
       journalLinks: structuredClone(this.journalLinks),
       subledgerDocuments: structuredClone(this.subledgerDocuments),
       subledgerApplications: structuredClone(this.subledgerApplications),
+      billPaymentDisbursements: structuredClone(this.billPaymentDisbursements),
       financialOutbox: structuredClone(this.financialOutbox)
     };
   }
@@ -1517,6 +1720,7 @@ class ServiceTestClient implements PostgresQueryClient {
     this.journalLinks = snapshot.journalLinks;
     this.subledgerDocuments = snapshot.subledgerDocuments;
     this.subledgerApplications = snapshot.subledgerApplications;
+    this.billPaymentDisbursements = snapshot.billPaymentDisbursements;
     this.financialOutbox = snapshot.financialOutbox;
   }
 
@@ -1600,6 +1804,66 @@ class ServiceTestClient implements PostgresQueryClient {
       });
     }
 
+    if (sql.includes('insert into "erp_financials"."bill_payment_disbursements"')) {
+      const row: Record<string, unknown> = {
+        bill_payment_id: params[0],
+        tenant_id: params[1],
+        company_id: params[2],
+        source_id: params[3],
+        subledger_document_id: null,
+        vendor_id: params[4],
+        payment_date: params[5],
+        document_number: params[6] ?? null,
+        memo: params[7] ?? null,
+        currency_code: params[8],
+        amount: params[9],
+        payment_method: params[10],
+        payment_reference: params[11] ?? null,
+        funding_account_id: params[12],
+        payable_account_id: params[13],
+        allocations: params[14],
+        status: "scheduled",
+        version: 1,
+        idempotency_key: params[15],
+        payload_checksum: params[16],
+        scheduled_event_id: params[17],
+        cleared_event_id: null,
+        voided_event_id: null,
+        created_at: params[18],
+        updated_at: params[18]
+      };
+      this.billPaymentDisbursements.push(row);
+      return Promise.resolve({ rows: [row] as unknown as readonly Row[], rowCount: 1 });
+    }
+
+    if (sql.includes('from "erp_financials"."bill_payment_disbursements"')) {
+      const row = sql.includes('"idempotency_key" = $4')
+        ? this.billPaymentDisbursements.find((payment) => payment.idempotency_key === params[3])
+        : this.billPaymentDisbursements.find((payment) => payment.bill_payment_id === params[3]);
+      return Promise.resolve({ rows: (row === undefined ? [] : [row]) as unknown as readonly Row[] });
+    }
+
+    if (sql.startsWith('update "erp_financials"."bill_payment_disbursements"')) {
+      const row = this.billPaymentDisbursements.find((payment) => payment.bill_payment_id === params[3]);
+      const clearing = sql.includes('set "status" = \'cleared\'');
+      const expectedVersion = params[clearing ? 7 : 6];
+      if (row === undefined || row.version !== expectedVersion) {
+        return Promise.resolve({ rows: [], rowCount: 0 });
+      }
+      if (clearing) {
+        row.status = "cleared";
+        row.subledger_document_id = params[4];
+        row.cleared_event_id = params[5];
+        row.updated_at = params[6];
+      } else {
+        row.status = "voided";
+        row.voided_event_id = params[4];
+        row.updated_at = params[5];
+      }
+      row.version = Number(row.version) + 1;
+      return Promise.resolve({ rows: [{ version: row.version }] as unknown as readonly Row[], rowCount: 1 });
+    }
+
     if (sql.includes('from "erp_financials"."subledger_documents"')) {
       if (sql.includes('"idempotency_key" = $4')) {
         const row = this.subledgerDocuments.find((document) => document.idempotency_key === params[3]);
@@ -1659,10 +1923,13 @@ class ServiceTestClient implements PostgresQueryClient {
     }
 
     if (sql.includes('from "erp_financials"."subledger_applications"')) {
-      const row = sql.includes('"idempotency_key" = $4')
-        ? this.subledgerApplications.find((application) => application.idempotency_key === params[3])
-        : this.subledgerApplications.find((application) => application.subledger_application_id === params[3]);
-      return Promise.resolve({ rows: (row === undefined ? [] : [row]) as unknown as readonly Row[] });
+      const rows = sql.includes('"source_document_id" = $4')
+        ? this.subledgerApplications.filter((application) => application.source_document_id === params[3])
+        : [sql.includes('"idempotency_key" = $4')
+            ? this.subledgerApplications.find((application) => application.idempotency_key === params[3])
+            : this.subledgerApplications.find((application) => application.subledger_application_id === params[3])]
+            .filter((row): row is Record<string, unknown> => row !== undefined);
+      return Promise.resolve({ rows: rows as unknown as readonly Row[] });
     }
 
     if (sql.includes('insert into "erp_financials"."subledger_applications"')) {
@@ -1710,6 +1977,7 @@ class ServiceTestClient implements PostgresQueryClient {
       }
       const row = {
         event_id: params[0],
+        idempotency_key: idempotencyKey,
         aggregate_type: params[4],
         aggregate_id: params[5],
         event_type: params[6],
@@ -1728,6 +1996,10 @@ class ServiceTestClient implements PostgresQueryClient {
     }
 
     if (sql.includes('from "erp_financials"."financial_lifecycle_events"')) {
+      if (sql.includes('select "idempotency_key"')) {
+        const row = [...this.lifecycleEvents.values()].find((event) => event.event_id === params[3]);
+        return Promise.resolve({ rows: (row === undefined ? [] : [row]) as unknown as readonly Row[] });
+      }
       const row = sql.includes('"aggregate_type" = \'journal_entry\'')
         ? [...this.lifecycleEvents.values()].find((event) => event.aggregate_id === params[3])
         : this.lifecycleEvents.get(String(params[3]));

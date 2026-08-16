@@ -353,6 +353,66 @@ export type RecordBillPaymentInput = SubledgerDocumentInputCommon & {
   readonly amount: DecimalString;
   readonly payableAccount: ErpFinancialsAccountReference;
   readonly cashAccount: ErpFinancialsAccountReference;
+  /** Typed payment rail retained as immutable package-owned provenance. */
+  readonly paymentMethod?: BillPaymentMethod;
+  /** Provider/check reference kept separate from the accounting document number. */
+  readonly reference?: string;
+};
+
+export type BillPaymentMethod = "ach" | "card" | "check";
+
+export type BillPaymentAllocationInput = {
+  readonly billId: string;
+  readonly amount: DecimalString;
+  readonly expectedBillVersion: number;
+};
+
+export type RecordAndApplyBillPaymentInput = RecordBillPaymentInput & {
+  readonly paymentMethod: BillPaymentMethod;
+  /** Exact host ordering is retained and used for deterministic application identities. */
+  readonly allocations: readonly BillPaymentAllocationInput[];
+};
+
+export type ScheduleBillPaymentInput = RecordAndApplyBillPaymentInput;
+
+export type ClearScheduledBillPaymentInput = {
+  readonly operation: FinancialOperationContext;
+  readonly billPaymentId: string;
+  readonly expectedVersion: number;
+  readonly idempotencyKey: string;
+};
+
+export type CancelScheduledBillPaymentInput = ClearScheduledBillPaymentInput;
+
+export type VoidAndUnapplyBillPaymentInput = VoidPostedBillPaymentInput;
+
+export type ScheduledBillPaymentResult = {
+  readonly status: "scheduled" | "already_scheduled";
+  readonly billPaymentId: string;
+  readonly version: number;
+  readonly lifecycleEventId: string;
+};
+
+export type ClearedBillPaymentResult = {
+  readonly status: "cleared" | "already_cleared";
+  readonly billPaymentId: string;
+  readonly version: number;
+  readonly payment: SubledgerDocumentResult;
+  readonly applications: readonly SubledgerApplicationResult[];
+  readonly lifecycleEventId: string;
+};
+
+export type CancelledScheduledBillPaymentResult = {
+  readonly status: "voided" | "already_voided";
+  readonly billPaymentId: string;
+  readonly version: number;
+  readonly lifecycleEventId: string;
+};
+
+export type VoidAndUnapplyBillPaymentResult = PostedBillPaymentLifecycleResult & {
+  readonly endedApplications: readonly SubledgerApplicationResult[];
+  /** Version of the package-owned disbursement lifecycle, when present. */
+  readonly disbursementVersion?: number;
 };
 
 export type VoidPostedBillPaymentInput = {
@@ -526,6 +586,11 @@ export type ErpFinancials = {
   };
   readonly billPayments: {
     record(input: RecordBillPaymentInput): Promise<SubledgerDocumentResult>;
+    recordAndApply(input: RecordAndApplyBillPaymentInput): Promise<ClearedBillPaymentResult>;
+    schedule(input: ScheduleBillPaymentInput): Promise<ScheduledBillPaymentResult>;
+    clear(input: ClearScheduledBillPaymentInput): Promise<ClearedBillPaymentResult>;
+    cancel(input: CancelScheduledBillPaymentInput): Promise<CancelledScheduledBillPaymentResult>;
+    voidAndUnapply(input: VoidAndUnapplyBillPaymentInput): Promise<VoidAndUnapplyBillPaymentResult>;
     void(input: VoidPostedBillPaymentInput): Promise<PostedBillPaymentLifecycleResult>;
     voidIssued(input: VoidIssuedBillPaymentInput): Promise<PostedBillPaymentLifecycleResult>;
     voidPosted(input: VoidPostedBillPaymentInput): Promise<PostedBillPaymentLifecycleResult>;
@@ -701,6 +766,11 @@ export function createErpFinancials(input: CreateErpFinancialsInput): ErpFinanci
     },
     billPayments: {
       record: (documentInput) => recordBillPayment(context, documentInput),
+      recordAndApply: (documentInput) => recordAndApplyBillPayment(context, documentInput),
+      schedule: (documentInput) => scheduleBillPayment(context, documentInput),
+      clear: (workflowInput) => clearScheduledBillPayment(context, workflowInput),
+      cancel: (workflowInput) => cancelScheduledBillPayment(context, workflowInput),
+      voidAndUnapply: (workflowInput) => voidAndUnapplyBillPayment(context, workflowInput),
       void: (workflowInput) => runPostedBillPaymentVoid(context, workflowInput),
       voidIssued: (workflowInput) => runPostedBillPaymentVoid(context, workflowInput),
       voidPosted: (workflowInput) => runPostedBillPaymentVoid(context, workflowInput)
@@ -1085,14 +1155,749 @@ async function recordBillPayment(
   input: RecordBillPaymentInput
 ): Promise<SubledgerDocumentResult> {
   const amount = normalizedPositiveMoney(input.amount, "amount");
+  const fundingAccountId = resolveAccountId(context, input.cashAccount);
+  const payableAccountId = resolveAccountId(context, input.payableAccount);
+  if (input.paymentMethod !== undefined) assertBillPaymentMethod(input.paymentMethod);
+  optionalNonEmpty(input.reference, "reference");
   return createSubledgerDocument(context, {
-    ...commonSubledgerDocument(context, input, "bill_payment", amount, true),
+    ...commonSubledgerDocument(context, input, "bill_payment", amount, true, {
+      billPaymentProvenance: {
+        fundingAccountId,
+        payableAccountId,
+        ...(input.paymentMethod === undefined ? {} : { paymentMethod: input.paymentMethod }),
+        ...(input.reference === undefined ? {} : { reference: input.reference })
+      }
+    }),
     partyId: input.vendorId,
     journalLines: [
       { ...input.payableAccount, debit: amount, partyId: input.vendorId },
       { ...input.cashAccount, credit: amount, partyId: input.vendorId }
     ]
   });
+}
+
+type NormalizedBillPaymentInstruction = {
+  readonly billPaymentId: string;
+  readonly idempotencyKey: string;
+  readonly date: IsoDate;
+  readonly documentNumber?: string;
+  readonly memo?: string;
+  readonly vendorId: string;
+  readonly currencyCode: IsoCurrencyCode;
+  readonly amount: DecimalString;
+  readonly paymentMethod: BillPaymentMethod;
+  readonly reference?: string;
+  readonly fundingAccountId: AccountId;
+  readonly payableAccountId: AccountId;
+  readonly allocations: readonly BillPaymentAllocationInput[];
+  readonly payloadChecksum: string;
+};
+
+async function scheduleBillPayment(
+  context: ServiceContext,
+  input: ScheduleBillPaymentInput
+): Promise<ScheduledBillPaymentResult> {
+  const instruction = normalizeBillPaymentInstruction(context, input);
+  return context.database.transaction(async (client) => {
+    await acquireTransactionLock(client, billPaymentInstructionLock(context, instruction.idempotencyKey));
+    await assertCompanySourceScope(client, context);
+    const row = await createOrLoadBillPaymentInstruction(client, context, instruction, input.operation);
+    return {
+      status: row.created ? "scheduled" : "already_scheduled",
+      billPaymentId: instruction.billPaymentId,
+      version: storedInteger(row.value.version, "bill payment version"),
+      lifecycleEventId: storedString(row.value.scheduled_event_id, "scheduled_event_id")
+    };
+  });
+}
+
+async function recordAndApplyBillPayment(
+  context: ServiceContext,
+  input: RecordAndApplyBillPaymentInput
+): Promise<ClearedBillPaymentResult> {
+  const instruction = normalizeBillPaymentInstruction(context, input);
+  return context.database.transaction(async (client) => {
+    await acquireTransactionLock(client, billPaymentInstructionLock(context, instruction.idempotencyKey));
+    await assertCompanySourceScope(client, context);
+    const scheduled = await createOrLoadBillPaymentInstruction(client, context, instruction, input.operation);
+    const currentStatus = storedString(scheduled.value.status, "bill payment status");
+    if (currentStatus === "voided") {
+      throw new ErpFinancialsError("terminal_state_conflict", `Bill payment ${instruction.billPaymentId} is voided`);
+    }
+    const nestedContext = nestedServiceContext(context, client);
+    if (currentStatus === "cleared") {
+      await assertLifecycleReplayKey(
+        client,
+        context,
+        scheduled.value.cleared_event_id,
+        `bill-payment:${input.idempotencyKey}:cleared`,
+        input.operation
+      );
+      return materializeClearedBillPayment(
+        nestedContext,
+        instruction,
+        input.operation,
+        "already_cleared",
+        storedInteger(scheduled.value.version, "bill payment version"),
+        storedString(scheduled.value.cleared_event_id, "cleared_event_id")
+      );
+    }
+    return clearBillPaymentInstruction(
+      client,
+      context,
+      nestedContext,
+      instruction,
+      input.operation,
+      storedInteger(scheduled.value.version, "bill payment version"),
+      input.idempotencyKey
+    );
+  });
+}
+
+async function clearScheduledBillPayment(
+  context: ServiceContext,
+  input: ClearScheduledBillPaymentInput
+): Promise<ClearedBillPaymentResult> {
+  assertFinancialOperationContext(input.operation);
+  assertNonEmpty(input.billPaymentId, "billPaymentId");
+  assertNonEmpty(input.idempotencyKey, "idempotencyKey");
+  assertExpectedSubledgerVersion(input.expectedVersion, "expectedVersion");
+  return context.database.transaction(async (client) => {
+    await acquireTransactionLock(client, billPaymentLifecycleLock(context, input.billPaymentId));
+    await assertCompanySourceScope(client, context);
+    const row = await loadBillPaymentInstructionForUpdate(client, context, input.billPaymentId);
+    const instruction = billPaymentInstructionFromRow(row);
+    const status = storedString(row.status, "bill payment status");
+    const nestedContext = nestedServiceContext(context, client);
+    if (status === "cleared") {
+      const currentVersion = storedInteger(row.version, "bill payment version");
+      if (currentVersion !== input.expectedVersion + 1) {
+        throw optimisticBillPaymentConflict(input.billPaymentId, input.expectedVersion, currentVersion - 1);
+      }
+      await assertLifecycleReplayKey(
+        client,
+        context,
+        row.cleared_event_id,
+        `bill-payment:${input.idempotencyKey}:cleared`,
+        input.operation
+      );
+      return materializeClearedBillPayment(
+        nestedContext,
+        instruction,
+        input.operation,
+        "already_cleared",
+        storedInteger(row.version, "bill payment version"),
+        storedString(row.cleared_event_id, "cleared_event_id")
+      );
+    }
+    if (status !== "scheduled") {
+      throw new ErpFinancialsError("terminal_state_conflict", `Bill payment ${input.billPaymentId} is ${status}`);
+    }
+    const version = storedInteger(row.version, "bill payment version");
+    if (version !== input.expectedVersion) {
+      throw optimisticBillPaymentConflict(input.billPaymentId, input.expectedVersion, version);
+    }
+    return clearBillPaymentInstruction(
+      client,
+      context,
+      nestedContext,
+      instruction,
+      input.operation,
+      version,
+      input.idempotencyKey
+    );
+  });
+}
+
+async function cancelScheduledBillPayment(
+  context: ServiceContext,
+  input: CancelScheduledBillPaymentInput
+): Promise<CancelledScheduledBillPaymentResult> {
+  assertIndependentApproval(input.operation);
+  assertNonEmpty(input.billPaymentId, "billPaymentId");
+  assertNonEmpty(input.idempotencyKey, "idempotencyKey");
+  assertExpectedSubledgerVersion(input.expectedVersion, "expectedVersion");
+  return context.database.transaction(async (client) => {
+    await acquireTransactionLock(client, billPaymentLifecycleLock(context, input.billPaymentId));
+    await assertCompanySourceScope(client, context);
+    const row = await loadBillPaymentInstructionForUpdate(client, context, input.billPaymentId);
+    const status = storedString(row.status, "bill payment status");
+    if (status === "voided") {
+      const currentVersion = storedInteger(row.version, "bill payment version");
+      if (currentVersion !== input.expectedVersion + 1) {
+        throw optimisticBillPaymentConflict(input.billPaymentId, input.expectedVersion, currentVersion - 1);
+      }
+      await assertLifecycleReplayKey(
+        client,
+        context,
+        row.voided_event_id,
+        `bill-payment:${input.idempotencyKey}:cancelled`,
+        input.operation
+      );
+      return {
+        status: "already_voided",
+        billPaymentId: input.billPaymentId,
+        version: currentVersion,
+        lifecycleEventId: storedString(row.voided_event_id, "voided_event_id")
+      };
+    }
+    if (status !== "scheduled") {
+      throw new ErpFinancialsError("terminal_state_conflict", "Only a scheduled bill payment can be cancelled");
+    }
+    const version = storedInteger(row.version, "bill payment version");
+    if (version !== input.expectedVersion) {
+      throw optimisticBillPaymentConflict(input.billPaymentId, input.expectedVersion, version);
+    }
+    const lifecycle = await appendFinancialLifecycleEvent(client, {
+      tenantId: context.tenantId,
+      companyId: context.companyId,
+      sourceId: context.sourceId,
+      aggregateType: "bill_payment",
+      aggregateId: input.billPaymentId,
+      eventType: "bill_payment.cancelled",
+      idempotencyKey: `bill-payment:${input.idempotencyKey}:cancelled`,
+      operation: input.operation,
+      recordedAt: context.now(),
+      priorEventId: storedString(row.scheduled_event_id, "scheduled_event_id"),
+      payload: { billPaymentId: input.billPaymentId, priorVersion: version }
+    });
+    const updated = await client.query(
+      `update "erp_financials"."bill_payment_disbursements"
+set "status" = 'voided', "version" = "version" + 1, "voided_event_id" = $5, "updated_at" = $6
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3 and "bill_payment_id" = $4
+  and "status" = 'scheduled' and "version" = $7
+returning "version"`,
+      [context.tenantId, context.companyId, context.sourceId, input.billPaymentId, lifecycle.eventId, context.now(), version]
+    );
+    const updatedRow = updated.rows[0];
+    if (updatedRow === undefined) throw optimisticBillPaymentConflict(input.billPaymentId, version, version + 1);
+    await appendServiceOutboxEvent(client, context, {
+      eventType: "bill_payment.cancelled",
+      aggregateType: "bill_payment",
+      aggregateId: input.billPaymentId,
+      idempotencyKey: `bill-payment:${input.idempotencyKey}:outbox:cancelled`,
+      payload: { billPaymentId: input.billPaymentId }
+    });
+    return {
+      status: "voided",
+      billPaymentId: input.billPaymentId,
+      version: storedInteger(updatedRow.version, "bill payment version"),
+      lifecycleEventId: lifecycle.eventId
+    };
+  });
+}
+
+async function clearBillPaymentInstruction(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  nestedContext: ServiceContext,
+  instruction: NormalizedBillPaymentInstruction,
+  operation: FinancialOperationContext,
+  expectedVersion: number,
+  lifecycleIdempotencyKey: string
+): Promise<ClearedBillPaymentResult> {
+  await assertBillPaymentBillsForInstruction(client, context, instruction);
+  const materialized = await materializeClearedBillPayment(
+    nestedContext,
+    instruction,
+    operation,
+    "cleared",
+    expectedVersion + 1,
+    "pending"
+  );
+  const lifecycle = await appendFinancialLifecycleEvent(client, {
+    tenantId: context.tenantId,
+    companyId: context.companyId,
+    sourceId: context.sourceId,
+    aggregateType: "bill_payment",
+    aggregateId: instruction.billPaymentId,
+    eventType: "bill_payment.cleared",
+    idempotencyKey: `bill-payment:${lifecycleIdempotencyKey}:cleared`,
+    operation,
+    recordedAt: context.now(),
+    priorEventId: await scheduledLifecycleEventId(client, context, instruction.billPaymentId),
+    payload: {
+      allocations: instruction.allocations,
+      amount: instruction.amount,
+      billPaymentId: instruction.billPaymentId,
+      transactionId: materialized.payment.journal.transactionId
+    }
+  });
+  const updated = await client.query(
+    `update "erp_financials"."bill_payment_disbursements"
+set "status" = 'cleared', "version" = "version" + 1, "subledger_document_id" = $5,
+  "cleared_event_id" = $6, "updated_at" = $7
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3 and "bill_payment_id" = $4
+  and "status" = 'scheduled' and "version" = $8
+returning "version"`,
+    [
+      context.tenantId,
+      context.companyId,
+      context.sourceId,
+      instruction.billPaymentId,
+      materialized.payment.documentId,
+      lifecycle.eventId,
+      context.now(),
+      expectedVersion
+    ]
+  );
+  const row = updated.rows[0];
+  if (row === undefined) throw optimisticBillPaymentConflict(instruction.billPaymentId, expectedVersion, expectedVersion + 1);
+  await appendServiceOutboxEvent(client, context, {
+    eventType: "bill_payment.cleared",
+    aggregateType: "bill_payment",
+    aggregateId: instruction.billPaymentId,
+    idempotencyKey: `bill-payment:${lifecycleIdempotencyKey}:outbox:cleared`,
+    payload: {
+      applicationIds: materialized.applications.map((application) => application.applicationId),
+      billPaymentId: instruction.billPaymentId,
+      transactionId: materialized.payment.journal.transactionId
+    }
+  });
+  return {
+    ...materialized,
+    version: storedInteger(row.version, "bill payment version"),
+    lifecycleEventId: lifecycle.eventId
+  };
+}
+
+async function materializeClearedBillPayment(
+  context: ServiceContext,
+  instruction: NormalizedBillPaymentInstruction,
+  operation: FinancialOperationContext,
+  status: ClearedBillPaymentResult["status"],
+  version: number,
+  lifecycleEventId: string
+): Promise<ClearedBillPaymentResult> {
+  const payment = await recordBillPayment(context, {
+    operation,
+    idempotencyKey: instruction.idempotencyKey,
+    date: instruction.date,
+    ...(instruction.documentNumber === undefined ? {} : { documentNumber: instruction.documentNumber }),
+    ...(instruction.memo === undefined ? {} : { memo: instruction.memo }),
+    currencyCode: instruction.currencyCode,
+    vendorId: instruction.vendorId,
+    amount: instruction.amount,
+    paymentMethod: instruction.paymentMethod,
+    ...(instruction.reference === undefined ? {} : { reference: instruction.reference }),
+    payableAccount: { accountId: instruction.payableAccountId },
+    cashAccount: { accountId: instruction.fundingAccountId }
+  });
+  const applications: SubledgerApplicationResult[] = [];
+  for (const [index, allocation] of instruction.allocations.entries()) {
+    applications.push(await applySubledgerPayment(context, {
+      operation,
+      idempotencyKey: billPaymentAllocationIdempotencyKey(instruction, allocation, index),
+      applicationType: "bill_payment_to_bill",
+      sourceDocumentId: instruction.billPaymentId,
+      targetDocumentId: allocation.billId,
+      amount: allocation.amount,
+      applicationDate: instruction.date,
+      expectedSourceVersion: index + 1,
+      expectedTargetVersion: allocation.expectedBillVersion
+    }));
+  }
+  const currentPayment = await context.database.transaction(async (client) => {
+    const result = await client.query(
+      `select * from "erp_financials"."subledger_documents"
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3 and "subledger_document_id" = $4
+for key share`,
+      [context.tenantId, context.companyId, context.sourceId, instruction.billPaymentId]
+    );
+    const row = result.rows[0];
+    if (row === undefined) throw new Error("Cleared bill payment document was not found");
+    return documentResult(row, payment.journal);
+  });
+  return {
+    status,
+    billPaymentId: instruction.billPaymentId,
+    version,
+    payment: currentPayment,
+    applications,
+    lifecycleEventId
+  };
+}
+
+async function createOrLoadBillPaymentInstruction(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  instruction: NormalizedBillPaymentInstruction,
+  operation: FinancialOperationContext
+): Promise<{ readonly created: boolean; readonly value: Record<string, unknown> }> {
+  const existing = await loadBillPaymentInstructionByIdempotencyKey(client, context, instruction.idempotencyKey);
+  if (existing !== undefined) {
+    if (
+      storedString(existing.bill_payment_id, "bill_payment_id") !== instruction.billPaymentId ||
+      storedString(existing.payload_checksum, "payload_checksum") !== instruction.payloadChecksum
+    ) {
+      throw new ErpFinancialsIdempotencyConflictError(instruction.idempotencyKey);
+    }
+    return { created: false, value: existing };
+  }
+  await assertBillPaymentInstructionScope(client, context, instruction);
+  const lifecycle = await appendFinancialLifecycleEvent(client, {
+    tenantId: context.tenantId,
+    companyId: context.companyId,
+    sourceId: context.sourceId,
+    aggregateType: "bill_payment",
+    aggregateId: instruction.billPaymentId,
+    eventType: "bill_payment.scheduled",
+    idempotencyKey: `bill-payment:${instruction.idempotencyKey}:scheduled`,
+    operation,
+    recordedAt: context.now(),
+    payload: billPaymentInstructionPayload(instruction)
+  });
+  const inserted = await client.query(
+    `insert into "erp_financials"."bill_payment_disbursements" (
+  "bill_payment_id", "tenant_id", "company_id", "source_id", "subledger_document_id", "vendor_id",
+  "payment_date", "document_number", "memo", "currency_code", "amount", "payment_method", "payment_reference",
+  "funding_account_id", "payable_account_id", "allocations", "status", "version", "idempotency_key",
+  "payload_checksum", "scheduled_event_id", "cleared_event_id", "voided_event_id", "created_at", "updated_at"
+) values ($1, $2, $3, $4, null, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+  'scheduled', 1, $16, $17, $18, null, null, $19, $19)
+returning *`,
+    [
+      instruction.billPaymentId,
+      context.tenantId,
+      context.companyId,
+      context.sourceId,
+      instruction.vendorId,
+      instruction.date,
+      instruction.documentNumber,
+      instruction.memo,
+      instruction.currencyCode,
+      instruction.amount,
+      instruction.paymentMethod,
+      instruction.reference,
+      instruction.fundingAccountId,
+      instruction.payableAccountId,
+      JSON.stringify(instruction.allocations),
+      instruction.idempotencyKey,
+      instruction.payloadChecksum,
+      lifecycle.eventId,
+      context.now()
+    ]
+  );
+  const row = inserted.rows[0];
+  if (row === undefined) throw new Error("Bill payment instruction insert did not return its row");
+  await appendServiceOutboxEvent(client, context, {
+    eventType: "bill_payment.scheduled",
+    aggregateType: "bill_payment",
+    aggregateId: instruction.billPaymentId,
+    idempotencyKey: `bill-payment:${instruction.idempotencyKey}:outbox:scheduled`,
+    payload: { billPaymentId: instruction.billPaymentId, paymentDate: instruction.date }
+  });
+  return { created: true, value: row };
+}
+
+function normalizeBillPaymentInstruction(
+  context: ServiceContext,
+  input: RecordAndApplyBillPaymentInput
+): NormalizedBillPaymentInstruction {
+  assertFinancialOperationContext(input.operation);
+  assertNonEmpty(input.idempotencyKey, "idempotencyKey");
+  assertNonEmpty(input.vendorId, "vendorId");
+  assertIsoDate(input.date, "date");
+  assertBillPaymentMethod(input.paymentMethod);
+  optionalNonEmpty(input.reference, "reference");
+  optionalNonEmpty(input.documentNumber, "documentNumber");
+  optionalNonEmpty(input.memo, "memo");
+  const currencyCode = input.currencyCode ?? context.currencyCode;
+  assertCurrencyAllowed(context, currencyCode);
+  const amount = normalizedPositiveMoney(input.amount, "amount");
+  if (input.allocations.length === 0) {
+    throw new ErpFinancialsValidationError("allocations must contain at least one bill");
+  }
+  const seen = new Set<string>();
+  let allocatedMinor = 0n;
+  const allocations = input.allocations.map((allocation, index): BillPaymentAllocationInput => {
+    assertNonEmpty(allocation.billId, `allocations[${String(index)}].billId`);
+    if (seen.has(allocation.billId)) {
+      throw new ErpFinancialsValidationError("allocations must contain each bill exactly once");
+    }
+    seen.add(allocation.billId);
+    assertExpectedSubledgerVersion(allocation.expectedBillVersion, `allocations[${String(index)}].expectedBillVersion`);
+    const normalizedAmount = normalizedPositiveMoney(allocation.amount, `allocations[${String(index)}].amount`);
+    allocatedMinor += parsePositiveMoney(normalizedAmount, `allocations[${String(index)}].amount`);
+    return { ...allocation, amount: normalizedAmount };
+  });
+  if (formatMoney(allocatedMinor) !== amount) {
+    throw new ErpFinancialsValidationError("The ordered allocation total must equal the bill payment amount");
+  }
+  const instructionBase = {
+    billPaymentId: scopedRecordId(context, "subledger_document", `bill_payment:${input.idempotencyKey}`),
+    idempotencyKey: input.idempotencyKey,
+    date: input.date,
+    ...(input.documentNumber === undefined ? {} : { documentNumber: input.documentNumber }),
+    ...(input.memo === undefined ? {} : { memo: input.memo }),
+    vendorId: input.vendorId,
+    currencyCode,
+    amount,
+    paymentMethod: input.paymentMethod,
+    ...(input.reference === undefined ? {} : { reference: input.reference }),
+    fundingAccountId: resolveAccountId(context, input.cashAccount),
+    payableAccountId: resolveAccountId(context, input.payableAccount),
+    allocations
+  };
+  if (instructionBase.fundingAccountId === instructionBase.payableAccountId) {
+    throw new ErpFinancialsValidationError("Bill payment funding and payable accounts must differ");
+  }
+  const payload = billPaymentInstructionPayload(instructionBase);
+  if (Buffer.byteLength(stableJson(payload), "utf8") > 4096) {
+    throw new ErpFinancialsValidationError("Bill payment instruction exceeds 4096 bytes");
+  }
+  return {
+    ...instructionBase,
+    payloadChecksum: createHash("sha256").update(stableJson(payload)).digest("hex")
+  };
+}
+
+function billPaymentInstructionPayload(
+  instruction: Omit<NormalizedBillPaymentInstruction, "payloadChecksum">
+): JsonValue {
+  return {
+    allocations: instruction.allocations,
+    amount: instruction.amount,
+    billPaymentId: instruction.billPaymentId,
+    currencyCode: instruction.currencyCode,
+    date: instruction.date,
+    documentNumber: instruction.documentNumber ?? null,
+    fundingAccountId: instruction.fundingAccountId,
+    memo: instruction.memo ?? null,
+    payableAccountId: instruction.payableAccountId,
+    paymentMethod: instruction.paymentMethod,
+    reference: instruction.reference ?? null,
+    vendorId: instruction.vendorId
+  };
+}
+
+function assertBillPaymentMethod(value: string): asserts value is BillPaymentMethod {
+  if (!new Set<string>(["ach", "card", "check"]).has(value)) {
+    throw new ErpFinancialsValidationError(`Unsupported bill payment method ${value}`);
+  }
+}
+
+async function assertBillPaymentInstructionScope(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  instruction: NormalizedBillPaymentInstruction
+): Promise<void> {
+  await assertSubledgerParty(client, context, instruction.vendorId, "bill_payment");
+  const storage = createPostgresStorageAdapter(client);
+  const accountIds = [instruction.fundingAccountId, instruction.payableAccountId];
+  const accounts = await storage.loadAccounts({ tenantId: context.tenantId, sourceId: context.sourceId, accountIds });
+  assertJournalAccounts(accounts, accountIds);
+  await assertBillPaymentBillsForInstruction(client, context, instruction);
+}
+
+async function assertBillPaymentBillsForInstruction(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  instruction: NormalizedBillPaymentInstruction
+): Promise<void> {
+  const billIds = instruction.allocations.map((allocation) => allocation.billId);
+  const result = await client.query(
+    `select * from "erp_financials"."subledger_documents"
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
+  and "subledger_document_id" = any($4::text[])
+order by "subledger_document_id"
+for update`,
+    [context.tenantId, context.companyId, context.sourceId, [...billIds].sort()]
+  );
+  const byId = new Map(result.rows.map((row) => [storedString(row.subledger_document_id, "bill id"), row]));
+  for (const allocation of instruction.allocations) {
+    const bill = byId.get(allocation.billId);
+    if (bill === undefined) {
+      throw new ErpFinancialsError(
+        "missing_document",
+        `Vendor bill ${allocation.billId} does not exist in the write source`,
+        { details: { billId: allocation.billId } }
+      );
+    }
+    if (bill.document_type !== "vendor_bill") {
+      throw new ErpFinancialsValidationError(`Allocation target ${allocation.billId} is not a vendor bill`);
+    }
+    if (bill.party_id !== instruction.vendorId) {
+      throw new ErpFinancialsValidationError("Every allocation must target the payment vendor", "scope_mismatch", {
+        billId: allocation.billId,
+        vendorId: instruction.vendorId
+      });
+    }
+    if (bill.currency_code !== instruction.currencyCode) {
+      throw new ErpFinancialsValidationError("Every allocation must use the payment currency", "currency_not_supported", {
+        billId: allocation.billId,
+        currencyCode: instruction.currencyCode
+      });
+    }
+    const version = storedInteger(bill.version, "bill version");
+    if (version !== allocation.expectedBillVersion) {
+      throw new ErpFinancialsError(
+        "optimistic_concurrency_conflict",
+        `Vendor bill ${allocation.billId} expected version ${String(allocation.expectedBillVersion)}, found ${String(version)}`,
+        {
+          retryable: true,
+          details: { actualVersion: version, billId: allocation.billId, expectedVersion: allocation.expectedBillVersion }
+        }
+      );
+    }
+    const status = storedString(bill.status, "bill status");
+    const openMinor = parsePositiveOrZeroMoney(bill.open_amount, "bill open_amount");
+    const allocationMinor = parsePositiveMoney(allocation.amount, "allocation amount");
+    if (!["open", "partially_applied"].includes(status) || allocationMinor > openMinor) {
+      throw new ErpFinancialsValidationError(
+        `Vendor bill ${allocation.billId} is not eligible for the requested allocation`,
+        "terminal_state_conflict",
+        { billId: allocation.billId, status }
+      );
+    }
+  }
+}
+
+function nestedServiceContext(context: ServiceContext, client: PostgresQueryClient): ServiceContext {
+  return {
+    ...context,
+    database: { transaction: async <Result>(work: (nestedClient: PostgresQueryClient) => Promise<Result>) => work(client) }
+  };
+}
+
+function billPaymentInstructionLock(context: ServiceContext, idempotencyKey: string): string {
+  return `bill-payment-instruction:${context.tenantId}:${context.companyId}:${context.sourceId}:${idempotencyKey}`;
+}
+
+function billPaymentLifecycleLock(context: ServiceContext, billPaymentId: string): string {
+  return `bill-payment-lifecycle:${context.tenantId}:${context.companyId}:${context.sourceId}:${billPaymentId}`;
+}
+
+function billPaymentAllocationIdempotencyKey(
+  instruction: NormalizedBillPaymentInstruction,
+  allocation: BillPaymentAllocationInput,
+  index: number
+): string {
+  return `${instruction.idempotencyKey}:allocation:${String(index + 1)}:${allocation.billId}`;
+}
+
+async function loadBillPaymentInstructionByIdempotencyKey(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  idempotencyKey: string
+): Promise<Record<string, unknown> | undefined> {
+  const result = await client.query(
+    `select * from "erp_financials"."bill_payment_disbursements"
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3 and "idempotency_key" = $4
+for update`,
+    [context.tenantId, context.companyId, context.sourceId, idempotencyKey]
+  );
+  return result.rows[0];
+}
+
+async function loadBillPaymentInstructionForUpdate(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  billPaymentId: string
+): Promise<Record<string, unknown>> {
+  const result = await client.query(
+    `select * from "erp_financials"."bill_payment_disbursements"
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3 and "bill_payment_id" = $4
+for update`,
+    [context.tenantId, context.companyId, context.sourceId, billPaymentId]
+  );
+  const row = result.rows[0];
+  if (row === undefined) {
+    throw new ErpFinancialsError("missing_document", `Bill payment ${billPaymentId} does not exist in the write source`);
+  }
+  return row;
+}
+
+function billPaymentInstructionFromRow(row: Record<string, unknown>): NormalizedBillPaymentInstruction {
+  const allocationsJson = storedJson(row.allocations);
+  if (!Array.isArray(allocationsJson)) throw new Error("Stored bill payment allocations must be an array");
+  const allocations = allocationsJson.map((value, index): BillPaymentAllocationInput => {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new Error(`Stored bill payment allocation ${String(index)} is invalid`);
+    }
+    const allocation = value as Readonly<Record<string, JsonValue>>;
+    return {
+      billId: storedString(allocation.billId, "allocation.billId"),
+      amount: storedMoney(allocation.amount, "allocation.amount"),
+      expectedBillVersion: storedInteger(allocation.expectedBillVersion, "allocation.expectedBillVersion")
+    };
+  });
+  const paymentMethod = storedString(row.payment_method, "payment_method");
+  assertBillPaymentMethod(paymentMethod);
+  const documentNumber = storedOptionalString(row.document_number);
+  const memo = storedOptionalString(row.memo);
+  const reference = storedOptionalString(row.payment_reference);
+  return {
+    billPaymentId: storedString(row.bill_payment_id, "bill_payment_id"),
+    idempotencyKey: storedString(row.idempotency_key, "idempotency_key"),
+    date: storedDate(row.payment_date, "payment_date"),
+    ...(documentNumber === undefined ? {} : { documentNumber }),
+    ...(memo === undefined ? {} : { memo }),
+    vendorId: storedString(row.vendor_id, "vendor_id"),
+    currencyCode: storedString(row.currency_code, "currency_code"),
+    amount: storedMoney(row.amount, "amount"),
+    paymentMethod,
+    ...(reference === undefined ? {} : { reference }),
+    fundingAccountId: storedString(row.funding_account_id, "funding_account_id"),
+    payableAccountId: storedString(row.payable_account_id, "payable_account_id"),
+    allocations,
+    payloadChecksum: storedString(row.payload_checksum, "payload_checksum")
+  };
+}
+
+async function scheduledLifecycleEventId(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  billPaymentId: string
+): Promise<string> {
+  const row = await loadBillPaymentInstructionForUpdate(client, context, billPaymentId);
+  return storedString(row.scheduled_event_id, "scheduled_event_id");
+}
+
+async function assertLifecycleReplayKey(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  eventIdValue: unknown,
+  expectedIdempotencyKey: string,
+  operation: FinancialOperationContext
+): Promise<void> {
+  const eventId = storedString(eventIdValue, "lifecycle event id");
+  const result = await client.query(
+    `select "idempotency_key", "actor_ref", "approver_ref", "request_id", "correlation_id", "reason_code",
+  "reason_detail", "occurred_at"
+from "erp_financials"."financial_lifecycle_events"
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3 and "event_id" = $4`,
+    [context.tenantId, context.companyId, context.sourceId, eventId]
+  );
+  const row = result.rows[0];
+  const occurredAt = row?.occurred_at instanceof Date
+    ? row.occurred_at.toISOString()
+    : row === undefined ? undefined : storedString(row.occurred_at, "occurred_at");
+  if (
+    row === undefined ||
+    storedString(row.idempotency_key, "idempotency_key") !== expectedIdempotencyKey ||
+    storedString(row.actor_ref, "actor_ref") !== operation.actorRef ||
+    storedOptionalString(row.approver_ref) !== operation.approverRef ||
+    storedString(row.request_id, "request_id") !== operation.requestId ||
+    storedString(row.correlation_id, "correlation_id") !== operation.correlationId ||
+    storedString(row.reason_code, "reason_code") !== operation.reasonCode ||
+    storedOptionalString(row.reason_detail) !== operation.reasonDetail ||
+    occurredAt !== operation.occurredAt
+  ) {
+    throw new ErpFinancialsError("terminal_state_conflict", "Bill payment lifecycle already advanced under another command");
+  }
+}
+
+function optimisticBillPaymentConflict(
+  billPaymentId: string,
+  expectedVersion: number,
+  actualVersion: number
+): ErpFinancialsError {
+  return new ErpFinancialsError(
+    "optimistic_concurrency_conflict",
+    `Bill payment expected version ${String(expectedVersion)}, found ${String(actualVersion)}`,
+    { retryable: true, details: { actualVersion, billPaymentId, expectedVersion } }
+  );
 }
 
 async function recordWriteOff(
@@ -2394,6 +3199,190 @@ type LoadedPostedBillPayment = {
   readonly version: number;
   readonly journal: LoadedPostedJournal;
 };
+
+async function voidAndUnapplyBillPayment(
+  context: ServiceContext,
+  input: VoidAndUnapplyBillPaymentInput
+): Promise<VoidAndUnapplyBillPaymentResult> {
+  assertIndependentApproval(input.operation);
+  assertNonEmpty(input.billPaymentId, "billPaymentId");
+  assertNonEmpty(input.idempotencyKey, "idempotencyKey");
+  assertExpectedSubledgerVersion(input.expectedVersion, "expectedVersion");
+  assertIsoDate(input.date, "date");
+  return context.database.transaction(async (client) => {
+    await acquireTransactionLock(client, billPaymentLifecycleLock(context, input.billPaymentId));
+    await assertCompanySourceScope(client, context);
+    const disbursement = await loadOptionalBillPaymentInstructionForUpdate(client, context, input.billPaymentId);
+    if (disbursement !== undefined) {
+      const status = storedString(disbursement.status, "bill payment status");
+      const version = storedInteger(disbursement.version, "bill payment version");
+      if (status === "scheduled") {
+        throw new ErpFinancialsError(
+          "terminal_state_conflict",
+          "A scheduled bill payment must be cancelled rather than compensated"
+        );
+      }
+      if (status === "voided") {
+        if (version !== input.expectedVersion + 1) {
+          throw optimisticBillPaymentConflict(input.billPaymentId, input.expectedVersion, version - 1);
+        }
+        await assertLifecycleReplayKey(
+          client,
+          context,
+          disbursement.voided_event_id,
+          `bill-payment:${input.idempotencyKey}:compensated`,
+          input.operation
+        );
+        const replay = await runPostedBillPaymentVoid(nestedServiceContext(context, client), input);
+        const replayRows = await loadBillPaymentApplicationsForUpdate(client, context, input.billPaymentId);
+        const endedApplications = replayRows.map((row) => {
+          const applicationStatus = storedString(row.status, "application status");
+          if (applicationStatus !== "unapplied" && applicationStatus !== "voided") {
+            throw new ErpFinancialsError(
+              "terminal_state_conflict",
+              `Compensated bill payment has an application in status ${applicationStatus}`
+            );
+          }
+          return applicationResult(row, applicationStatus);
+        });
+        return { ...replay, endedApplications, disbursementVersion: version };
+      }
+      if (version !== input.expectedVersion) {
+        throw optimisticBillPaymentConflict(input.billPaymentId, input.expectedVersion, version);
+      }
+    } else {
+      const payment = await loadPostedBillPaymentForVoid(client, context, input.billPaymentId);
+      if (payment.status === "voided") {
+        const replay = await runPostedBillPaymentVoid(nestedServiceContext(context, client), input);
+        const replayRows = await loadBillPaymentApplicationsForUpdate(client, context, input.billPaymentId);
+        const endedApplications = replayRows.map((row) => {
+          const applicationStatus = storedString(row.status, "application status");
+          if (applicationStatus !== "unapplied" && applicationStatus !== "voided") {
+            throw new ErpFinancialsError(
+              "terminal_state_conflict",
+              `Compensated bill payment has an application in status ${applicationStatus}`
+            );
+          }
+          return applicationResult(row, applicationStatus);
+        });
+        return { ...replay, endedApplications };
+      }
+      if (payment.version !== input.expectedVersion) {
+        throw optimisticBillPaymentConflict(input.billPaymentId, input.expectedVersion, payment.version);
+      }
+    }
+
+    const applicationRows = await loadBillPaymentApplicationsForUpdate(client, context, input.billPaymentId);
+    const nestedContext = nestedServiceContext(context, client);
+    const endedApplications: SubledgerApplicationResult[] = [];
+    for (const row of applicationRows) {
+      const applicationStatus = storedString(row.status, "application status");
+      if (applicationStatus === "applied") {
+        endedApplications.push(await endSubledgerApplication(nestedContext, {
+          operation: input.operation,
+          applicationId: storedString(row.subledger_application_id, "subledger_application_id"),
+          effectiveDate: input.date,
+          expectedVersion: storedInteger(row.version, "application version")
+        }, "voided"));
+      } else if (applicationStatus === "unapplied" || applicationStatus === "voided") {
+        endedApplications.push(applicationResult(row, applicationStatus));
+      } else {
+        throw new Error(`Stored bill payment application has invalid status ${applicationStatus}`);
+      }
+    }
+    const openPayment = await loadPostedBillPaymentForVoid(client, context, input.billPaymentId);
+    const voided = await runPostedBillPaymentVoid(nestedContext, {
+      ...input,
+      expectedVersion: openPayment.version
+    });
+    if (disbursement === undefined) return { ...voided, endedApplications };
+
+    const disbursementVersion = storedInteger(disbursement.version, "bill payment version");
+    const lifecycle = await appendFinancialLifecycleEvent(client, {
+      tenantId: context.tenantId,
+      companyId: context.companyId,
+      sourceId: context.sourceId,
+      aggregateType: "bill_payment",
+      aggregateId: input.billPaymentId,
+      eventType: "bill_payment.compensated",
+      idempotencyKey: `bill-payment:${input.idempotencyKey}:compensated`,
+      operation: input.operation,
+      recordedAt: context.now(),
+      priorEventId: voided.lifecycleEventIds.at(-1) ?? storedString(disbursement.cleared_event_id, "cleared_event_id"),
+      payload: {
+        billPaymentId: input.billPaymentId,
+        endedApplicationIds: endedApplications.map((application) => application.applicationId),
+        reversalTransactionId: voided.reversal.transactionId
+      }
+    });
+    const updated = await client.query(
+      `update "erp_financials"."bill_payment_disbursements"
+set "status" = 'voided', "version" = "version" + 1, "voided_event_id" = $5, "updated_at" = $6
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3 and "bill_payment_id" = $4
+  and "status" = 'cleared' and "version" = $7
+returning "version"`,
+      [
+        context.tenantId,
+        context.companyId,
+        context.sourceId,
+        input.billPaymentId,
+        lifecycle.eventId,
+        context.now(),
+        disbursementVersion
+      ]
+    );
+    const row = updated.rows[0];
+    if (row === undefined) {
+      throw optimisticBillPaymentConflict(input.billPaymentId, disbursementVersion, disbursementVersion + 1);
+    }
+    await appendServiceOutboxEvent(client, context, {
+      eventType: "bill_payment.compensated",
+      aggregateType: "bill_payment",
+      aggregateId: input.billPaymentId,
+      idempotencyKey: `bill-payment:${input.idempotencyKey}:outbox:compensated`,
+      payload: {
+        billPaymentId: input.billPaymentId,
+        endedApplicationIds: endedApplications.map((application) => application.applicationId),
+        reversalTransactionId: voided.reversal.transactionId
+      }
+    });
+    return {
+      ...voided,
+      endedApplications,
+      disbursementVersion: storedInteger(row.version, "bill payment version")
+    };
+  });
+}
+
+async function loadOptionalBillPaymentInstructionForUpdate(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  billPaymentId: string
+): Promise<Record<string, unknown> | undefined> {
+  const result = await client.query(
+    `select * from "erp_financials"."bill_payment_disbursements"
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3 and "bill_payment_id" = $4
+for update`,
+    [context.tenantId, context.companyId, context.sourceId, billPaymentId]
+  );
+  return result.rows[0];
+}
+
+async function loadBillPaymentApplicationsForUpdate(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  billPaymentId: string
+): Promise<readonly Record<string, unknown>[]> {
+  const result = await client.query(
+    `select * from "erp_financials"."subledger_applications"
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
+  and "source_document_id" = $4 and "application_type" = 'bill_payment_to_bill'
+order by "application_date", "subledger_application_id"
+for update`,
+    [context.tenantId, context.companyId, context.sourceId, billPaymentId]
+  );
+  return result.rows;
+}
 
 async function runPostedBillPaymentVoid(
   context: ServiceContext,
