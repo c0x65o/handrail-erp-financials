@@ -1064,6 +1064,102 @@ describe("reusable ERP Financials service", () => {
     expect(database.client.journalLinks.map((link) => link.link_type)).toEqual(["reversal", "replacement"]);
   });
 
+  it("voids an unapplied bill payment idempotently with version and canonical reversal guards", async () => {
+    const database = subledgerDatabase();
+    const financials = service(database);
+    const payment = await financials.billPayments.record({
+      operation: operation("request-payment-to-void"),
+      idempotencyKey: "payment-to-void",
+      date: "2026-08-05",
+      vendorId: "vendor_northwind",
+      amount: "20.00",
+      payableAccount: { accountId: "acct_payable" },
+      cashAccount: { accountId: "acct_cash" }
+    });
+    const command = {
+      operation: approvedOperation("request-void-payment"),
+      billPaymentId: payment.documentId,
+      expectedVersion: 1,
+      idempotencyKey: "void-payment",
+      date: "2026-08-14",
+      memo: "Void duplicate bill payment"
+    } as const;
+
+    await expect(financials.billPayments.void({ ...command, expectedVersion: 2 })).rejects.toMatchObject({
+      code: "optimistic_concurrency_conflict",
+      details: { actualVersion: 1, billPaymentId: payment.documentId, expectedVersion: 2 }
+    });
+    await expect(financials.billPayments.void(command)).resolves.toMatchObject({
+      status: "voided",
+      originalBillPaymentId: payment.documentId,
+      originalTransactionId: payment.journal.transactionId,
+      originalVersion: 2,
+      reversal: { status: "posted" }
+    });
+    expect(subledgerRow(database, payment.documentId)).toMatchObject({
+      status: "voided",
+      open_amount: "0.00",
+      version: 2
+    });
+    expect(database.client.journalLinks).toEqual([
+      expect.objectContaining({
+        original_transaction_id: payment.journal.transactionId,
+        link_type: "void"
+      })
+    ]);
+    await expect(financials.billPayments.voidIssued(command)).resolves.toMatchObject({
+      status: "already_voided",
+      reversal: { status: "already_posted" }
+    });
+  });
+
+  it("requires bill-payment applications to be unapplied before voiding", async () => {
+    const database = subledgerDatabase();
+    const financials = service(database);
+    const bill = await financials.vendorBills.create({
+      operation: operation("request-bill-for-payment-void-guard"),
+      idempotencyKey: "bill-for-payment-void-guard",
+      date: "2026-08-04",
+      dueDate: "2026-09-03",
+      vendorId: "vendor_northwind",
+      payableAccount: { accountId: "acct_payable" },
+      expenseLines: [{ accountId: "acct_expense", amount: "25.00" }]
+    });
+    const payment = await financials.billPayments.record({
+      operation: operation("request-applied-payment"),
+      idempotencyKey: "applied-payment",
+      date: "2026-08-05",
+      vendorId: "vendor_northwind",
+      amount: "20.00",
+      payableAccount: { accountId: "acct_payable" },
+      cashAccount: { accountId: "acct_cash" }
+    });
+    await financials.paymentApplications.apply({
+      operation: operation("request-apply-payment-before-void"),
+      idempotencyKey: "apply-payment-before-void",
+      applicationType: "bill_payment_to_bill",
+      sourceDocumentId: payment.documentId,
+      targetDocumentId: bill.documentId,
+      amount: "10.00",
+      applicationDate: "2026-08-06",
+      expectedSourceVersion: 1,
+      expectedTargetVersion: 1
+    });
+
+    await expect(financials.billPayments.voidPosted({
+      operation: approvedOperation("request-void-applied-payment"),
+      billPaymentId: payment.documentId,
+      expectedVersion: 2,
+      idempotencyKey: "void-applied-payment",
+      date: "2026-08-14"
+    })).rejects.toMatchObject({ code: "terminal_state_conflict" });
+    expect(subledgerRow(database, payment.documentId)).toMatchObject({
+      status: "partially_applied",
+      open_amount: "10.00",
+      version: 2
+    });
+  });
+
   it("voids an unapplied issued credit through one compensating canonical lifecycle", async () => {
     const database = subledgerDatabase();
     const financials = service(database);

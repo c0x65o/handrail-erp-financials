@@ -355,6 +355,29 @@ export type RecordBillPaymentInput = SubledgerDocumentInputCommon & {
   readonly cashAccount: ErpFinancialsAccountReference;
 };
 
+export type VoidPostedBillPaymentInput = {
+  readonly operation: FinancialOperationContext;
+  readonly billPaymentId: string;
+  readonly expectedVersion: number;
+  readonly idempotencyKey: string;
+  readonly date: IsoDate;
+  readonly memo?: string;
+};
+
+/** Alias for hosts that describe an immutable posted payment as issued. */
+export type VoidIssuedBillPaymentInput = VoidPostedBillPaymentInput;
+
+export type PostedBillPaymentLifecycleResult = {
+  readonly status: "voided" | "already_voided";
+  readonly originalBillPaymentId: string;
+  readonly originalTransactionId: string;
+  /** The original payment's version after the correction is applied. */
+  readonly originalVersion: number;
+  readonly reversal: PostJournalEntryResult;
+  readonly journalEntryLinkIds: readonly string[];
+  readonly lifecycleEventIds: readonly string[];
+};
+
 export type RecordWriteOffInput = SubledgerDocumentInputCommon & {
   readonly partyId: string;
   readonly amount: DecimalString;
@@ -501,7 +524,12 @@ export type ErpFinancials = {
     voidPosted(input: VoidPostedVendorBillInput): Promise<PostedVendorBillLifecycleResult>;
     replacePosted(input: ReplacePostedVendorBillInput): Promise<PostedVendorBillLifecycleResult>;
   };
-  readonly billPayments: { record(input: RecordBillPaymentInput): Promise<SubledgerDocumentResult> };
+  readonly billPayments: {
+    record(input: RecordBillPaymentInput): Promise<SubledgerDocumentResult>;
+    void(input: VoidPostedBillPaymentInput): Promise<PostedBillPaymentLifecycleResult>;
+    voidIssued(input: VoidIssuedBillPaymentInput): Promise<PostedBillPaymentLifecycleResult>;
+    voidPosted(input: VoidPostedBillPaymentInput): Promise<PostedBillPaymentLifecycleResult>;
+  };
   readonly writeOffs: {
     record(input: RecordWriteOffInput): Promise<SubledgerDocumentResult>;
     settleInvoice(input: SettleInvoiceWriteOffInput): Promise<SettleInvoiceWriteOffResult>;
@@ -671,7 +699,12 @@ export function createErpFinancials(input: CreateErpFinancialsInput): ErpFinanci
       voidPosted: (workflowInput) => runPostedVendorBillLifecycle(context, "voided", workflowInput),
       replacePosted: (workflowInput) => runPostedVendorBillLifecycle(context, "replaced", workflowInput)
     },
-    billPayments: { record: (documentInput) => recordBillPayment(context, documentInput) },
+    billPayments: {
+      record: (documentInput) => recordBillPayment(context, documentInput),
+      void: (workflowInput) => runPostedBillPaymentVoid(context, workflowInput),
+      voidIssued: (workflowInput) => runPostedBillPaymentVoid(context, workflowInput),
+      voidPosted: (workflowInput) => runPostedBillPaymentVoid(context, workflowInput)
+    },
     writeOffs: {
       record: (documentInput) => recordWriteOff(context, documentInput),
       settleInvoice: (settlementInput) => settleInvoiceWriteOff(context, settlementInput),
@@ -2343,6 +2376,228 @@ returning "version"`,
         "optimistic_concurrency_conflict",
         `Vendor bill ${bill.documentId} changed concurrently`,
         { retryable: true, details: { expectedVersion, vendorBillId: bill.documentId } }
+      );
+    }
+    return storedInteger(row.version, "version");
+  } finally {
+    await client.query("select set_config('erp_financials.application_balance_update', 'off', true)");
+  }
+}
+
+type LoadedPostedBillPayment = {
+  readonly documentId: string;
+  readonly transactionId: string;
+  readonly currencyCode: IsoCurrencyCode;
+  readonly originalAmount: DecimalString;
+  readonly openAmount: DecimalString;
+  readonly status: SubledgerDocumentResult["documentStatus"];
+  readonly version: number;
+  readonly journal: LoadedPostedJournal;
+};
+
+async function runPostedBillPaymentVoid(
+  context: ServiceContext,
+  input: VoidPostedBillPaymentInput
+): Promise<PostedBillPaymentLifecycleResult> {
+  assertIndependentApproval(input.operation);
+  assertNonEmpty(input.billPaymentId, "billPaymentId");
+  assertNonEmpty(input.idempotencyKey, "idempotencyKey");
+  assertExpectedSubledgerVersion(input.expectedVersion, "expectedVersion");
+  assertIsoDate(input.date, "date");
+
+  return context.database.transaction(async (client) => {
+    await acquireTransactionLock(
+      client,
+      `posted-bill-payment:${context.tenantId}:${context.companyId}:${context.sourceId}:${input.billPaymentId}`
+    );
+    await assertCompanySourceScope(client, context);
+    const original = await loadPostedBillPaymentForVoid(client, context, input.billPaymentId);
+    const reversalInput: PostJournalEntryInput = {
+      operation: input.operation,
+      idempotencyKey: `${input.idempotencyKey}:reversal`,
+      date: input.date,
+      memo: input.memo ?? `voided bill payment ${original.documentId}`,
+      currencyCode: original.currencyCode,
+      accountingBasis: original.journal.accountingBasis,
+      adjustment: true,
+      lines: original.journal.lines
+    };
+    const reversalJournal = normalizeJournalEntry(context, reversalInput);
+    const reversalIdentities = journalIdentities(context, reversalJournal);
+    const replay = await assertJournalLifecycleSlotAvailable(client, context, {
+      originalTransactionId: original.transactionId,
+      expectedRelatedTransactionId: reversalIdentities.transactionId,
+      expectedLinkType: "void",
+      competingLinkTypes: ["reversal", "void"]
+    });
+    assertPostedBillPaymentVoidState(original, input.expectedVersion, replay);
+
+    await acquireTransactionLock(
+      client,
+      `journal-entry:${context.tenantId}:${context.sourceId}:${reversalJournal.idempotencyKey}`
+    );
+    const reversal = await executePostJournalEntryInTransaction(
+      client,
+      context,
+      reversalInput,
+      reversalJournal,
+      reversalIdentities
+    );
+    const reversalLink = await appendJournalEntryLink(client, context, {
+      originalTransactionId: original.transactionId,
+      relatedTransactionId: reversal.transactionId,
+      linkType: "void",
+      eventType: "bill_payment.voided",
+      idempotencyKey: `${input.idempotencyKey}:void`,
+      operation: input.operation,
+      ...(original.journal.postedLifecycleEventId === undefined
+        ? {}
+        : { priorEventId: original.journal.postedLifecycleEventId })
+    });
+    const originalVersion = replay
+      ? original.version
+      : await markPostedBillPaymentVoided(client, context, original, input.expectedVersion);
+    const lifecycle = await appendFinancialLifecycleEvent(client, {
+      tenantId: context.tenantId,
+      companyId: context.companyId,
+      sourceId: context.sourceId,
+      aggregateType: "bill_payment",
+      aggregateId: original.documentId,
+      eventType: "bill_payment.voided",
+      idempotencyKey: `bill-payment:${input.idempotencyKey}:voided`,
+      operation: input.operation,
+      recordedAt: context.now(),
+      priorEventId: reversalLink.eventId,
+      payload: {
+        originalBillPaymentId: original.documentId,
+        originalTransactionId: original.transactionId,
+        reversalTransactionId: reversal.transactionId
+      }
+    });
+    await appendServiceOutboxEvent(client, context, {
+      eventType: "bill_payment.voided",
+      aggregateType: "bill_payment",
+      aggregateId: original.documentId,
+      idempotencyKey: `bill-payment:${input.idempotencyKey}:outbox:voided`,
+      payload: {
+        originalBillPaymentId: original.documentId,
+        reversalTransactionId: reversal.transactionId
+      }
+    });
+
+    return {
+      status: replay ? "already_voided" : "voided",
+      originalBillPaymentId: original.documentId,
+      originalTransactionId: original.transactionId,
+      originalVersion,
+      reversal,
+      journalEntryLinkIds: [reversalLink.linkId],
+      lifecycleEventIds: [
+        reversal.lifecycleEventId,
+        reversalLink.eventId,
+        lifecycle.eventId
+      ]
+    };
+  });
+}
+
+async function loadPostedBillPaymentForVoid(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  documentId: string
+): Promise<LoadedPostedBillPayment> {
+  const result = await client.query(
+    `select * from "erp_financials"."subledger_documents"
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3 and "subledger_document_id" = $4
+for update`,
+    [context.tenantId, context.companyId, context.sourceId, documentId]
+  );
+  const row = result.rows[0];
+  if (row === undefined || row.document_type !== "bill_payment") {
+    throw new ErpFinancialsError(
+      "missing_document",
+      `Posted bill payment ${documentId} does not exist in the write source`,
+      { details: { billPaymentId: documentId } }
+    );
+  }
+  const transactionId = storedString(row.transaction_id, "transaction_id");
+  const status = storedString(row.status, "status");
+  if (!["open", "partially_applied", "settled", "voided"].includes(status)) {
+    throw new Error(`Posted bill payment ${documentId} has invalid status ${status}`);
+  }
+  return {
+    documentId,
+    transactionId,
+    currencyCode: storedString(row.currency_code, "currency_code"),
+    originalAmount: storedMoney(row.original_amount, "original_amount"),
+    openAmount: storedMoney(row.open_amount, "open_amount"),
+    status: status as LoadedPostedBillPayment["status"],
+    version: storedInteger(row.version, "version"),
+    journal: await loadPostedJournalForLifecycle(
+      client,
+      context,
+      transactionId,
+      [subledgerTransactionType("bill_payment")]
+    )
+  };
+}
+
+function assertPostedBillPaymentVoidState(
+  payment: LoadedPostedBillPayment,
+  expectedVersion: number,
+  replay: boolean
+): void {
+  if (replay) {
+    if (payment.status !== "voided") {
+      throw new ErpFinancialsError(
+        "terminal_state_conflict",
+        `Bill payment ${payment.documentId} has lifecycle links but is not voided`
+      );
+    }
+    return;
+  }
+  if (payment.version !== expectedVersion) {
+    throw new ErpFinancialsError(
+      "optimistic_concurrency_conflict",
+      `Bill payment expected version ${String(expectedVersion)}, found ${String(payment.version)}`,
+      {
+        retryable: true,
+        details: { actualVersion: payment.version, billPaymentId: payment.documentId, expectedVersion }
+      }
+    );
+  }
+  if (payment.status !== "open" || payment.openAmount !== payment.originalAmount) {
+    throw new ErpFinancialsError(
+      "terminal_state_conflict",
+      "An applied or partially applied bill payment cannot be voided; unapply it first",
+      { details: { billPaymentId: payment.documentId, status: payment.status } }
+    );
+  }
+}
+
+async function markPostedBillPaymentVoided(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  payment: LoadedPostedBillPayment,
+  expectedVersion: number
+): Promise<number> {
+  await client.query("select set_config('erp_financials.application_balance_update', 'on', true)");
+  try {
+    const result = await client.query(
+      `update "erp_financials"."subledger_documents"
+set "open_amount" = 0, "status" = 'voided', "version" = "version" + 1, "updated_at" = $5
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
+  and "subledger_document_id" = $4 and "version" = $6 and "document_type" = 'bill_payment'
+  and "status" = 'open' and "open_amount" = "original_amount"
+returning "version"`,
+      [context.tenantId, context.companyId, context.sourceId, payment.documentId, context.now(), expectedVersion]
+    );
+    const row = result.rows[0];
+    if (row === undefined) {
+      throw new ErpFinancialsError(
+        "optimistic_concurrency_conflict",
+        `Bill payment ${payment.documentId} changed concurrently`,
+        { retryable: true, details: { billPaymentId: payment.documentId, expectedVersion } }
       );
     }
     return storedInteger(row.version, "version");

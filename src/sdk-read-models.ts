@@ -152,10 +152,16 @@ export type VendorBillSummary = {
   readonly replacedVendorBillCount: number;
 };
 
+export type PaymentStatus = "unapplied" | "partial" | "applied" | "voided";
+
+const PAYMENT_STATUSES: ReadonlySet<PaymentStatus> = new Set(["unapplied", "partial", "applied", "voided"]);
+
 export type PaymentListItem = {
   readonly paymentId: string;
   readonly sourceId: string;
   readonly paymentType: "customer_payment" | "bill_payment";
+  /** Canonical immutable posting transaction for history-safe corrections. */
+  readonly transactionId: string;
   readonly partyId: string;
   readonly partyName?: string;
   readonly documentNumber?: string;
@@ -163,7 +169,10 @@ export type PaymentListItem = {
   readonly currencyCode: IsoCurrencyCode;
   readonly amount: DecimalString;
   readonly unappliedAmount: DecimalString;
-  readonly status: "unapplied" | "partial" | "applied";
+  readonly status: PaymentStatus;
+  readonly version: number;
+  /** Lifecycle event that originally posted the canonical payment. */
+  readonly lifecycleEventId: string;
   readonly matchedApplicationCount: number;
 };
 
@@ -208,9 +217,6 @@ export type PaymentApplicationListItem = {
 export type PaymentApplicationDetail = PaymentApplicationListItem;
 
 export type CustomerPaymentDetail = PaymentListItem & {
-  readonly transactionId: string;
-  readonly version: number;
-  readonly lifecycleEventId: string;
   readonly memo?: string;
   readonly provenance?: CustomerPaymentProvenanceReadModel;
   readonly applications: readonly PaymentApplicationListItem[];
@@ -222,6 +228,21 @@ export type FinancialLifecycleProvenance = {
   readonly approverRef?: string;
   readonly requestId: string;
   readonly reasonCode: string;
+};
+
+export type BillPaymentLifecycleEvidence = {
+  readonly posted: FinancialLifecycleProvenance;
+  readonly voided?: FinancialLifecycleProvenance;
+  readonly reversalTransactionId?: string;
+};
+
+export type BillPaymentDetail = PaymentListItem & {
+  readonly paymentType: "bill_payment";
+  readonly vendorId: string;
+  readonly vendorName?: string;
+  readonly memo?: string;
+  readonly lifecycle: BillPaymentLifecycleEvidence;
+  readonly applications: readonly PaymentApplicationListItem[];
 };
 
 export type WriteOffListItem = {
@@ -539,8 +560,15 @@ export type FinancialReadModels = {
     readonly periodEnd?: IsoDate;
     readonly vendorId?: string;
   }): Promise<VendorBillSummary>;
-  listPayments(input?: PageRequest & { readonly paymentType?: PaymentListItem["paymentType"] }): Promise<Page<PaymentListItem>>;
+  listPayments(input?: PageRequest & {
+    readonly paymentType?: PaymentListItem["paymentType"];
+    readonly vendorId?: string;
+    readonly periodStart?: IsoDate;
+    readonly periodEnd?: IsoDate;
+    readonly status?: PaymentStatus;
+  }): Promise<Page<PaymentListItem>>;
   getCustomerPayment(paymentId: string): Promise<CustomerPaymentDetail>;
+  getBillPayment(paymentId: string): Promise<BillPaymentDetail>;
   listPaymentApplications(input?: PageRequest & {
     readonly applicationType?: PaymentApplicationListItem["applicationType"];
     readonly status?: PaymentApplicationListItem["status"];
@@ -589,6 +617,7 @@ export function createFinancialReadModels(input: Scope): FinancialReadModels {
     getVendorBillSummary: (request = {}) => getVendorBillSummary(input, request),
     listPayments: (request = {}) => listPayments(input, request),
     getCustomerPayment: (paymentId) => getCustomerPayment(input, paymentId),
+    getBillPayment: (paymentId) => getBillPayment(input, paymentId),
     listPaymentApplications: (request = {}) => listPaymentApplications(input, request),
     getPaymentApplication: (applicationId) => getPaymentApplication(input, applicationId),
     getPaymentSummary: (request) => getPaymentSummary(input, request),
@@ -1155,15 +1184,40 @@ from bills`,
 
 async function listPayments(
   scope: Scope,
-  input: PageRequest & { readonly paymentType?: PaymentListItem["paymentType"] }
+  input: PageRequest & {
+    readonly paymentType?: PaymentListItem["paymentType"];
+    readonly vendorId?: string;
+    readonly periodStart?: IsoDate;
+    readonly periodEnd?: IsoDate;
+    readonly status?: PaymentStatus;
+    readonly paymentId?: string;
+  }
 ): Promise<Page<PaymentListItem>> {
   const page = pageInput(input, "payments", scope.bookId);
+  if (input.vendorId !== undefined) assertNonEmpty(input.vendorId, "vendorId");
+  if (input.periodStart !== undefined) assertDate(input.periodStart, "periodStart");
+  if (input.periodEnd !== undefined) assertDate(input.periodEnd, "periodEnd");
+  if (input.periodStart !== undefined && input.periodEnd !== undefined) {
+    assertWindow(input.periodStart, input.periodEnd);
+  }
+  if (input.status !== undefined && !PAYMENT_STATUSES.has(input.status)) {
+    throw new ErpFinancialsError("invalid_input", `Unsupported payment status ${input.status}`);
+  }
+  if (input.paymentId !== undefined) assertNonEmpty(input.paymentId, "paymentId");
   return scope.database.transaction(async (client) => {
     const book = await resolveBook(client, scope);
     const result = await client.query(
-      `select document."subledger_document_id" as "payment_id", document."source_id", document."document_type",
-  document."party_id", party."display_name" as "party_name", document."document_number", document."document_date",
-  document."currency_code", document."original_amount", document."open_amount",
+      `with payment_rows as (
+select document."subledger_document_id" as "payment_id", document."source_id", document."document_type",
+  document."transaction_id", document."party_id", party."display_name" as "party_name", document."document_number",
+  document."document_date", document."currency_code", document."original_amount", document."open_amount",
+  document."version", document."lifecycle_event_id",
+  case
+    when document."status" = 'voided' then 'voided'
+    when document."open_amount" = 0 then 'applied'
+    when document."open_amount" = document."original_amount" then 'unapplied'
+    else 'partial'
+  end as "payment_status",
   count(application."subledger_application_id") filter (where application."status" = 'applied')::integer as "application_count"
 from "erp_financials"."subledger_documents" document
 join "erp_financials"."reporting_book_sources" source
@@ -1179,16 +1233,105 @@ left join "erp_financials"."subledger_applications" application
 where document."tenant_id" = $1 and document."company_id" = $2
   and document."document_type" in ('customer_payment', 'bill_payment') and document."currency_code" = $4
   and ($5::text is null or document."document_type" = $5)
-  and ($6::date is null or (document."document_date", document."subledger_document_id") < ($6::date, $7::text))
+  and ($6::text is null or (document."document_type" = 'bill_payment' and document."party_id" = $6))
+  and ($7::date is null or document."document_date" >= $7::date)
+  and ($8::date is null or document."document_date" <= $8::date)
+  and ($12::text is null or document."subledger_document_id" = $12)
 group by document."subledger_document_id", party."display_name"
-order by document."document_date" desc, document."subledger_document_id" desc
-limit $8`,
-      [scope.tenantId, scope.companyId, scope.bookId, book.currencyCode, input.paymentType, page.date, page.id, page.limit + 1]
+)
+select * from payment_rows
+where ($9::text is null or "payment_status" = $9)
+  and ($10::date is null or ("document_date", "payment_id") < ($10::date, $11::text))
+order by "document_date" desc, "payment_id" desc
+limit $13`,
+      [
+        scope.tenantId,
+        scope.companyId,
+        scope.bookId,
+        book.currencyCode,
+        input.paymentType,
+        input.vendorId,
+        input.periodStart,
+        input.periodEnd,
+        input.status,
+        page.date,
+        page.id,
+        input.paymentId,
+        page.limit + 1
+      ]
     );
     return toPage(result.rows.map(paymentFromRow), page.limit, "payments", scope.bookId, (item) => ({
       date: item.paymentDate,
       id: item.paymentId
     }));
+  });
+}
+
+async function getBillPayment(scope: Scope, paymentId: string): Promise<BillPaymentDetail> {
+  assertNonEmpty(paymentId, "paymentId");
+  const page = await listPayments(scope, { paymentId, paymentType: "bill_payment", limit: 1 });
+  const payment = page.items[0];
+  if (payment === undefined || payment.paymentType !== "bill_payment") {
+    throw new ErpFinancialsError(
+      "missing_document",
+      `Bill payment ${paymentId} does not exist in reporting book ${scope.bookId}`,
+      { details: { bookId: scope.bookId, paymentId } }
+    );
+  }
+  return scope.database.transaction(async (client) => {
+    const header = await client.query(
+      `select transaction."memo",
+  posted."event_id" as "posted_event_id", posted."actor_ref" as "posted_actor_ref",
+  posted."approver_ref" as "posted_approver_ref", posted."request_id" as "posted_request_id",
+  posted."reason_code" as "posted_reason_code",
+  voided."event_id" as "voided_event_id", voided."actor_ref" as "voided_actor_ref",
+  voided."approver_ref" as "voided_approver_ref", voided."request_id" as "voided_request_id",
+  voided."reason_code" as "voided_reason_code", void_link."related_transaction_id" as "reversal_transaction_id"
+from "erp_financials"."subledger_documents" document
+join "erp_financials"."transactions" transaction
+  on transaction."tenant_id" = document."tenant_id" and transaction."source_id" = document."source_id"
+ and transaction."transaction_id" = document."transaction_id"
+join "erp_financials"."financial_lifecycle_events" posted
+  on posted."tenant_id" = document."tenant_id" and posted."company_id" = document."company_id"
+ and posted."source_id" = document."source_id" and posted."event_id" = document."lifecycle_event_id"
+left join lateral (
+  select event."event_id", event."actor_ref", event."approver_ref", event."request_id", event."reason_code"
+  from "erp_financials"."financial_lifecycle_events" event
+  where event."tenant_id" = document."tenant_id" and event."company_id" = document."company_id"
+    and event."source_id" = document."source_id" and event."aggregate_type" = 'bill_payment'
+    and event."aggregate_id" = document."subledger_document_id" and event."event_type" = 'bill_payment.voided'
+  order by event."occurred_at" desc, event."event_id" desc limit 1
+) voided on true
+left join lateral (
+  select link."related_transaction_id"
+  from "erp_financials"."journal_entry_links" link
+  where link."tenant_id" = document."tenant_id" and link."company_id" = document."company_id"
+    and link."source_id" = document."source_id" and link."original_transaction_id" = document."transaction_id"
+    and link."link_type" = 'void'
+  order by link."created_at" desc, link."journal_entry_link_id" desc limit 1
+) void_link on true
+where document."tenant_id" = $1 and document."company_id" = $2 and document."source_id" = $3
+  and document."subledger_document_id" = $4 and document."document_type" = 'bill_payment'`,
+      [scope.tenantId, scope.companyId, payment.sourceId, paymentId]
+    );
+    const row = requiredRow(header.rows[0], `bill payment ${paymentId}`);
+    const voidedEventId = optionalString(row.voided_event_id);
+    const reversalTransactionId = optionalString(row.reversal_transaction_id);
+    const memo = optionalString(row.memo);
+    const applications = await queryPaymentApplications(client, scope, { sourcePaymentId: paymentId });
+    return {
+      ...payment,
+      paymentType: "bill_payment",
+      vendorId: payment.partyId,
+      ...(payment.partyName === undefined ? {} : { vendorName: payment.partyName }),
+      ...(memo === undefined ? {} : { memo }),
+      lifecycle: {
+        posted: prefixedLifecycleFromRow(row, "posted"),
+        ...(voidedEventId === undefined ? {} : { voided: prefixedLifecycleFromRow(row, "voided") }),
+        ...(reversalTransactionId === undefined ? {} : { reversalTransactionId })
+      },
+      applications
+    };
   });
 }
 
@@ -2205,12 +2348,14 @@ function vendorBillApplicationFromRow(
 function paymentFromRow(row: Readonly<Record<string, unknown>>): PaymentListItem {
   const amount = money(row.original_amount, "original_amount");
   const unapplied = money(row.open_amount, "open_amount");
+  const storedStatus = optionalString(row.payment_status);
   const partyName = optionalString(row.party_name);
   const documentNumber = optionalString(row.document_number);
   return {
     paymentId: string(row.payment_id, "payment_id"),
     sourceId: string(row.source_id, "source_id"),
     paymentType: string(row.document_type, "document_type") as PaymentListItem["paymentType"],
+    transactionId: string(row.transaction_id, "transaction_id"),
     partyId: string(row.party_id, "party_id"),
     ...(partyName === undefined ? {} : { partyName }),
     ...(documentNumber === undefined ? {} : { documentNumber }),
@@ -2218,7 +2363,11 @@ function paymentFromRow(row: Readonly<Record<string, unknown>>): PaymentListItem
     currencyCode: string(row.currency_code, "currency_code"),
     amount,
     unappliedAmount: unapplied,
-    status: unapplied === "0.00" ? "applied" : unapplied === amount ? "unapplied" : "partial",
+    status: storedStatus === undefined
+      ? unapplied === "0.00" ? "applied" : unapplied === amount ? "unapplied" : "partial"
+      : storedStatus as PaymentStatus,
+    version: integer(row.version, "version"),
+    lifecycleEventId: string(row.lifecycle_event_id, "lifecycle_event_id"),
     matchedApplicationCount: integer(row.application_count, "application_count")
   };
 }
@@ -2921,6 +3070,20 @@ function lifecycleFromRow(row: Readonly<Record<string, unknown>>): FinancialLife
     ...(approverRef === undefined ? {} : { approverRef }),
     requestId: string(row.request_id, "request_id"),
     reasonCode: string(row.reason_code, "reason_code")
+  };
+}
+
+function prefixedLifecycleFromRow(
+  row: Readonly<Record<string, unknown>>,
+  prefix: "posted" | "voided"
+): FinancialLifecycleProvenance {
+  const approverRef = optionalString(row[`${prefix}_approver_ref`]);
+  return {
+    lifecycleEventId: string(row[`${prefix}_event_id`], `${prefix}_event_id`),
+    actorRef: string(row[`${prefix}_actor_ref`], `${prefix}_actor_ref`),
+    ...(approverRef === undefined ? {} : { approverRef }),
+    requestId: string(row[`${prefix}_request_id`], `${prefix}_request_id`),
+    reasonCode: string(row[`${prefix}_reason_code`], `${prefix}_reason_code`)
   };
 }
 

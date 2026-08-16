@@ -229,6 +229,81 @@ describe("pre-v1 SDK foundation", () => {
     ]));
   });
 
+  it("exposes guarded bill-payment list filters and versioned lifecycle detail", async () => {
+    const client = new BillPaymentClient();
+    const queries = createFinancialReadModels({
+      database: { transaction: async (work) => work(client) },
+      tenantId: "tenant_1",
+      companyId: "company_1",
+      bookId: "book_1"
+    });
+
+    await expect(queries.listPayments({
+      paymentType: "bill_payment",
+      vendorId: "vendor_1",
+      periodStart: "2026-08-01",
+      periodEnd: "2026-08-14",
+      status: "voided",
+      limit: 25
+    })).resolves.toEqual({
+      items: [expect.objectContaining({
+        paymentId: "payment_1",
+        paymentType: "bill_payment",
+        transactionId: "transaction_payment_1",
+        partyId: "vendor_1",
+        paymentDate: "2026-08-05",
+        amount: "20.00",
+        unappliedAmount: "0.00",
+        status: "voided",
+        version: 2,
+        lifecycleEventId: "event_payment_posted"
+      })]
+    });
+    expect(client.paymentListParams).toEqual(expect.arrayContaining([
+      "bill_payment",
+      "vendor_1",
+      "2026-08-01",
+      "2026-08-14",
+      "voided"
+    ]));
+
+    await expect(queries.getBillPayment("payment_1")).resolves.toMatchObject({
+      paymentId: "payment_1",
+      vendorId: "vendor_1",
+      vendorName: "Northwind Security",
+      transactionId: "transaction_payment_1",
+      status: "voided",
+      version: 2,
+      memo: "Duplicate payment",
+      lifecycle: {
+        posted: {
+          lifecycleEventId: "event_payment_posted",
+          actorRef: "user:clerk",
+          requestId: "request-post-payment"
+        },
+        voided: {
+          lifecycleEventId: "event_payment_voided",
+          actorRef: "user:controller",
+          approverRef: "user:cfo",
+          requestId: "request-void-payment"
+        },
+        reversalTransactionId: "transaction_payment_reversal"
+      },
+      applications: [expect.objectContaining({
+        applicationId: "application_1",
+        sourcePaymentId: "payment_1",
+        targetDocumentId: "bill_1",
+        status: "unapplied",
+        version: 2
+      })]
+    });
+
+    await expect(queries.listPayments({
+      periodStart: "2026-08-15",
+      periodEnd: "2026-08-14"
+    })).rejects.toMatchObject({ code: "invalid_input" });
+  });
+
   it("delivers outbox work through bounded runtime routing and publishes only successful events", async () => {
     const event = outboxEvent();
     const published: string[] = [];
@@ -442,6 +517,79 @@ class VendorBillClient implements PostgresQueryClient {
       }] as unknown as Row[] });
     }
     throw new Error(`Unexpected vendor bill query: ${sql}`);
+  }
+}
+
+class BillPaymentClient implements PostgresQueryClient {
+  paymentListParams: readonly unknown[] = [];
+
+  query<Row extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string,
+    params: readonly unknown[] = []
+  ): Promise<PostgresQueryResult<Row>> {
+    if (sql.includes('from "erp_financials"."reporting_books"')) {
+      return Promise.resolve({
+        rows: [{ base_currency_code: "USD", accounting_basis: "accrual", status: "active" } as unknown as Row]
+      });
+    }
+    if (sql.includes("with payment_rows as")) {
+      this.paymentListParams = params;
+      return Promise.resolve({ rows: [{
+        payment_id: "payment_1",
+        source_id: "source_1",
+        document_type: "bill_payment",
+        transaction_id: "transaction_payment_1",
+        party_id: "vendor_1",
+        party_name: "Northwind Security",
+        document_number: "PAY-100",
+        document_date: "2026-08-05",
+        currency_code: "USD",
+        original_amount: "20",
+        open_amount: "0",
+        payment_status: "voided",
+        version: 2,
+        lifecycle_event_id: "event_payment_posted",
+        application_count: 0
+      }] as unknown as Row[] });
+    }
+    if (sql.includes('posted."event_id" as "posted_event_id"')) {
+      return Promise.resolve({ rows: [{
+        memo: "Duplicate payment",
+        posted_event_id: "event_payment_posted",
+        posted_actor_ref: "user:clerk",
+        posted_approver_ref: null,
+        posted_request_id: "request-post-payment",
+        posted_reason_code: "record_bill_payment",
+        voided_event_id: "event_payment_voided",
+        voided_actor_ref: "user:controller",
+        voided_approver_ref: "user:cfo",
+        voided_request_id: "request-void-payment",
+        voided_reason_code: "duplicate_payment",
+        reversal_transaction_id: "transaction_payment_reversal"
+      }] as unknown as Row[] });
+    }
+    if (sql.includes('from "erp_financials"."subledger_applications" application')) {
+      return Promise.resolve({ rows: [{
+        application_id: "application_1",
+        source_id: "source_1",
+        application_type: "bill_payment_to_bill",
+        status: "unapplied",
+        version: 2,
+        application_date: "2026-08-10",
+        source_payment_id: "payment_1",
+        target_document_id: "bill_1",
+        applied_amount: "10",
+        currency_code: "USD",
+        applied_event_id: "event_application_applied",
+        ended_event_id: "event_application_unapplied",
+        match_candidate_id: null,
+        match_decision_id: null,
+        match_method: null,
+        match_score: null,
+        match_evidence: null
+      }] as unknown as Row[] });
+    }
+    throw new Error(`Unexpected bill payment query: ${sql}`);
   }
 }
 

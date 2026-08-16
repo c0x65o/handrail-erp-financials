@@ -8,6 +8,8 @@ import {
 
 import type {
   BuildCoreErpPersistenceEvidenceInput,
+  BillPaymentDetail,
+  BillPaymentLifecycleEvidence,
   CoreErpCanonicalReportGenerationRequest,
   CoreErpCanonicalReportGenerationResult,
   CoreErpCanonicalReportReadModelStorage,
@@ -33,12 +35,14 @@ import type {
   InvoiceDeliveryEvent,
   PaymentApplicationDetail,
   PaymentApplicationListItem,
+  PaymentStatus,
   EndSubledgerApplicationInput,
   QuickBooksFullSyncRunResult,
   QuickBooksFullSyncWorker,
   QuickBooksIncrementalSyncRunResult,
   QuickBooksIncrementalSyncWorker,
   PostedVendorBillLifecycleResult,
+  PostedBillPaymentLifecycleResult,
   ReplaceIssuedVendorBillInput,
   ReplacePostedVendorBillInput,
   VendorBillApplicationReadModel,
@@ -53,6 +57,8 @@ import type {
   SettleInvoiceWriteOffResult,
   VoidIssuedWriteOffInput,
   VoidIssuedVendorBillInput,
+  VoidIssuedBillPaymentInput,
+  VoidPostedBillPaymentInput,
   VoidPostedVendorBillInput
 } from "@handrail/erp-financials";
 
@@ -104,6 +110,12 @@ export type CoreErpPersistenceEvidenceImports = {
   readonly replacePostedVendorBillInput: ReplacePostedVendorBillInput;
   readonly replaceIssuedVendorBillInput: ReplaceIssuedVendorBillInput;
   readonly postedVendorBillLifecycleResult: PostedVendorBillLifecycleResult;
+  readonly billPayment: BillPaymentDetail;
+  readonly billPaymentLifecycle: BillPaymentLifecycleEvidence;
+  readonly billPaymentStatus: PaymentStatus;
+  readonly voidPostedBillPaymentInput: VoidPostedBillPaymentInput;
+  readonly voidIssuedBillPaymentInput: VoidIssuedBillPaymentInput;
+  readonly postedBillPaymentLifecycleResult: PostedBillPaymentLifecycleResult;
   readonly invoiceDelivery: InvoiceDeliveryEvent;
   readonly customerPayment: CustomerPaymentDetail;
   readonly customerPaymentProvenance: CustomerPaymentProvenance;

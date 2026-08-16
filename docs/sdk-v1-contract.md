@@ -179,6 +179,23 @@ payment recording accepts bounded bank-match/deposit references. Application
 reads return the exact amount, source/target documents, status/version, terminal
 lifecycle links, and bounded match decision evidence.
 
+Bill-payment hosts use `queries.listPayments(...)` with
+`paymentType: "bill_payment"`; the query applies optional `vendorId`, inclusive
+`periodStart` / `periodEnd`, and lifecycle `status` filters before cursor
+pagination.
+`queries.getBillPayment(...)` returns the canonical transaction, current
+document version/status, exact amount and unapplied balance, vendor, application
+history, posting provenance, and any void event/reversal transaction evidence.
+
+`commands.billPayments.void(...)` (also exposed as `voidIssued` and
+`voidPosted`) is the correction boundary for an erroneous posted payment. It
+requires independent approval, an expected document version, and an
+idempotency key; it posts a compensating journal and marks the payment voided in
+the same database transaction. Applied or partially applied payments fail
+closed until their active applications are ended through
+`commands.paymentApplications.unapply(...)` or `.void(...)`. Retrying the same
+completed void returns `already_voided` and never posts a second reversal.
+
 Write-offs accept bounded reason, related-invoice, balance-account, and
 write-off-account provenance. `queries.listWriteOffs(...)` and
 `queries.getWriteOff(...)` expose that provenance with durable actor/approver

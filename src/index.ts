@@ -284,6 +284,8 @@ export type {
   AdjustmentType,
   BankReconciliationListItem,
   BankReconciliationSummary,
+  BillPaymentDetail,
+  BillPaymentLifecycleEvidence,
   ChartOfAccountsItem,
   CommercialDocumentLineReadModel,
   CustomerPaymentDetail,
@@ -312,6 +314,7 @@ export type {
   PaymentApplicationListItem,
   PaymentApplicationMatchProvenance,
   PaymentSummary,
+  PaymentStatus,
   WriteOffDetail,
   WriteOffListItem,
   VendorBillApplicationReadModel,
@@ -589,6 +592,7 @@ export type {
   PostJournalEntryLineInput,
   PostJournalEntryResult,
   PostedVendorBillLifecycleResult,
+  PostedBillPaymentLifecycleResult,
   ReplaceIssuedVendorBillInput,
   ReplaceJournalEntryInput,
   ReplaceIssuedAdjustmentInput,
@@ -612,10 +616,12 @@ export type {
   UpsertAccountTreeInput,
   UpsertAccountTreeResult,
   VoidIssuedAdjustmentInput,
+  VoidIssuedBillPaymentInput,
   VoidIssuedCreditMemoInput,
   VoidIssuedRefundInput,
   VoidIssuedWriteOffInput,
   VoidIssuedVendorBillInput,
+  VoidPostedBillPaymentInput,
   VoidPostedVendorBillInput
 } from "./erp-financials-service.js";
 export type {

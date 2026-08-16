@@ -393,6 +393,94 @@ where application.subledger_application_id = $1`,
     ).resolves.toMatchObject({ rows: [{ status: "applied", version: 1 }] });
   });
 
+  it("voids and reloads a canonical bill payment through real PostgreSQL", async () => {
+    await migratePostgresSchema(runner, { appliedByRef: "integration:bill-payment-void" });
+    await seedAccountingScope(pool);
+    const sdk = createErpFinancialsSdk({
+      database: runner,
+      tenantId: "tenant_1",
+      companyId: "company_1",
+      bookId: "book_primary",
+      writeSourceId: "source_1",
+      currencyCode: "USD",
+      postingPolicy: "legacy_unrestricted",
+      now: () => "2026-08-12T12:00:00.000Z"
+    });
+    const operation = sdkOperation();
+    await sdk.books.define({
+      operation,
+      bookId: "book_primary",
+      name: "Primary",
+      baseCurrencyCode: "USD"
+    });
+    await sdk.books.bindSource({
+      operation,
+      bookId: "book_primary",
+      sourceId: "source_1",
+      sourceRole: "active",
+      effectiveFrom: "2026-01-01"
+    });
+    const payment = await sdk.commands.billPayments.record({
+      operation,
+      idempotencyKey: "integration-bill-payment",
+      date: "2026-08-05",
+      documentNumber: "PAY-100",
+      memo: "Duplicate payment",
+      vendorId: "vendor_1",
+      amount: "20.00",
+      payableAccount: { accountId: "account_ap" },
+      cashAccount: { accountId: "account_cash" }
+    });
+    await expect(sdk.queries.listPayments({
+      paymentType: "bill_payment",
+      vendorId: "vendor_1",
+      periodStart: "2026-08-01",
+      periodEnd: "2026-08-31",
+      status: "unapplied"
+    })).resolves.toMatchObject({
+      items: [{ paymentId: payment.documentId, transactionId: payment.journal.transactionId, version: 1 }]
+    });
+
+    const command = {
+      operation,
+      billPaymentId: payment.documentId,
+      expectedVersion: 1,
+      idempotencyKey: "integration-void-bill-payment",
+      date: "2026-08-12" as const,
+      memo: "Void duplicate payment"
+    };
+    await expect(sdk.commands.billPayments.void(command)).resolves.toMatchObject({
+      status: "voided",
+      originalBillPaymentId: payment.documentId,
+      originalVersion: 2
+    });
+    await expect(sdk.commands.billPayments.void(command)).resolves.toMatchObject({
+      status: "already_voided",
+      reversal: { status: "already_posted" }
+    });
+    await expect(sdk.queries.getBillPayment(payment.documentId)).resolves.toMatchObject({
+      paymentId: payment.documentId,
+      vendorId: "vendor_1",
+      transactionId: payment.journal.transactionId,
+      amount: "20.00",
+      status: "voided",
+      version: 2,
+      memo: "Duplicate payment",
+      lifecycle: {
+        posted: { actorRef: operation.actorRef },
+        voided: { actorRef: operation.actorRef, approverRef: operation.approverRef }
+      },
+      applications: []
+    });
+    await expect(sdk.queries.listPayments({
+      paymentType: "bill_payment",
+      vendorId: "vendor_1",
+      periodStart: "2026-08-01",
+      periodEnd: "2026-08-31",
+      status: "voided"
+    })).resolves.toMatchObject({ items: [{ paymentId: payment.documentId, version: 2 }] });
+  });
+
   it("uses the scoped transaction identity index for an important journal lookup", async () => {
     await migratePostgresSchema(runner, { appliedByRef: "integration:query-plan" });
     await seedAccountingScope(pool);
@@ -742,10 +830,12 @@ insert into erp_financials.company_sources values ('company_source_1', 'tenant_1
 insert into erp_financials.accounts (account_id, tenant_id, source_id, source_account_id, name, type, classification, active)
 values ('account_cash', 'tenant_1', 'source_1', 'cash', 'Cash', 'asset', 'asset', true),
        ('account_ar', 'tenant_1', 'source_1', 'ar', 'Receivable', 'asset', 'asset', true),
+       ('account_ap', 'tenant_1', 'source_1', 'ap', 'Payable', 'liability', 'liability', true),
        ('account_income', 'tenant_1', 'source_1', 'income', 'Service Revenue', 'income', 'income', true);
 insert into erp_financials.parties (party_id, tenant_id, source_id, source_party_id, party_type, display_name, active)
 values ('customer_1', 'tenant_1', 'source_1', 'customer:1', 'customer', 'Customer One', true),
-       ('customer_2', 'tenant_1', 'source_1', 'customer:2', 'customer', 'Customer Two', true);
+       ('customer_2', 'tenant_1', 'source_1', 'customer:2', 'customer', 'Customer Two', true),
+       ('vendor_1', 'tenant_1', 'source_1', 'vendor:1', 'vendor', 'Vendor One', true);
 insert into erp_financials.import_batches (import_batch_id, tenant_id, source_id, mode, status, started_at, completed_at, source_object_counts)
 values ('batch_1', 'tenant_1', 'source_1', 'delta', 'completed', now(), now(), '{}'::jsonb);
 insert into erp_financials.transactions (
