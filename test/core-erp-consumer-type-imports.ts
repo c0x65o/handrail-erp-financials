@@ -34,14 +34,19 @@ import type {
   CoreErpTenantReadAccess,
   CustomerPaymentDetail,
   CustomerPaymentProvenance,
+  FiscalPeriodReadModel,
   GeneralLedgerDimensionProvenance,
   GeneralLedgerFilters,
   GeneralLedgerLine,
   GeneralLedgerSourceProvenance,
   InvoiceDeliveryEvent,
+  JournalEntryDetail,
+  JournalEntryListItem,
+  JournalEntryStatus,
   PaymentApplicationDetail,
   PaymentApplicationListItem,
   PaymentStatus,
+  PostingLockReadModel,
   EndSubledgerApplicationInput,
   QuickBooksFullSyncRunResult,
   QuickBooksFullSyncWorker,
@@ -141,6 +146,11 @@ export type CoreErpPersistenceEvidenceImports = {
   readonly invoiceDelivery: InvoiceDeliveryEvent;
   readonly customerPayment: CustomerPaymentDetail;
   readonly customerPaymentProvenance: CustomerPaymentProvenance;
+  readonly journalEntry: JournalEntryListItem;
+  readonly journalEntryDetail: JournalEntryDetail;
+  readonly journalEntryStatus: JournalEntryStatus;
+  readonly fiscalPeriod: FiscalPeriodReadModel;
+  readonly postingLock: PostingLockReadModel;
   readonly generalLedgerFilters: GeneralLedgerFilters;
   readonly generalLedgerLine: GeneralLedgerLine;
   readonly generalLedgerDimension: GeneralLedgerDimensionProvenance;

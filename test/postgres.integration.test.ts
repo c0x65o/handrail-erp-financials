@@ -5,6 +5,7 @@ import {
   POSTGRES_CANONICAL_SCHEMA_MANIFEST,
   createErpFinancials,
   createErpFinancialsSdk,
+  createFiscalCloseEvidenceChecksum,
   migratePostgresSchema,
   validatePostgresMigrationHistory,
   validatePostgresSchema
@@ -48,6 +49,86 @@ describeIntegration("ERP Financials real PostgreSQL", () => {
     await expect(
       pool.query("update erp_financials.schema_migrations set name = 'tampered' where to_version = 18")
     ).rejects.toThrow("schema migration history is append-only");
+  });
+
+  it("reads canonical journal and fiscal controls through the public SDK", async () => {
+    await migratePostgresSchema(runner, { appliedByRef: "integration:accounting-control-reads" });
+    await seedAccountingScope(pool);
+    const sdk = createErpFinancialsSdk({
+      database: runner,
+      tenantId: "tenant_1",
+      companyId: "company_1",
+      bookId: "book_primary",
+      writeSourceId: "source_1",
+      currencyCode: "USD",
+      postingPolicy: "legacy_unrestricted",
+      now: () => "2026-08-31T23:30:00.000Z"
+    });
+    await sdk.books.define({
+      operation: { ...sdkOperation(), requestId: "request:book" },
+      bookId: "book_primary",
+      name: "Primary",
+      baseCurrencyCode: "USD"
+    });
+    await sdk.books.bindSource({
+      operation: { ...sdkOperation(), requestId: "request:book-source" },
+      bookId: "book_primary",
+      sourceId: "source_1",
+      sourceRole: "active",
+      effectiveFrom: "2026-01-01"
+    });
+    const posted = await sdk.commands.journalEntries.post({
+      operation: { ...sdkOperation(), requestId: "request:journal" },
+      idempotencyKey: "integration-journal-read",
+      date: "2026-08-15",
+      transactionNumber: "JE-INTEGRATION-1",
+      memo: "Accrued service revenue",
+      lines: [
+        { accountId: "account_ar", debit: "125.50" },
+        { accountId: "account_income", credit: "125.50" }
+      ]
+    });
+    const defined = await sdk.commands.fiscalPeriods.define({
+      operation: { ...sdkOperation(), requestId: "request:period-define" },
+      fiscalYear: 2026,
+      periodNumber: 8,
+      periodStart: "2026-08-01",
+      periodEnd: "2026-08-31"
+    });
+    const closing = await sdk.commands.fiscalPeriods.beginClose({
+      operation: { ...sdkOperation(), requestId: "request:period-begin-close" },
+      fiscalPeriodId: defined.fiscalPeriodId,
+      expectedVersion: defined.version
+    });
+    const evidenceMaterial = {
+      trialBalanceSnapshotId: "trial_balance_integration",
+      reconciliationRefs: ["reconciliation_integration"],
+      checklistRef: "checklist_integration",
+      postingMaxUpdatedAt: "2026-08-31T23:00:00.000Z"
+    } as const;
+    await sdk.commands.fiscalPeriods.close({
+      operation: { ...sdkOperation(), requestId: "request:period-close" },
+      fiscalPeriodId: defined.fiscalPeriodId,
+      expectedVersion: closing.version,
+      evidence: { ...evidenceMaterial, evidenceChecksum: createFiscalCloseEvidenceChecksum(evidenceMaterial) }
+    });
+
+    await expect(sdk.queries.listJournalEntries({ limit: 25 })).resolves.toMatchObject({
+      items: [{ journalEntryId: posted.transactionId, totalDebit: "125.50", totalCredit: "125.50", version: 1 }]
+    });
+    await expect(sdk.queries.getJournalEntry(posted.transactionId)).resolves.toMatchObject({
+      journalEntryId: posted.transactionId,
+      lines: [{ debitAmount: "125.50" }, { creditAmount: "125.50" }]
+    });
+    await expect(sdk.queries.getFiscalPeriod("source_1", defined.fiscalPeriodId)).resolves.toMatchObject({
+      status: "closed",
+      version: 3,
+      closeEvidence: { trialBalanceSnapshotId: "trial_balance_integration" }
+    });
+    await expect(sdk.queries.getPostingLock("source_1")).resolves.toMatchObject({
+      postingLockDate: "2026-08-31",
+      version: 1
+    });
   });
 
   it("upgrades a real v6 database through the scoped v7 migration before continuing", async () => {
@@ -856,7 +937,7 @@ class PgQueryClient implements PostgresQueryClient {
     params: readonly unknown[] = []
   ): Promise<PostgresQueryResult<Row>> {
     const result = await this.queryable.query<QueryResultRow>(sql, [...params]);
-    return { rows: result.rows as readonly Row[], rowCount: result.rowCount };
+    return { rows: result.rows as unknown as readonly Row[], rowCount: result.rowCount };
   }
 }
 

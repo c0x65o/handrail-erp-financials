@@ -609,7 +609,145 @@ export type BankReconciliationSummary = {
   readonly matchedAbsoluteAmount: DecimalString;
 };
 
+export type AccountingLifecycleProvenance = {
+  readonly lifecycleEventId: string;
+  readonly eventType: string;
+  readonly actorRef: string;
+  readonly approverRef?: string;
+  readonly requestId: string;
+  readonly correlationId: string;
+  readonly reasonCode: string;
+  readonly reasonDetail?: string;
+  readonly occurredAt: IsoDateTime;
+  readonly recordedAt: IsoDateTime;
+  readonly payloadChecksum: string;
+  readonly priorEventId?: string;
+};
+
+export type JournalEntryStatus = "posted" | "reversed" | "voided" | "corrected" | "replaced";
+
+export type JournalEntrySourceProvenance = {
+  readonly sourceId: string;
+  readonly sourceRole: "historical" | "active" | "adjustment";
+  readonly sourceSystem: string;
+  readonly providerEnvironment: string;
+  readonly sourceTransactionId: string;
+  readonly sourceTransactionType: string;
+  readonly sourceObjectType?: string;
+  readonly sourceObjectId?: string;
+  readonly sourceUpdatedAt?: IsoDateTime;
+  readonly checksum?: string;
+};
+
+export type JournalEntryListItem = {
+  readonly journalEntryId: string;
+  /** The immutable first transaction in a reversal/correction/replacement chain. */
+  readonly originalTransactionId: string;
+  readonly sourceId: string;
+  readonly transactionNumber?: string;
+  readonly transactionDate: IsoDate;
+  readonly postedAt: IsoDateTime;
+  readonly memo?: string;
+  readonly currencyCode: IsoCurrencyCode;
+  readonly accountingBasis: AccountingBasis;
+  readonly status: JournalEntryStatus;
+  readonly totalDebit: DecimalString;
+  readonly totalCredit: DecimalString;
+  readonly lineCount: number;
+  /** One plus the number of immutable lifecycle links owned by this transaction. */
+  readonly version: number;
+  readonly sourceProvenance: JournalEntrySourceProvenance;
+  readonly preparerProvenance: AccountingLifecycleProvenance;
+};
+
+export type JournalEntryAccountReference = {
+  readonly accountId: string;
+  readonly sourceAccountId: string;
+  readonly bookAccountKey: string;
+  readonly accountNumber?: string;
+  readonly accountName: string;
+  readonly classification: AccountClassification;
+};
+
+export type JournalEntryLineReadModel = {
+  readonly transactionLineId: string;
+  readonly postingId: string;
+  readonly sourcePostingId: string;
+  readonly lineNumber: number;
+  readonly account: JournalEntryAccountReference;
+  readonly partyId?: string;
+  readonly itemId?: string;
+  readonly description?: string;
+  readonly debitAmount: DecimalString;
+  readonly creditAmount: DecimalString;
+  readonly netAmount: DecimalString;
+  readonly dimensionRefs: JsonValue;
+};
+
+export type JournalEntryLifecycleLinkReadModel = {
+  readonly journalEntryLinkId: string;
+  readonly linkType: "reversal" | "void" | "correction" | "replacement";
+  readonly originalTransactionId: string;
+  readonly relatedTransactionId: string;
+  readonly createdAt: IsoDateTime;
+  readonly lifecycle: AccountingLifecycleProvenance;
+};
+
+export type JournalEntryDetail = JournalEntryListItem & {
+  readonly lines: readonly JournalEntryLineReadModel[];
+  readonly lifecycle: readonly AccountingLifecycleProvenance[];
+  readonly links: readonly JournalEntryLifecycleLinkReadModel[];
+};
+
+export type FiscalPeriodReadModel = {
+  readonly fiscalPeriodId: string;
+  readonly sourceId: string;
+  readonly fiscalYear: number;
+  readonly periodNumber: number;
+  readonly periodStart: IsoDate;
+  readonly periodEnd: IsoDate;
+  readonly status: "open" | "closing" | "closed";
+  readonly version: number;
+  readonly createdAt: IsoDateTime;
+  readonly updatedAt: IsoDateTime;
+  readonly closeEvidence?: {
+    readonly trialBalanceSnapshotId: string;
+    readonly reconciliationRefs: readonly string[];
+    readonly checklistRef: string;
+    readonly postingMaxUpdatedAt: IsoDateTime;
+    readonly evidenceChecksum: string;
+  };
+  readonly closeLifecycle?: AccountingLifecycleProvenance;
+  readonly reopenLifecycle?: AccountingLifecycleProvenance;
+  readonly latestLifecycle: AccountingLifecycleProvenance;
+};
+
+export type PostingLockReadModel = {
+  readonly sourceId: string;
+  readonly postingLockDate?: IsoDate;
+  /** Zero denotes that no lock control has been created and is the create command's expectedVersion. */
+  readonly version: number;
+  readonly lifecycle?: AccountingLifecycleProvenance;
+};
+
 export type FinancialReadModels = {
+  listJournalEntries(input?: PageRequest & {
+    readonly sourceId?: string;
+    readonly status?: JournalEntryStatus;
+    readonly periodStart?: IsoDate;
+    readonly periodEnd?: IsoDate;
+    readonly transactionType?: string;
+    readonly preparerRef?: string;
+    readonly search?: string;
+  }): Promise<Page<JournalEntryListItem>>;
+  getJournalEntry(journalEntryId: string): Promise<JournalEntryDetail>;
+  listFiscalPeriods(input: PageRequest & {
+    readonly sourceId: string;
+    readonly status?: FiscalPeriodReadModel["status"];
+    readonly fiscalYear?: number;
+  }): Promise<Page<FiscalPeriodReadModel>>;
+  getFiscalPeriod(sourceId: string, fiscalPeriodId: string): Promise<FiscalPeriodReadModel>;
+  getPostingLock(sourceId: string): Promise<PostingLockReadModel>;
   listInvoices(input?: PageRequest & { readonly status?: InvoiceListStatus; readonly asOfDate?: IsoDate }): Promise<Page<InvoiceListItem>>;
   getInvoice(invoiceId: string, asOfDate?: IsoDate): Promise<InvoiceDetail>;
   listInvoiceDeliveries(invoiceId: string, input?: PageRequest): Promise<Page<InvoiceDeliveryEvent>>;
@@ -684,6 +822,11 @@ export function createFinancialReadModels(input: Scope): FinancialReadModels {
   assertNonEmpty(input.companyId, "companyId");
   assertNonEmpty(input.bookId, "bookId");
   return {
+    listJournalEntries: (request = {}) => listJournalEntries(input, request),
+    getJournalEntry: (journalEntryId) => getJournalEntry(input, journalEntryId),
+    listFiscalPeriods: (request) => listFiscalPeriods(input, request),
+    getFiscalPeriod: (sourceId, fiscalPeriodId) => getFiscalPeriod(input, sourceId, fiscalPeriodId),
+    getPostingLock: (sourceId) => getPostingLock(input, sourceId),
     listInvoices: (request = {}) => listInvoices(input, request),
     getInvoice: (invoiceId, asOfDate) => getInvoice(input, invoiceId, asOfDate),
     listInvoiceDeliveries: (invoiceId, request = {}) => listInvoiceDeliveries(input, invoiceId, request),
@@ -712,6 +855,356 @@ export function createFinancialReadModels(input: Scope): FinancialReadModels {
     listBankReconciliation: (request = {}) => listBankReconciliation(input, request),
     getBankReconciliationSummary: () => getBankReconciliationSummary(input)
   };
+}
+
+type JournalEntryFilters = {
+  readonly sourceId?: string;
+  readonly status?: JournalEntryStatus;
+  readonly periodStart?: IsoDate;
+  readonly periodEnd?: IsoDate;
+  readonly transactionType?: string;
+  readonly preparerRef?: string;
+  readonly search?: string;
+};
+
+async function listJournalEntries(
+  scope: Scope,
+  input: PageRequest & JournalEntryFilters
+): Promise<Page<JournalEntryListItem>> {
+  const filters = journalEntryFilters(input);
+  const pageKind = `journal-entries:${readFilterFingerprint(filters)}`;
+  const page = pageInput(input, pageKind, scope.bookId);
+  return scope.database.transaction(async (client) => {
+    const book = await resolveBook(client, scope);
+    const result = await client.query(
+      `with journal as (
+  select transaction."transaction_id" as "journal_entry_id",
+    coalesce(inbound."original_transaction_id", transaction."transaction_id") as "original_transaction_id",
+    transaction."source_id", transaction."source_transaction_id", transaction."source_transaction_type",
+    transaction."transaction_number", transaction."transaction_date", transaction."posted_at", transaction."memo",
+    transaction."currency_code", posting."accounting_basis", posting."total_debit", posting."total_credit",
+    posting."line_count", source."source_role", accounting_source."source_system",
+    accounting_source."provider_environment", transaction."source_payload_ref",
+    case
+      when links."replacement_count" > 0 then 'replaced'
+      when links."correction_count" > 0 then 'corrected'
+      when links."void_count" > 0 then 'voided'
+      when links."reversal_count" > 0 then 'reversed'
+      else 'posted'
+    end as "canonical_status",
+    1 + links."link_count" as "version",
+    prepared."event_id" as "preparer_event_id", prepared."event_type" as "preparer_event_type",
+    prepared."actor_ref" as "preparer_actor_ref", prepared."approver_ref" as "preparer_approver_ref",
+    prepared."request_id" as "preparer_request_id", prepared."correlation_id" as "preparer_correlation_id",
+    prepared."reason_code" as "preparer_reason_code", prepared."reason_detail" as "preparer_reason_detail",
+    prepared."occurred_at" as "preparer_occurred_at", prepared."recorded_at" as "preparer_recorded_at",
+    prepared."payload_checksum" as "preparer_payload_checksum", prepared."prior_event_id" as "preparer_prior_event_id"
+  from "erp_financials"."transactions" transaction
+  join "erp_financials"."reporting_book_sources" source
+    on source."tenant_id" = $1 and source."company_id" = $2 and source."book_id" = $3
+   and source."source_id" = transaction."source_id"
+   and (source."effective_from" is null or source."effective_from" <= transaction."transaction_date")
+   and (source."effective_through" is null or source."effective_through" >= transaction."transaction_date")
+  join "erp_financials"."accounting_sources" accounting_source
+    on accounting_source."tenant_id" = transaction."tenant_id" and accounting_source."source_id" = transaction."source_id"
+  join lateral (
+    select coalesce(sum(posting."debit_amount"), 0) as "total_debit",
+      coalesce(sum(posting."credit_amount"), 0) as "total_credit", count(*)::integer as "line_count",
+      min(posting."accounting_basis") as "accounting_basis"
+    from "erp_financials"."ledger_postings" posting
+    where posting."tenant_id" = transaction."tenant_id" and posting."source_id" = transaction."source_id"
+      and posting."transaction_id" = transaction."transaction_id"
+      and posting."accounting_basis" = $4 and posting."currency_code" = $5
+  ) posting on posting."line_count" > 0
+  join lateral (
+    select event.* from "erp_financials"."financial_lifecycle_events" event
+    where event."tenant_id" = $1 and event."company_id" = $2
+      and event."source_id" = transaction."source_id" and event."aggregate_type" = 'journal_entry'
+      and event."aggregate_id" = transaction."transaction_id"
+      and event."event_type" in ('journal_entry.posted', 'journal_entry.adjustment_posted')
+    order by event."occurred_at", event."recorded_at", event."event_id" limit 1
+  ) prepared on true
+  left join lateral (
+    select count(*)::integer as "link_count",
+      count(*) filter (where link."link_type" = 'reversal')::integer as "reversal_count",
+      count(*) filter (where link."link_type" = 'void')::integer as "void_count",
+      count(*) filter (where link."link_type" = 'correction')::integer as "correction_count",
+      count(*) filter (where link."link_type" = 'replacement')::integer as "replacement_count"
+    from "erp_financials"."journal_entry_links" link
+    where link."tenant_id" = $1 and link."company_id" = $2 and link."source_id" = transaction."source_id"
+      and link."original_transaction_id" = transaction."transaction_id"
+  ) links on true
+  left join lateral (
+    select link."original_transaction_id" from "erp_financials"."journal_entry_links" link
+    where link."tenant_id" = $1 and link."company_id" = $2 and link."source_id" = transaction."source_id"
+      and link."related_transaction_id" = transaction."transaction_id"
+    order by link."created_at", link."journal_entry_link_id" limit 1
+  ) inbound on true
+  where transaction."tenant_id" = $1 and transaction."status" = 'posted'
+)
+select * from journal
+where ($6::text is null or "source_id" = $6)
+  and ($7::text is null or "canonical_status" = $7)
+  and ($8::date is null or "transaction_date" >= $8)
+  and ($9::date is null or "transaction_date" <= $9)
+  and ($10::text is null or "source_transaction_type" = $10)
+  and ($11::text is null or "preparer_actor_ref" = $11)
+  and ($12::text is null or strpos(lower(concat_ws(' ', "transaction_number", "memo", "journal_entry_id")), lower($12)) > 0)
+  and ($13::date is null or ("transaction_date", "journal_entry_id") < ($13::date, $14::text))
+order by "transaction_date" desc, "journal_entry_id" desc
+limit $15`,
+      [scope.tenantId, scope.companyId, scope.bookId, book.accountingBasis, book.currencyCode,
+        filters.sourceId, filters.status, filters.periodStart, filters.periodEnd, filters.transactionType,
+        filters.preparerRef, filters.search, page.date, page.id, page.limit + 1]
+    );
+    return toPage(result.rows.map(journalEntryFromRow), page.limit, pageKind, scope.bookId, (item) => ({
+      date: item.transactionDate,
+      id: item.journalEntryId
+    }));
+  });
+}
+
+async function getJournalEntry(scope: Scope, journalEntryId: string): Promise<JournalEntryDetail> {
+  assertNonEmpty(journalEntryId, "journalEntryId");
+  return scope.database.transaction(async (client) => {
+    const book = await resolveBook(client, scope);
+    const header = await client.query(
+      `select transaction."transaction_id" as "journal_entry_id",
+  coalesce(inbound."original_transaction_id", transaction."transaction_id") as "original_transaction_id",
+  transaction."source_id", transaction."source_transaction_id", transaction."source_transaction_type",
+  transaction."transaction_number", transaction."transaction_date", transaction."posted_at", transaction."memo",
+  transaction."currency_code", posting."accounting_basis", posting."total_debit", posting."total_credit",
+  posting."line_count", source."source_role", accounting_source."source_system",
+  accounting_source."provider_environment", transaction."source_payload_ref",
+  case when links."replacement_count" > 0 then 'replaced' when links."correction_count" > 0 then 'corrected'
+    when links."void_count" > 0 then 'voided' when links."reversal_count" > 0 then 'reversed' else 'posted' end as "canonical_status",
+  1 + links."link_count" as "version",
+  prepared."event_id" as "preparer_event_id", prepared."event_type" as "preparer_event_type",
+  prepared."actor_ref" as "preparer_actor_ref", prepared."approver_ref" as "preparer_approver_ref",
+  prepared."request_id" as "preparer_request_id", prepared."correlation_id" as "preparer_correlation_id",
+  prepared."reason_code" as "preparer_reason_code", prepared."reason_detail" as "preparer_reason_detail",
+  prepared."occurred_at" as "preparer_occurred_at", prepared."recorded_at" as "preparer_recorded_at",
+  prepared."payload_checksum" as "preparer_payload_checksum", prepared."prior_event_id" as "preparer_prior_event_id"
+from "erp_financials"."transactions" transaction
+join "erp_financials"."reporting_book_sources" source
+  on source."tenant_id" = $1 and source."company_id" = $2 and source."book_id" = $3 and source."source_id" = transaction."source_id"
+ and (source."effective_from" is null or source."effective_from" <= transaction."transaction_date")
+ and (source."effective_through" is null or source."effective_through" >= transaction."transaction_date")
+join "erp_financials"."accounting_sources" accounting_source
+  on accounting_source."tenant_id" = transaction."tenant_id" and accounting_source."source_id" = transaction."source_id"
+join lateral (
+  select coalesce(sum("debit_amount"), 0) as "total_debit", coalesce(sum("credit_amount"), 0) as "total_credit",
+    count(*)::integer as "line_count", min("accounting_basis") as "accounting_basis"
+  from "erp_financials"."ledger_postings"
+  where "tenant_id" = transaction."tenant_id" and "source_id" = transaction."source_id"
+    and "transaction_id" = transaction."transaction_id" and "accounting_basis" = $4 and "currency_code" = $5
+) posting on posting."line_count" > 0
+join lateral (
+  select event.* from "erp_financials"."financial_lifecycle_events" event
+  where event."tenant_id" = $1 and event."company_id" = $2 and event."source_id" = transaction."source_id"
+    and event."aggregate_type" = 'journal_entry' and event."aggregate_id" = transaction."transaction_id"
+    and event."event_type" in ('journal_entry.posted', 'journal_entry.adjustment_posted')
+  order by event."occurred_at", event."recorded_at", event."event_id" limit 1
+) prepared on true
+left join lateral (
+  select count(*)::integer as "link_count",
+    count(*) filter (where "link_type" = 'reversal')::integer as "reversal_count",
+    count(*) filter (where "link_type" = 'void')::integer as "void_count",
+    count(*) filter (where "link_type" = 'correction')::integer as "correction_count",
+    count(*) filter (where "link_type" = 'replacement')::integer as "replacement_count"
+  from "erp_financials"."journal_entry_links"
+  where "tenant_id" = $1 and "company_id" = $2 and "source_id" = transaction."source_id"
+    and "original_transaction_id" = transaction."transaction_id"
+) links on true
+left join lateral (
+  select "original_transaction_id" from "erp_financials"."journal_entry_links"
+  where "tenant_id" = $1 and "company_id" = $2 and "source_id" = transaction."source_id"
+    and "related_transaction_id" = transaction."transaction_id"
+  order by "created_at", "journal_entry_link_id" limit 1
+) inbound on true
+where transaction."tenant_id" = $1 and transaction."transaction_id" = $6 and transaction."status" = 'posted'`,
+      [scope.tenantId, scope.companyId, scope.bookId, book.accountingBasis, book.currencyCode, journalEntryId]
+    );
+    const headerRow = header.rows[0];
+    if (headerRow === undefined) {
+      throw new ErpFinancialsError("missing_document", `Journal entry ${journalEntryId} does not exist in this book`, {
+        details: { bookId: scope.bookId, journalEntryId }
+      });
+    }
+    const item = journalEntryFromRow(headerRow);
+    const linesResult = await client.query(
+      `select line."transaction_line_id", posting."posting_id", posting."source_posting_id", line."line_number",
+  account."account_id", account."source_account_id",
+  coalesce(mapping."book_account_key", posting."source_id" || ':' || posting."account_id") as "book_account_key",
+  account."account_number", account."name" as "account_name", account."classification",
+  posting."party_id", posting."item_id", line."description", posting."debit_amount", posting."credit_amount",
+  posting."net_amount", posting."dimension_refs"
+from "erp_financials"."ledger_postings" posting
+join "erp_financials"."transaction_lines" line
+  on line."tenant_id" = posting."tenant_id" and line."source_id" = posting."source_id"
+ and line."transaction_line_id" = posting."transaction_line_id"
+join "erp_financials"."accounts" account
+  on account."tenant_id" = posting."tenant_id" and account."source_id" = posting."source_id" and account."account_id" = posting."account_id"
+left join "erp_financials"."reporting_book_account_mappings" mapping
+  on mapping."tenant_id" = $1 and mapping."company_id" = $2 and mapping."book_id" = $3
+ and mapping."source_id" = posting."source_id" and mapping."account_id" = posting."account_id"
+where posting."tenant_id" = $1 and posting."source_id" = $4 and posting."transaction_id" = $5
+  and posting."accounting_basis" = $6 and posting."currency_code" = $7
+order by line."line_number", line."transaction_line_id", posting."posting_id"`,
+      [scope.tenantId, scope.companyId, scope.bookId, item.sourceId, journalEntryId,
+        book.accountingBasis, book.currencyCode]
+    );
+    const lines = linesResult.rows.map(journalEntryLineFromRow);
+    assertBalancedJournalDetail(item, lines);
+    const lifecycleResult = await client.query(
+      `select * from "erp_financials"."financial_lifecycle_events"
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
+  and "aggregate_type" = 'journal_entry' and "aggregate_id" = $4
+order by "occurred_at", "recorded_at", "event_id"`,
+      [scope.tenantId, scope.companyId, item.sourceId, journalEntryId]
+    );
+    const linksResult = await client.query(
+      `select link.*, event."event_type", event."actor_ref", event."approver_ref", event."request_id",
+  event."correlation_id", event."reason_code", event."reason_detail", event."occurred_at", event."recorded_at",
+  event."payload_checksum", event."prior_event_id"
+from "erp_financials"."journal_entry_links" link
+join "erp_financials"."financial_lifecycle_events" event
+  on event."tenant_id" = link."tenant_id" and event."company_id" = link."company_id"
+ and event."source_id" = link."source_id" and event."event_id" = link."lifecycle_event_id"
+where link."tenant_id" = $1 and link."company_id" = $2 and link."source_id" = $3
+  and (link."original_transaction_id" = $4 or link."related_transaction_id" = $4)
+order by link."created_at", link."journal_entry_link_id"`,
+      [scope.tenantId, scope.companyId, item.sourceId, journalEntryId]
+    );
+    return {
+      ...item,
+      lines,
+      lifecycle: lifecycleResult.rows.map((row) => accountingLifecycleFromRow(row)),
+      links: linksResult.rows.map(journalEntryLinkFromRow)
+    };
+  });
+}
+
+async function listFiscalPeriods(
+  scope: Scope,
+  input: PageRequest & { readonly sourceId: string; readonly status?: FiscalPeriodReadModel["status"]; readonly fiscalYear?: number }
+): Promise<Page<FiscalPeriodReadModel>> {
+  const filters = fiscalPeriodFilters(input);
+  const pageKind = `fiscal-periods:${readFilterFingerprint(filters)}`;
+  const page = pageInput(input, pageKind, scope.bookId);
+  return scope.database.transaction(async (client) => {
+    await resolveBook(client, scope);
+    const result = await client.query(
+      `${fiscalPeriodSelectSql()}
+where period."tenant_id" = $1 and period."company_id" = $2 and period."source_id" = $4
+  and ($5::text is null or period."status" = $5)
+  and ($6::integer is null or period."fiscal_year" = $6)
+  and ($7::date is null or (period."period_start", period."fiscal_period_id") < ($7::date, $8::text))
+order by period."period_start" desc, period."fiscal_period_id" desc
+limit $9`,
+      [scope.tenantId, scope.companyId, scope.bookId, filters.sourceId, filters.status, filters.fiscalYear,
+        page.date, page.id, page.limit + 1]
+    );
+    return toPage(result.rows.map(fiscalPeriodFromRow), page.limit, pageKind, scope.bookId, (item) => ({
+      date: item.periodStart,
+      id: item.fiscalPeriodId
+    }));
+  });
+}
+
+async function getFiscalPeriod(scope: Scope, sourceId: string, fiscalPeriodId: string): Promise<FiscalPeriodReadModel> {
+  assertReadFilterText(sourceId, "sourceId");
+  assertReadFilterText(fiscalPeriodId, "fiscalPeriodId");
+  return scope.database.transaction(async (client) => {
+    await resolveBook(client, scope);
+    const result = await client.query(
+      `${fiscalPeriodSelectSql()}
+where period."tenant_id" = $1 and period."company_id" = $2 and period."source_id" = $4
+  and period."fiscal_period_id" = $5`,
+      [scope.tenantId, scope.companyId, scope.bookId, sourceId, fiscalPeriodId]
+    );
+    const row = result.rows[0];
+    if (row === undefined) {
+      throw new ErpFinancialsError("missing_document", `Fiscal period ${fiscalPeriodId} does not exist in this book/source`, {
+        details: { bookId: scope.bookId, fiscalPeriodId, sourceId }
+      });
+    }
+    return fiscalPeriodFromRow(row);
+  });
+}
+
+async function getPostingLock(scope: Scope, sourceId: string): Promise<PostingLockReadModel> {
+  assertReadFilterText(sourceId, "sourceId");
+  return scope.database.transaction(async (client) => {
+    await resolveBook(client, scope);
+    const result = await client.query(
+      `select source."source_id", controls."posting_lock_date", coalesce(controls."version", 0) as "version",
+  event."event_id", event."event_type", event."actor_ref", event."approver_ref", event."request_id",
+  event."correlation_id", event."reason_code", event."reason_detail", event."occurred_at", event."recorded_at",
+  event."payload_checksum", event."prior_event_id"
+from "erp_financials"."reporting_book_sources" source
+left join "erp_financials"."accounting_book_controls" controls
+  on controls."tenant_id" = source."tenant_id" and controls."company_id" = source."company_id"
+ and controls."source_id" = source."source_id"
+left join "erp_financials"."financial_lifecycle_events" event
+  on event."tenant_id" = controls."tenant_id" and event."company_id" = controls."company_id"
+ and event."source_id" = controls."source_id" and event."event_id" = controls."last_event_id"
+where source."tenant_id" = $1 and source."company_id" = $2 and source."book_id" = $3 and source."source_id" = $4`,
+      [scope.tenantId, scope.companyId, scope.bookId, sourceId]
+    );
+    const row = result.rows[0];
+    if (row === undefined) {
+      throw new ErpFinancialsError("scope_mismatch", `Accounting source ${sourceId} does not belong to this book`, {
+        details: { bookId: scope.bookId, sourceId }
+      });
+    }
+    const postingLockDate = optionalDate(row.posting_lock_date, "posting_lock_date");
+    const lifecycle = optionalString(row.event_id) === undefined ? undefined : accountingLifecycleFromRow(row);
+    return {
+      sourceId: string(row.source_id, "source_id"),
+      ...(postingLockDate === undefined ? {} : { postingLockDate }),
+      version: integer(row.version, "version"),
+      ...(lifecycle === undefined ? {} : { lifecycle })
+    };
+  });
+}
+
+function fiscalPeriodSelectSql(): string {
+  return `select period.*, close_event."payload" as "close_payload",
+  close_event."event_id" as "close_event_id_read", close_event."event_type" as "close_event_type",
+  close_event."actor_ref" as "close_actor_ref", close_event."approver_ref" as "close_approver_ref",
+  close_event."request_id" as "close_request_id", close_event."correlation_id" as "close_correlation_id",
+  close_event."reason_code" as "close_reason_code", close_event."reason_detail" as "close_reason_detail",
+  close_event."occurred_at" as "close_occurred_at", close_event."recorded_at" as "close_recorded_at",
+  close_event."payload_checksum" as "close_payload_checksum", close_event."prior_event_id" as "close_prior_event_id",
+  reopen_event."event_id" as "reopen_event_id_read", reopen_event."event_type" as "reopen_event_type",
+  reopen_event."actor_ref" as "reopen_actor_ref", reopen_event."approver_ref" as "reopen_approver_ref",
+  reopen_event."request_id" as "reopen_request_id", reopen_event."correlation_id" as "reopen_correlation_id",
+  reopen_event."reason_code" as "reopen_reason_code", reopen_event."reason_detail" as "reopen_reason_detail",
+  reopen_event."occurred_at" as "reopen_occurred_at", reopen_event."recorded_at" as "reopen_recorded_at",
+  reopen_event."payload_checksum" as "reopen_payload_checksum", reopen_event."prior_event_id" as "reopen_prior_event_id",
+  latest."event_id" as "latest_event_id", latest."event_type" as "latest_event_type",
+  latest."actor_ref" as "latest_actor_ref", latest."approver_ref" as "latest_approver_ref",
+  latest."request_id" as "latest_request_id", latest."correlation_id" as "latest_correlation_id",
+  latest."reason_code" as "latest_reason_code", latest."reason_detail" as "latest_reason_detail",
+  latest."occurred_at" as "latest_occurred_at", latest."recorded_at" as "latest_recorded_at",
+  latest."payload_checksum" as "latest_payload_checksum", latest."prior_event_id" as "latest_prior_event_id"
+from "erp_financials"."fiscal_periods" period
+join "erp_financials"."reporting_book_sources" source
+  on source."tenant_id" = $1 and source."company_id" = $2 and source."book_id" = $3 and source."source_id" = period."source_id"
+left join "erp_financials"."financial_lifecycle_events" close_event
+  on close_event."tenant_id" = period."tenant_id" and close_event."company_id" = period."company_id"
+ and close_event."source_id" = period."source_id" and close_event."event_id" = period."close_event_id"
+left join "erp_financials"."financial_lifecycle_events" reopen_event
+  on reopen_event."tenant_id" = period."tenant_id" and reopen_event."company_id" = period."company_id"
+ and reopen_event."source_id" = period."source_id" and reopen_event."event_id" = period."reopen_event_id"
+join lateral (
+  select event.* from "erp_financials"."financial_lifecycle_events" event
+  where event."tenant_id" = period."tenant_id" and event."company_id" = period."company_id"
+    and event."source_id" = period."source_id" and event."aggregate_type" = 'fiscal_period'
+    and event."aggregate_id" = period."fiscal_period_id"
+  order by event."occurred_at" desc, event."recorded_at" desc, event."event_id" desc limit 1
+) latest on true`;
 }
 
 async function listInvoices(
@@ -2573,6 +3066,230 @@ where "tenant_id" = $1 and "company_id" = $2 and "book_id" = $3 and "currency_co
       matchedAbsoluteAmount: money(row.matched_amount, "matched_amount")
     };
   });
+}
+
+const JOURNAL_ENTRY_STATUSES: ReadonlySet<string> = new Set(["posted", "reversed", "voided", "corrected", "replaced"]);
+const FISCAL_PERIOD_READ_STATUSES: ReadonlySet<string> = new Set(["open", "closing", "closed"]);
+
+function journalEntryFilters(input: JournalEntryFilters): JournalEntryFilters {
+  const sourceId = readFilterText(input.sourceId, "sourceId");
+  const transactionType = readFilterText(input.transactionType, "transactionType");
+  const preparerRef = readFilterText(input.preparerRef, "preparerRef");
+  const search = readFilterText(input.search, "search", 100);
+  if (input.status !== undefined && !JOURNAL_ENTRY_STATUSES.has(input.status)) {
+    throw new ErpFinancialsError("invalid_input", "status is not a canonical journal-entry status");
+  }
+  if ((input.periodStart === undefined) !== (input.periodEnd === undefined)) {
+    throw new ErpFinancialsError("invalid_input", "periodStart and periodEnd must be supplied together");
+  }
+  if (input.periodStart !== undefined && input.periodEnd !== undefined) {
+    assertWindow(input.periodStart, input.periodEnd);
+  }
+  return {
+    ...(sourceId === undefined ? {} : { sourceId }),
+    ...(input.status === undefined ? {} : { status: input.status }),
+    ...(input.periodStart === undefined ? {} : { periodStart: input.periodStart }),
+    ...(input.periodEnd === undefined ? {} : { periodEnd: input.periodEnd }),
+    ...(transactionType === undefined ? {} : { transactionType }),
+    ...(preparerRef === undefined ? {} : { preparerRef }),
+    ...(search === undefined ? {} : { search })
+  };
+}
+
+function fiscalPeriodFilters(
+  input: { readonly sourceId: string; readonly status?: FiscalPeriodReadModel["status"]; readonly fiscalYear?: number }
+): { readonly sourceId: string; readonly status?: FiscalPeriodReadModel["status"]; readonly fiscalYear?: number } {
+  const sourceId = assertReadFilterText(input.sourceId, "sourceId");
+  if (input.status !== undefined && !FISCAL_PERIOD_READ_STATUSES.has(input.status)) {
+    throw new ErpFinancialsError("invalid_input", "status is not a canonical fiscal-period status");
+  }
+  if (input.fiscalYear !== undefined && (!Number.isInteger(input.fiscalYear) || input.fiscalYear < 1)) {
+    throw new ErpFinancialsError("invalid_input", "fiscalYear must be a positive integer");
+  }
+  return {
+    sourceId,
+    ...(input.status === undefined ? {} : { status: input.status }),
+    ...(input.fiscalYear === undefined ? {} : { fiscalYear: input.fiscalYear })
+  };
+}
+
+function readFilterText(value: string | undefined, field: string, max = 300): string | undefined {
+  return value === undefined ? undefined : assertReadFilterText(value, field, max);
+}
+
+function assertReadFilterText(value: string, field: string, max = 300): string {
+  const normalized = value.trim();
+  if (normalized.length === 0 || normalized.length > max) {
+    throw new ErpFinancialsError("invalid_input", `${field} must contain between 1 and ${String(max)} characters`);
+  }
+  return normalized;
+}
+
+function readFilterFingerprint(filters: object): string {
+  return createHash("sha256").update(JSON.stringify(filters)).digest("hex").slice(0, 20);
+}
+
+function journalEntryFromRow(row: Readonly<Record<string, unknown>>): JournalEntryListItem {
+  const transactionNumber = optionalString(row.transaction_number);
+  const memo = optionalString(row.memo);
+  const sourcePayloadRef = row.source_payload_ref === null || row.source_payload_ref === undefined
+    ? undefined
+    : jsonObject(row.source_payload_ref, "source_payload_ref");
+  const status = string(row.canonical_status, "canonical_status");
+  if (!JOURNAL_ENTRY_STATUSES.has(status)) throw new Error("Stored canonical journal-entry status is invalid");
+  return {
+    journalEntryId: string(row.journal_entry_id, "journal_entry_id"),
+    originalTransactionId: string(row.original_transaction_id, "original_transaction_id"),
+    sourceId: string(row.source_id, "source_id"),
+    ...(transactionNumber === undefined ? {} : { transactionNumber }),
+    transactionDate: date(row.transaction_date, "transaction_date"),
+    postedAt: isoDateTime(row.posted_at, "posted_at"),
+    ...(memo === undefined ? {} : { memo }),
+    currencyCode: string(row.currency_code, "currency_code"),
+    accountingBasis: string(row.accounting_basis, "accounting_basis") as AccountingBasis,
+    status: status as JournalEntryStatus,
+    totalDebit: money(row.total_debit, "total_debit"),
+    totalCredit: money(row.total_credit, "total_credit"),
+    lineCount: integer(row.line_count, "line_count"),
+    version: integer(row.version, "version"),
+    sourceProvenance: {
+      sourceId: string(row.source_id, "source_id"),
+      sourceRole: reportingBookSourceRole(row.source_role),
+      sourceSystem: string(row.source_system, "source_system"),
+      providerEnvironment: string(row.provider_environment, "provider_environment"),
+      sourceTransactionId: string(row.source_transaction_id, "source_transaction_id"),
+      sourceTransactionType: string(row.source_transaction_type, "source_transaction_type"),
+      ...sourceRefFields(sourcePayloadRef)
+    },
+    preparerProvenance: accountingLifecycleFromRow(row, "preparer")
+  };
+}
+
+function journalEntryLineFromRow(row: Readonly<Record<string, unknown>>): JournalEntryLineReadModel {
+  const accountNumber = optionalString(row.account_number);
+  const partyId = optionalString(row.party_id);
+  const itemId = optionalString(row.item_id);
+  const description = optionalString(row.description);
+  const dimensionRefs = row.dimension_refs === null || row.dimension_refs === undefined
+    ? []
+    : (typeof row.dimension_refs === "string" ? JSON.parse(row.dimension_refs) : row.dimension_refs) as JsonValue;
+  return {
+    transactionLineId: string(row.transaction_line_id, "transaction_line_id"),
+    postingId: string(row.posting_id, "posting_id"),
+    sourcePostingId: string(row.source_posting_id, "source_posting_id"),
+    lineNumber: integer(row.line_number, "line_number"),
+    account: {
+      accountId: string(row.account_id, "account_id"),
+      sourceAccountId: string(row.source_account_id, "source_account_id"),
+      bookAccountKey: string(row.book_account_key, "book_account_key"),
+      ...(accountNumber === undefined ? {} : { accountNumber }),
+      accountName: string(row.account_name, "account_name"),
+      classification: string(row.classification, "classification") as AccountClassification
+    },
+    ...(partyId === undefined ? {} : { partyId }),
+    ...(itemId === undefined ? {} : { itemId }),
+    ...(description === undefined ? {} : { description }),
+    debitAmount: money(row.debit_amount, "debit_amount"),
+    creditAmount: money(row.credit_amount, "credit_amount"),
+    netAmount: money(row.net_amount, "net_amount"),
+    dimensionRefs
+  };
+}
+
+function assertBalancedJournalDetail(
+  item: JournalEntryListItem,
+  lines: readonly JournalEntryLineReadModel[]
+): void {
+  const debit = lines.reduce((sum, line) => sum + moneyMinor(line.debitAmount), 0n);
+  const credit = lines.reduce((sum, line) => sum + moneyMinor(line.creditAmount), 0n);
+  if (lines.length !== item.lineCount || debit !== credit || debit !== moneyMinor(item.totalDebit) ||
+    credit !== moneyMinor(item.totalCredit)) {
+    throw new ErpFinancialsError("posting_unbalanced", `Stored journal entry ${item.journalEntryId} is not exactly balanced`, {
+      details: { journalEntryId: item.journalEntryId }
+    });
+  }
+}
+
+function journalEntryLinkFromRow(row: Readonly<Record<string, unknown>>): JournalEntryLifecycleLinkReadModel {
+  const linkType = string(row.link_type, "link_type");
+  if (!new Set<string>(["reversal", "void", "correction", "replacement"]).has(linkType)) {
+    throw new Error("Stored journal-entry link type is invalid");
+  }
+  return {
+    journalEntryLinkId: string(row.journal_entry_link_id, "journal_entry_link_id"),
+    linkType: linkType as JournalEntryLifecycleLinkReadModel["linkType"],
+    originalTransactionId: string(row.original_transaction_id, "original_transaction_id"),
+    relatedTransactionId: string(row.related_transaction_id, "related_transaction_id"),
+    createdAt: isoDateTime(row.created_at, "created_at"),
+    lifecycle: accountingLifecycleFromRow(row)
+  };
+}
+
+function fiscalPeriodFromRow(row: Readonly<Record<string, unknown>>): FiscalPeriodReadModel {
+  const status = string(row.status, "status");
+  if (!FISCAL_PERIOD_READ_STATUSES.has(status)) throw new Error("Stored fiscal-period status is invalid");
+  const closeLifecycle = optionalString(row.close_event_id_read) === undefined
+    ? undefined
+    : accountingLifecycleFromRow(row, "close");
+  const reopenLifecycle = optionalString(row.reopen_event_id_read) === undefined
+    ? undefined
+    : accountingLifecycleFromRow(row, "reopen");
+  const closeEvidence = closeLifecycle === undefined ? undefined : fiscalCloseEvidenceFromPayload(row.close_payload);
+  return {
+    fiscalPeriodId: string(row.fiscal_period_id, "fiscal_period_id"),
+    sourceId: string(row.source_id, "source_id"),
+    fiscalYear: integer(row.fiscal_year, "fiscal_year"),
+    periodNumber: integer(row.period_number, "period_number"),
+    periodStart: date(row.period_start, "period_start"),
+    periodEnd: date(row.period_end, "period_end"),
+    status: status as FiscalPeriodReadModel["status"],
+    version: integer(row.version, "version"),
+    createdAt: isoDateTime(row.created_at, "created_at"),
+    updatedAt: isoDateTime(row.updated_at, "updated_at"),
+    ...(closeEvidence === undefined ? {} : { closeEvidence }),
+    ...(closeLifecycle === undefined ? {} : { closeLifecycle }),
+    ...(reopenLifecycle === undefined ? {} : { reopenLifecycle }),
+    latestLifecycle: accountingLifecycleFromRow(row, "latest")
+  };
+}
+
+function fiscalCloseEvidenceFromPayload(value: unknown): NonNullable<FiscalPeriodReadModel["closeEvidence"]> {
+  const payload = jsonObject(value, "close_payload");
+  if (!Array.isArray(payload.reconciliationRefs) || payload.reconciliationRefs.length === 0 ||
+    payload.reconciliationRefs.some((entry) => typeof entry !== "string" || entry.length === 0)) {
+    throw new Error("Stored fiscal close reconciliationRefs must be a non-empty string array");
+  }
+  return {
+    trialBalanceSnapshotId: string(payload.trialBalanceSnapshotId, "trialBalanceSnapshotId"),
+    reconciliationRefs: payload.reconciliationRefs as readonly string[],
+    checklistRef: string(payload.checklistRef, "checklistRef"),
+    postingMaxUpdatedAt: isoDateTime(payload.postingMaxUpdatedAt, "postingMaxUpdatedAt"),
+    evidenceChecksum: string(payload.evidenceChecksum, "evidenceChecksum")
+  };
+}
+
+function accountingLifecycleFromRow(
+  row: Readonly<Record<string, unknown>>,
+  prefix?: "preparer" | "close" | "reopen" | "latest"
+): AccountingLifecycleProvenance {
+  const field = (name: string): string => prefix === undefined ? name : `${prefix}_${name}`;
+  const approverRef = optionalString(row[field("approver_ref")]);
+  const reasonDetail = optionalString(row[field("reason_detail")]);
+  const priorEventId = optionalString(row[field("prior_event_id")]);
+  return {
+    lifecycleEventId: string(row[field("event_id")], field("event_id")),
+    eventType: string(row[field("event_type")], field("event_type")),
+    actorRef: string(row[field("actor_ref")], field("actor_ref")),
+    ...(approverRef === undefined ? {} : { approverRef }),
+    requestId: string(row[field("request_id")], field("request_id")),
+    correlationId: string(row[field("correlation_id")], field("correlation_id")),
+    reasonCode: string(row[field("reason_code")], field("reason_code")),
+    ...(reasonDetail === undefined ? {} : { reasonDetail }),
+    occurredAt: isoDateTime(row[field("occurred_at")], field("occurred_at")),
+    recordedAt: isoDateTime(row[field("recorded_at")], field("recorded_at")),
+    payloadChecksum: string(row[field("payload_checksum")], field("payload_checksum")),
+    ...(priorEventId === undefined ? {} : { priorEventId })
+  };
 }
 
 async function resolveBook(client: PostgresQueryClient, scope: Scope): Promise<ResolvedBook> {

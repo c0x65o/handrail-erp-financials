@@ -201,6 +201,35 @@ await financials.journalEntries.post({
 });
 ```
 
+The SDK's `queries` surface provides the corresponding bounded accounting-control
+reads. Journal cursors are bound to the reporting book and complete filter set;
+fiscal-period and posting-lock reads additionally require the package-owned
+source identity so a host cannot accidentally combine controls from two books.
+
+```ts
+const journals = await sdk.queries.listJournalEntries({
+  sourceId: "native_ledger",
+  periodStart: "2026-08-01",
+  periodEnd: "2026-08-31",
+  limit: 50
+});
+const journal = await sdk.queries.getJournalEntry(journals.items[0]!.journalEntryId);
+
+const periods = await sdk.queries.listFiscalPeriods({
+  sourceId: "native_ledger",
+  fiscalYear: 2026,
+  limit: 50
+});
+const period = await sdk.queries.getFiscalPeriod("native_ledger", periods.items[0]!.fiscalPeriodId);
+const postingLock = await sdk.queries.getPostingLock("native_ledger");
+```
+
+Journal detail returns exact balanced lines, reporting-book account references,
+immutable original transaction identity, preparation/lifecycle provenance, and
+reversal/correction/replacement links. Fiscal reads return optimistic versions,
+close/reopen provenance, the canonical close evidence and checksum, and version
+zero for a book source whose posting-lock control has not yet been created.
+
 A standard Postgres pool with `connect()` can be passed directly; the package
 owns `BEGIN`, `COMMIT`, `ROLLBACK`, and connection release. A host database
 library that already exposes transactions can instead supply an
