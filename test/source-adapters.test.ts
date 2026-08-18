@@ -184,6 +184,52 @@ describe("source adapter contracts", () => {
     expect(JSON.stringify(facts)).not.toMatch(/access[_-]?token|refresh[_-]?token|client_secret|rawPayload/i);
   });
 
+  it("preserves historical QuickBooks party references missing from customer and vendor masters", () => {
+    const input = quickBooksNormalizedLedgerTransactionsFixtureInput();
+    const invoice = input.resources.ledgerTransactions?.find((transaction) => transaction.resource.sourceTransactionId === "200");
+    expect(invoice).toBeDefined();
+    if (invoice === undefined) {
+      return;
+    }
+    const historicalEmployee = {
+      sourceObjectId: "employee-3",
+      displayName: "Historical Employee",
+      partyType: "other" as const
+    };
+    const ledgerTransactions: readonly NormalizedQuickBooksLedgerTransactionResource[] = [
+      ...(input.resources.ledgerTransactions ?? []).filter((transaction) => transaction !== invoice),
+      {
+        ...invoice,
+        resource: {
+          ...invoice.resource,
+          partyRef: historicalEmployee,
+          lines: invoice.resource.lines.map((line) => ({
+            ...line,
+            partyRef: historicalEmployee,
+            postings: line.postings.map((posting) => ({ ...posting, partyRef: historicalEmployee }))
+          }))
+        }
+      }
+    ];
+
+    const facts = mapHandrailQuickBooksSdkResourcesToCanonicalFacts({
+      ...input,
+      resources: { ...input.resources, ledgerTransactions }
+    });
+    const party = facts.parties.find((candidate) => candidate.sourcePartyId === "employee-3");
+    const transaction = facts.transactions.find((candidate) => candidate.sourceTransactionId === "200");
+
+    expect(party).toMatchObject({
+      sourcePartyId: "employee-3",
+      partyType: "other",
+      displayName: "Historical Employee",
+      active: false
+    });
+    expect(transaction?.partyId).toBe(party?.partyId);
+    expect(facts.transactionLines.filter((line) => line.transactionId === transaction?.transactionId).every((line) => line.partyId === party?.partyId)).toBe(true);
+    expect(facts.postings.filter((posting) => posting.transactionId === transaction?.transactionId).every((posting) => posting.partyId === party?.partyId)).toBe(true);
+  });
+
   it("exports normalized QuickBooks resource contracts beyond journal entries", () => {
     const input = quickBooksFixtureInput();
     const normalizedResourceSet: NormalizedQuickBooksResourceSet = {

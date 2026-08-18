@@ -353,6 +353,11 @@ export type MarkReportSnapshotsStaleForAccountHierarchyChangesInput = {
 
 type Row = Readonly<Record<string, unknown>>;
 
+// node-postgres serializes Bind parameter-format counts through a signed
+// 16-bit path. Stay below that boundary even though PostgreSQL itself accepts
+// a larger unsigned count in the wire protocol.
+const MAX_UPSERT_PARAMETERS = 30_000;
+
 type CatalogRow = {
   readonly object_type: "schema" | "table" | "column" | "index" | "constraint" | "trigger";
   readonly table_name: string | null;
@@ -401,12 +406,11 @@ export function createPostgresStorageAdapter(
       return validatePostgresSchema(client, manifest);
     },
     async upsertAccountingCompany(company) {
-      return upsertRows(client, manifest, "accounting_companies", [companyRow(company)], [
-        "tenant_id",
-        "source_system",
-        "provider_environment",
-        "source_company_ref"
-      ]);
+      // A canonical company can be fed by more than one accounting source. For
+      // example, Spartan owns the company natively before QuickBooks history is
+      // imported. Reconcile that shared reporting entity by its canonical ID;
+      // source-specific identity belongs in accounting_sources.
+      return upsertRows(client, manifest, "accounting_companies", [companyRow(company)], ["company_id"]);
     },
     async upsertAccountingSource(source) {
       return upsertRows(client, manifest, "accounting_sources", [sourceRow(source)], [
@@ -2452,6 +2456,35 @@ async function upsertRows(
 
   const table = tableManifest(manifest, tableName);
   const columns = table.columns.map((column) => column.name);
+  const rowsPerBatch = Math.max(1, Math.floor(MAX_UPSERT_PARAMETERS / columns.length));
+  let affectedRows = 0;
+
+  for (let start = 0; start < rows.length; start += rowsPerBatch) {
+    affectedRows += await upsertRowBatch(
+      client,
+      manifest,
+      tableName,
+      table,
+      columns,
+      rows.slice(start, start + rowsPerBatch),
+      conflictColumns,
+      conflictAction
+    );
+  }
+
+  return affectedRows;
+}
+
+async function upsertRowBatch(
+  client: PostgresQueryClient,
+  manifest: PostgresSchemaManifest,
+  tableName: string,
+  table: PostgresTableManifest,
+  columns: readonly string[],
+  rows: readonly Row[],
+  conflictColumns: readonly string[],
+  conflictAction: "update" | "nothing"
+): Promise<number> {
   const parameters: unknown[] = [];
   const valuesSql = rows
     .map((row) => {

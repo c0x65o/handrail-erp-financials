@@ -39,6 +39,7 @@ import type {
   NormalizedQuickBooksLedgerPostingResource,
   NormalizedQuickBooksLedgerTransaction,
   NormalizedQuickBooksPartyResource,
+  NormalizedQuickBooksPartyRef,
   NormalizedQuickBooksProviderReportRef,
   NormalizedQuickBooksResourceEnvelope,
   NormalizedQuickBooksSourceIdentity,
@@ -395,6 +396,11 @@ function mapHandrailQuickBooksSdkLedgerResourcesToCanonicalFacts(
       assertQuickBooksResourceId(resource, resource.resource.Id);
       return quickBooksJournalEntryToNativeTransaction(context, resource.resource);
     });
+  const parties = normalizedQuickBooksPartiesToCanonicalParties(context, [
+    ...(input.resources.parties ?? []),
+    ...(input.resources.customers ?? []),
+    ...(input.resources.vendors ?? [])
+  ]);
 
   return mapNormalizedLedgerToCanonicalFacts({
     context,
@@ -414,11 +420,10 @@ function mapHandrailQuickBooksSdkLedgerResourcesToCanonicalFacts(
       ...ledgerTransactions.map((resource) => normalizedQuickBooksLedgerTransactionToNativeTransaction(input.context, resource)),
       ...journalTransactions
     ],
-    parties: normalizedQuickBooksPartiesToCanonicalParties(context, [
-      ...(input.resources.parties ?? []),
-      ...(input.resources.customers ?? []),
-      ...(input.resources.vendors ?? [])
-    ]),
+    parties: [
+      ...parties,
+      ...normalizedQuickBooksReferencedPartiesToCanonicalParties(context, ledgerTransactions, parties)
+    ],
     items: normalizedQuickBooksItemsToCanonicalItems(context, input.resources.items ?? []),
     dimensions: normalizedQuickBooksDimensionsToCanonicalDimensions(context, [
       ...(input.resources.dimensions ?? []),
@@ -787,6 +792,45 @@ function normalizedQuickBooksPartiesToCanonicalParties(
       active: party.active ?? true
     });
   }
+  return parties;
+}
+
+function normalizedQuickBooksReferencedPartiesToCanonicalParties(
+  context: SourceAdapterContext,
+  transactions: readonly HandrailQuickBooksLedgerTransactionResource[],
+  importedParties: readonly Party[]
+): readonly Party[] {
+  const seen = new Set(importedParties.map((party) => party.sourcePartyId));
+  const parties: Party[] = [];
+  const addReference = (reference: NormalizedQuickBooksPartyRef | undefined): void => {
+    if (reference === undefined || seen.has(reference.sourceObjectId)) {
+      return;
+    }
+    seen.add(reference.sourceObjectId);
+    parties.push({
+      tenantId: context.tenantId,
+      sourceId: context.sourceId,
+      partyId: canonicalRecordId(context, "party", reference.sourceObjectId),
+      sourcePartyId: reference.sourceObjectId,
+      partyType: reference.partyType,
+      displayName: reference.displayName ?? reference.sourceObjectId,
+      // QuickBooks may reference historical employees or inactive entities that
+      // are absent from the Customer/Vendor master resources. Preserve the
+      // reference without presenting the derived party as an active master.
+      active: false
+    });
+  };
+
+  for (const transaction of transactions) {
+    addReference(transaction.resource.partyRef);
+    for (const line of transaction.resource.lines) {
+      addReference(line.partyRef);
+      for (const posting of line.postings) {
+        addReference(posting.partyRef);
+      }
+    }
+  }
+
   return parties;
 }
 

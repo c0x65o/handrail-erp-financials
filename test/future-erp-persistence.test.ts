@@ -98,15 +98,13 @@ describe("Future ERP canonical fact persistence", () => {
     expect(ledgerPostingCalls.every((call) => call.sql.includes("on conflict"))).toBe(true);
   });
 
-  it("uses tenant/source-scoped conflict targets for canonical fact upserts", async () => {
+  it("uses canonical identity conflict targets for canonical fact upserts", async () => {
     const client = new RecordingPostgresClient();
     const storage = createPostgresStorageAdapter(client);
 
     await persistFutureErpCanonicalFacts(storage, canonicalFacts());
 
-    expect(conflictTargetFor(client.calls, "accounting_companies")).toBe(
-      '"tenant_id", "source_system", "provider_environment", "source_company_ref"'
-    );
+    expect(conflictTargetFor(client.calls, "accounting_companies")).toBe('"company_id"');
     expect(conflictTargetFor(client.calls, "accounting_sources")).toBe(
       '"tenant_id", "source_system", "provider_environment", "connection_ref"'
     );

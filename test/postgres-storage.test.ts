@@ -192,6 +192,28 @@ describe("Postgres storage adapter", () => {
     expect(client.calls[1]?.params).toEqual(expect.arrayContaining(["50001.00"]));
   });
 
+  it("chunks large canonical upserts below the PostgreSQL client bind-parameter limit", async () => {
+    const client = new RecordingClient();
+    const adapter = createPostgresStorageAdapter(client);
+    const firstLine = ERP_FINANCIALS_STATEMENT_FIXTURE.transactionLines[0];
+
+    if (firstLine === undefined) {
+      throw new Error("fixture must include a transaction line");
+    }
+
+    const lines = Array.from({ length: 3_000 }, (_, index) => ({
+      ...firstLine,
+      transactionLineId: `line_bulk_${String(index + 1)}`,
+      lineNumber: index + 1
+    }));
+
+    await expect(adapter.upsertTransactionLines(lines)).resolves.toBe(lines.length);
+    expect(client.calls).toHaveLength(2);
+    expect(client.calls.every((call) => call.params.length <= 30_000)).toBe(true);
+    expect(client.calls.reduce((count, call) => count + call.params.length, 0)).toBe(39_000);
+    expect(client.calls[1]?.sql).toContain("($1, $2, $3");
+  });
+
   it("persists posting rules, match audit records, and payment applications with stable conflicts", async () => {
     const client = new RecordingClient();
     const adapter = createPostgresStorageAdapter(client);
