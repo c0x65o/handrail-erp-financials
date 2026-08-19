@@ -164,6 +164,47 @@ describe("source adapter contracts", () => {
     expect(JSON.stringify(facts)).not.toMatch(/access[_-]?token|refresh[_-]?token|client_secret/i);
   });
 
+  it("preserves reference masters in normalized batches with no ledger transactions", () => {
+    const input = quickBooksNormalizedLedgerTransactionsFixtureInput();
+    const resourceBase = {
+      sourceSystem: "quickbooks" as const,
+      providerEnvironment: input.context.providerEnvironment,
+      realmId: input.context.realmId
+    };
+    const facts = mapHandrailQuickBooksSdkResourcesToCanonicalFacts({
+      ...input,
+      resources: {
+        ...input.resources,
+        ledgerTransactions: [],
+        items: [{
+          ...resourceBase,
+          resourceType: "Item",
+          resourceId: "item-services",
+          resource: {
+            sourceObjectId: "item-services",
+            name: "Managed services",
+            active: true
+          }
+        }],
+        parties: [{
+          ...resourceBase,
+          resourceType: "Party",
+          resourceId: "customer-1",
+          resource: {
+            sourceObjectId: "customer-1",
+            partyType: "customer",
+            displayName: "Customer One",
+            active: true
+          }
+        }]
+      }
+    });
+
+    expect(facts.transactions).toEqual([]);
+    expect(facts.items.map((item) => item.sourceItemId)).toEqual(["item-services"]);
+    expect(facts.parties.map((party) => party.sourcePartyId)).toEqual(["customer-1"]);
+  });
+
   it("maps normalized QuickBooks ledger transactions for JournalEntry and Invoice without raw transaction payloads", () => {
     const facts = mapHandrailQuickBooksSdkResourcesToCanonicalFacts(quickBooksNormalizedLedgerTransactionsFixtureInput());
     const trialBalance = buildTrialBalanceReport(reportInput(facts));

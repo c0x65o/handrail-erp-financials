@@ -298,10 +298,8 @@ export function mapNativeLedgerToCanonicalFacts(input: NativeLedgerAdapterInput)
 export function mapHandrailQuickBooksSdkResourcesToCanonicalFacts(
   input: HandrailQuickBooksSdkResourcesAdapterInput
 ): CanonicalAccountingFactSet {
-  if ((input.resources.ledgerTransactions?.length ?? 0) === 0) {
-    return mapQuickBooksJournalEntriesToCanonicalFacts(mapHandrailQuickBooksSdkResourcesToJournalEntryInput(input));
-  }
-
+  // The ledger-resource mapper also handles legacy JournalEntry resources and
+  // preserves normalized reference families when a batch has no postings.
   return mapHandrailQuickBooksSdkLedgerResourcesToCanonicalFacts(input);
 }
 
