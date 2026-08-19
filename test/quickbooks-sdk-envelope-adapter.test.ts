@@ -5,7 +5,8 @@ import {
   adaptHandrailQuickBooksSdkIncrementalSyncEnvelope,
   assertNoCredentialKeys,
   mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts,
-  mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts
+  mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts,
+  persistQuickBooksSubledgerResources
 } from "../src/index.js";
 import type {
   HandrailQuickBooksSdkFullSyncEnvelope,
@@ -61,6 +62,20 @@ describe("QuickBooks SDK envelope adapter", () => {
       creditAmount: "1250.00",
       accountRef: { sourceObjectId: "400" }
     });
+    expect(ledgerTransaction?.resource).toMatchObject({
+      totalAmount: "1250.00",
+      unappliedAmount: "250.00",
+      partyRef: { sourceObjectId: "customer_20", partyType: "customer" }
+    });
+    expect(ledgerTransaction?.resource.lines[0]?.linkedTransactions).toEqual([
+      { sourceTransactionId: "invoice_600", sourceTransactionType: "Invoice" }
+    ]);
+    expect(ledgerTransaction?.resource.lines[0]).toMatchObject({
+      sourceAmount: "1250.00",
+      sourceQuantity: "5.00",
+      sourceUnitAmount: "250.00",
+      taxCode: "NON"
+    });
 
     const mapped = mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(adapted, {
       companyId: "company_spartan",
@@ -106,6 +121,114 @@ describe("QuickBooks SDK envelope adapter", () => {
       cursorKind: "updated_since",
       cursorValue: "2026-08-13T13:00:00.000Z"
     });
+  });
+
+  it("persists adapted QuickBooks operational documents without inventing unresolved applications", async () => {
+    const adapted = adaptHandrailQuickBooksSdkFullSyncEnvelope(fullSyncEnvelope(), adapterOptions());
+    const mapped = mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(adapted, {
+      companyId: "company_spartan",
+      accountingBasis: "accrual",
+      currencyCode: "USD"
+    });
+    const calls: string[] = [];
+    const result = await persistQuickBooksSubledgerResources({
+      client: {
+        query(sql) {
+          calls.push(sql);
+          return Promise.resolve({ rows: [], rowCount: 1 });
+        }
+      },
+      companyId: "company_spartan",
+      importedAt: "2026-08-13T12:46:00.000Z",
+      facts: mapped.facts,
+      resources: adapted.resources
+    });
+
+    expect(result).toEqual({
+      documents: 1,
+      documentLines: 1,
+      applications: 0,
+      skippedTransactions: 0,
+      skippedDocumentLines: 0,
+      skippedApplications: 1,
+      voidedDocuments: 0,
+      removedLedgerPostings: 0,
+      unresolvedApplications: [expect.objectContaining({ reason: "missing_target_document" })]
+    });
+    expect(calls.some((sql) => sql.includes('"subledger_documents"'))).toBe(true);
+    expect(calls.some((sql) => sql.includes('insert into "erp_financials"."subledger_applications"'))).toBe(false);
+  });
+
+  it("turns QuickBooks LinkedTxn evidence into a canonical payment application", async () => {
+    const envelope = fullSyncEnvelope();
+    const resources = envelope.normalizedResources;
+    const invoiceMetadata = (id: string) => ({
+      id,
+      tenantId: "tenant_spartan",
+      realmId: "realm_spartan",
+      companyId: "realm_spartan",
+      provider: "intuit" as const,
+      providerEnvironment: "sandbox" as const,
+      source: "quickbooks_accounting_api" as const,
+      sourceObject: "Invoice",
+      sourceObjectId: id,
+      importBatchId: "batch_full_spartan",
+      jobId: "job_full_spartan",
+      importedAt: "2026-08-13T12:46:00.000Z",
+      syncedAt: "2026-08-13T12:46:00.000Z",
+      sourceUpdatedAt: "2026-08-13T12:45:00.000Z",
+      audit: { sourcePayloadRef: `raw://batch_full_spartan/Invoice/${id}` }
+    });
+    const linkedEnvelope = {
+      ...envelope,
+      normalizedResources: {
+        ...resources,
+        accounts: [
+          ...(resources?.accounts ?? []),
+          { ...invoiceMetadata("110"), sourceObject: "Account", name: "Accounts Receivable", accountType: "Accounts Receivable", classification: "Asset", active: true }
+        ],
+        transactions: [
+          ...(resources?.transactions ?? []),
+          { ...invoiceMetadata("invoice_600"), transactionType: "invoice", transactionDate: "2026-08-01", dueDate: "2026-08-31", amount: 1250, balance: 0, party: { value: "customer_20", name: "Acme" }, documentNumber: "INV-600" }
+        ],
+        transaction_lines: [
+          ...(resources?.transaction_lines ?? []),
+          { ...invoiceMetadata("invoice_600:1"), transactionType: "invoice", transactionId: "invoice_600", lineId: "1", lineIndex: 0, lineOrder: 1, amount: 1250, quantity: 5, unitAmount: 250 }
+        ],
+        ledger_entries: [
+          ...(resources?.ledger_entries ?? []),
+          { ...invoiceMetadata("invoice_600:1"), transactionId: "invoice_600", transactionType: "invoice", lineId: "1", transactionDate: "2026-08-01", postingType: "Credit", amount: 1250, account: { value: "400", name: "Service Revenue" }, party: { value: "customer_20", name: "Acme" }, currency: { value: "USD" } },
+          { ...invoiceMetadata("invoice_600:ar"), transactionId: "invoice_600", transactionType: "invoice", lineId: "derived-ar-offset", transactionDate: "2026-08-01", postingType: "Debit", amount: 1250, account: { value: "110", name: "Accounts Receivable" }, party: { value: "customer_20", name: "Acme" }, currency: { value: "USD" } }
+        ]
+      }
+    };
+    const adapted = adaptHandrailQuickBooksSdkFullSyncEnvelope(linkedEnvelope, adapterOptions());
+    const mapped = mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(adapted, {
+      companyId: "company_spartan",
+      accountingBasis: "accrual",
+      currencyCode: "USD"
+    });
+    const calls: string[] = [];
+    const result = await persistQuickBooksSubledgerResources({
+      client: { query(sql) { calls.push(sql); return Promise.resolve({ rows: [], rowCount: 1 }); } },
+      companyId: "company_spartan",
+      importedAt: "2026-08-13T12:46:00.000Z",
+      facts: mapped.facts,
+      resources: adapted.resources
+    });
+
+    expect(result).toEqual({
+      documents: 2,
+      documentLines: 2,
+      applications: 1,
+      skippedTransactions: 0,
+      skippedDocumentLines: 0,
+      skippedApplications: 0,
+      voidedDocuments: 0,
+      removedLedgerPostings: 0,
+      unresolvedApplications: []
+    });
+    expect(calls.filter((sql) => sql.includes('insert into "erp_financials"."subledger_applications"'))).toHaveLength(1);
   });
 
   it("fails closed when SDK resource identity differs from the envelope", () => {
@@ -352,6 +475,32 @@ function normalizedResources(overrides: {
         amount: overrides.secondAmount ?? 1250,
         account: { value: "400", name: "Service Revenue" },
         currency: { value: "USD" }
+      }
+    ],
+    transactions: [
+      {
+        ...metadata({ id: "payment_700", sourceObject: "Payment" }),
+        transactionType: "payment",
+        transactionDate: "2026-08-13",
+        amount: 1250,
+        unappliedAmount: 250,
+        party: { value: "customer_20", name: "Acme" },
+        documentNumber: "PAY-700"
+      }
+    ],
+    transaction_lines: [
+      {
+        ...metadata({ id: "payment_700:1", sourceObject: "Payment" }),
+        transactionType: "payment",
+        transactionId: "payment_700",
+        lineId: "1",
+        lineIndex: 0,
+        lineOrder: 1,
+        amount: 1250,
+        quantity: 5,
+        unitAmount: 250,
+        taxCode: { value: "NON", name: "Non-taxable" },
+        linkedTransactions: [{ transactionId: "invoice_600", transactionType: "Invoice" }]
       }
     ]
   };

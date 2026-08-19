@@ -53,8 +53,8 @@ export type PostgresTableManifest = {
 };
 
 export type PostgresSchemaManifest = {
-  readonly manifestVersion: "2026-08-16.bill-payment-disbursements";
-  readonly schemaVersion: 18;
+  readonly manifestVersion: "2026-08-19.imported-operational-documents";
+  readonly schemaVersion: 19;
   readonly dialect: "postgres";
   readonly namespace: "erp_financials";
   readonly requiredTriggers: readonly PostgresTriggerManifest[];
@@ -144,8 +144,8 @@ const table = (
 });
 
 export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
-  manifestVersion: "2026-08-16.bill-payment-disbursements",
-  schemaVersion: 18,
+  manifestVersion: "2026-08-19.imported-operational-documents",
+  schemaVersion: 19,
   dialect: "postgres",
   namespace: "erp_financials",
   requiredTriggers: [
@@ -176,6 +176,13 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
       timing: "before",
       events: ["update", "delete"],
       functionName: "reject_posted_journal_child_mutation"
+    },
+    {
+      name: "ledger_postings_source_window_guard",
+      table: "ledger_postings",
+      timing: "before",
+      events: ["insert", "update"],
+      functionName: "enforce_reporting_source_window"
     },
     {
       name: "financial_lifecycle_events_immutable",
@@ -276,7 +283,7 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
       table: "subledger_document_lines",
       timing: "before",
       events: ["update", "delete"],
-      functionName: "reject_sdk_immutable_mutation"
+      functionName: "guard_quickbooks_document_line_mutation"
     },
     {
       name: "subledger_document_delivery_events_immutable",
@@ -1172,7 +1179,7 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
       [
         {
           name: "subledger_documents_type_check",
-          sql: "document_type in ('invoice', 'customer_payment', 'credit_memo', 'refund', 'vendor_bill', 'bill_payment', 'write_off', 'deposit', 'transfer')"
+          sql: "document_type in ('invoice', 'customer_payment', 'credit_memo', 'refund', 'vendor_bill', 'bill_payment', 'write_off', 'deposit', 'transfer', 'sales_receipt', 'purchase', 'vendor_credit')"
         },
         {
           name: "subledger_documents_amount_check",
@@ -1270,7 +1277,7 @@ export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
       [
         {
           name: "subledger_applications_type_check",
-          sql: "application_type in ('customer_payment_to_invoice', 'bill_payment_to_bill', 'credit_to_invoice', 'write_off_to_invoice')"
+          sql: "application_type in ('customer_payment_to_invoice', 'bill_payment_to_bill', 'credit_to_invoice', 'vendor_credit_to_bill', 'write_off_to_invoice')"
         },
         {
           name: "subledger_applications_amount_check",

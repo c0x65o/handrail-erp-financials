@@ -7,11 +7,14 @@ import {
   createErpFinancialsSdk,
   createFiscalCloseEvidenceChecksum,
   migratePostgresSchema,
+  persistQuickBooksSubledgerResources,
   validatePostgresMigrationHistory,
   validatePostgresSchema
 } from "../src/index.js";
 
 import type {
+  CanonicalAccountingFactSet,
+  HandrailQuickBooksSdkResourceSet,
   PostgresMigrationTransactionRunner,
   PostgresQueryClient,
   PostgresQueryResult
@@ -45,10 +48,240 @@ describeIntegration("ERP Financials real PostgreSQL", () => {
     expect(result.targetVersion).toBe(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion);
     expect(result.applied.at(-1)?.toVersion).toBe(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion);
     expect(schema).toMatchObject({ compatible: true, fixtureSupport: true, issues: [] });
-    expect(history).toMatchObject({ compatible: true, currentVersion: 18, issues: [] });
+    expect(history).toMatchObject({ compatible: true, currentVersion: 19, issues: [] });
     await expect(
-      pool.query("update erp_financials.schema_migrations set name = 'tampered' where to_version = 18")
+      pool.query("update erp_financials.schema_migrations set name = 'tampered' where to_version = 19")
     ).rejects.toThrow("schema migration history is append-only");
+  });
+
+  it("imports and safely replays QuickBooks documents, lines, and applications", async () => {
+    await migratePostgresSchema(runner, { appliedByRef: "integration:quickbooks-subledger" });
+    await seedQuickBooksImportScope(pool);
+    const facts = quickBooksSubledgerFacts();
+    const initialResources = quickBooksSubledgerResources("40.00", true, "2026-08-10T10:00:00.000Z");
+    const persist = (input: { readonly importedAt: string; readonly resources: HandrailQuickBooksSdkResourceSet }) =>
+      runner.transaction((client) => persistQuickBooksSubledgerResources({
+        client,
+        companyId: "company_qbo",
+        facts,
+        ...input
+      }));
+
+    const first = await persist({
+      importedAt: "2026-08-10T10:01:00.000Z",
+      resources: initialResources
+    });
+    expect(first).toMatchObject({ documents: 2, applications: 1, skippedApplications: 0 });
+    await expect(quickBooksDocumentState(pool)).resolves.toEqual([
+      { source_id: "invoice_600", original_amount: "100.00", open_amount: "60.00", status: "partially_applied" },
+      { source_id: "payment_700", original_amount: "40.00", open_amount: "0.00", status: "settled" }
+    ]);
+
+    const replay = await persist({
+      importedAt: "2026-08-10T10:02:00.000Z",
+      resources: initialResources
+    });
+    expect(replay).toMatchObject({ documents: 0, applications: 0, skippedApplications: 0 });
+    await expect(quickBooksDocumentState(pool)).resolves.toEqual([
+      { source_id: "invoice_600", original_amount: "100.00", open_amount: "60.00", status: "partially_applied" },
+      { source_id: "payment_700", original_amount: "40.00", open_amount: "0.00", status: "settled" }
+    ]);
+
+    const revisedResources = quickBooksSubledgerResources("50.00", true, "2026-08-11T10:00:00.000Z");
+    await persist({
+      importedAt: "2026-08-11T10:01:00.000Z",
+      resources: revisedResources
+    });
+    await expect(quickBooksDocumentState(pool)).resolves.toEqual([
+      { source_id: "invoice_600", original_amount: "100.00", open_amount: "50.00", status: "partially_applied" },
+      { source_id: "payment_700", original_amount: "50.00", open_amount: "0.00", status: "settled" }
+    ]);
+
+    await persist({
+      importedAt: "2026-08-12T10:01:00.000Z",
+      resources: quickBooksSubledgerResources("50.00", false, "2026-08-12T10:00:00.000Z")
+    });
+    await expect(quickBooksDocumentState(pool)).resolves.toEqual([
+      { source_id: "invoice_600", original_amount: "100.00", open_amount: "100.00", status: "open" },
+      { source_id: "payment_700", original_amount: "50.00", open_amount: "50.00", status: "open" }
+    ]);
+  });
+
+  it("preserves every QuickBooks operational document family and application relationship", async () => {
+    await migratePostgresSchema(runner, { appliedByRef: "integration:quickbooks-document-families" });
+    await seedQuickBooksAllDocumentScope(pool);
+    const facts = quickBooksAllDocumentFacts();
+    const resources = quickBooksAllDocumentResources();
+
+    const imported = await runner.transaction((client) => persistQuickBooksSubledgerResources({
+      client,
+      companyId: "company_qbo",
+      importedAt: "2026-08-10T10:01:00.000Z",
+      facts,
+      resources
+    }));
+
+    expect(imported).toMatchObject({
+      documents: 11,
+      documentLines: 11,
+      applications: 4,
+      skippedTransactions: 0,
+      skippedDocumentLines: 0,
+      skippedApplications: 0,
+      unresolvedApplications: []
+    });
+    const documents = await pool.query<{
+      document_type: string;
+      source_transaction_type: string;
+    }>(`
+select document_type, metadata ->> 'sourceTransactionType' as source_transaction_type
+from erp_financials.subledger_documents
+where tenant_id = 'tenant_qbo' and source_id = 'source_qbo'
+order by document_type
+`);
+    expect(documents.rows).toEqual([
+      { document_type: "bill_payment", source_transaction_type: "BillPayment" },
+      { document_type: "credit_memo", source_transaction_type: "CreditMemo" },
+      { document_type: "customer_payment", source_transaction_type: "Payment" },
+      { document_type: "deposit", source_transaction_type: "Deposit" },
+      { document_type: "invoice", source_transaction_type: "Invoice" },
+      { document_type: "purchase", source_transaction_type: "Purchase" },
+      { document_type: "refund", source_transaction_type: "RefundReceipt" },
+      { document_type: "sales_receipt", source_transaction_type: "SalesReceipt" },
+      { document_type: "transfer", source_transaction_type: "Transfer" },
+      { document_type: "vendor_bill", source_transaction_type: "Bill" },
+      { document_type: "vendor_credit", source_transaction_type: "VendorCredit" }
+    ]);
+
+    const applications = await pool.query<{ application_type: string }>(`
+select application_type
+from erp_financials.subledger_applications
+where tenant_id = 'tenant_qbo' and source_id = 'source_qbo'
+order by application_type
+`);
+    expect(applications.rows).toEqual([
+      { application_type: "bill_payment_to_bill" },
+      { application_type: "credit_to_invoice" },
+      { application_type: "customer_payment_to_invoice" },
+      { application_type: "vendor_credit_to_bill" }
+    ]);
+
+    const semantics = await pool.query<{
+      invoice_due_date: string;
+      bill_due_date: string;
+      invoice_party_type: string;
+      bill_party_type: string;
+      invoice_quantity: string;
+      invoice_unit_amount: string;
+      invoice_tax_code: string;
+    }>(`
+select
+  max(document.due_date::text) filter (where document.document_type = 'invoice') as invoice_due_date,
+  max(document.due_date::text) filter (where document.document_type = 'vendor_bill') as bill_due_date,
+  max(party.party_type) filter (where document.document_type = 'invoice') as invoice_party_type,
+  max(party.party_type) filter (where document.document_type = 'vendor_bill') as bill_party_type,
+  max(line.quantity::text) filter (where document.document_type = 'invoice') as invoice_quantity,
+  max(line.unit_amount::text) filter (where document.document_type = 'invoice') as invoice_unit_amount,
+  max(line.tax_code) filter (where document.document_type = 'invoice') as invoice_tax_code
+from erp_financials.subledger_documents document
+left join erp_financials.parties party on party.party_id = document.party_id
+left join erp_financials.subledger_document_lines line
+  on line.subledger_document_id = document.subledger_document_id
+where document.tenant_id = 'tenant_qbo' and document.source_id = 'source_qbo'
+`);
+    expect(semantics.rows[0]).toEqual({
+      invoice_due_date: "2026-08-31",
+      bill_due_date: "2026-08-25",
+      invoice_party_type: "customer",
+      bill_party_type: "vendor",
+      invoice_quantity: "2.00",
+      invoice_unit_amount: "50.00",
+      invoice_tax_code: "TAX"
+    });
+
+    const replay = await runner.transaction((client) => persistQuickBooksSubledgerResources({
+      client,
+      companyId: "company_qbo",
+      importedAt: "2026-08-10T10:02:00.000Z",
+      facts,
+      resources
+    }));
+    expect(replay).toMatchObject({ documents: 0, applications: 0, skippedApplications: 0 });
+  });
+
+  it("retires deleted delta documents and documents missing from an authoritative full snapshot", async () => {
+    await migratePostgresSchema(runner, { appliedByRef: "integration:quickbooks-retirement" });
+    await seedQuickBooksImportScope(pool);
+    const facts = quickBooksSubledgerFacts();
+    await runner.transaction((client) => persistQuickBooksSubledgerResources({
+      client,
+      companyId: "company_qbo",
+      importedAt: "2026-08-10T10:01:00.000Z",
+      facts,
+      resources: quickBooksSubledgerResources("40.00", true, "2026-08-10T10:00:00.000Z")
+    }));
+    await pool.query(`
+insert into erp_financials.transaction_lines (
+  transaction_line_id, tenant_id, source_id, transaction_id, line_number, account_id, amount, dimension_refs
+) values
+  ('qbo_invoice_line', 'tenant_qbo', 'source_qbo', 'transaction_invoice_qbo', 1, 'account_revenue_qbo', 100, '[]'::jsonb),
+  ('qbo_payment_line', 'tenant_qbo', 'source_qbo', 'transaction_payment_qbo', 1, 'account_cash_qbo', 40, '[]'::jsonb);
+insert into erp_financials.ledger_postings (
+  posting_id, tenant_id, source_id, source_posting_id, transaction_id, transaction_line_id,
+  account_id, posting_date, accounting_basis, debit_amount, credit_amount, net_amount, currency_code,
+  dimension_hash, dimension_refs,
+  import_batch_id, source_payload_ref
+) values
+  ('qbo_invoice_posting', 'tenant_qbo', 'source_qbo', 'invoice-posting', 'transaction_invoice_qbo',
+   'qbo_invoice_line', 'account_revenue_qbo', '2026-08-01', 'accrual', 0, 100, -100, 'USD', repeat('0', 64), '[]'::jsonb, 'batch_qbo', '{}'::jsonb),
+  ('qbo_invoice_offset', 'tenant_qbo', 'source_qbo', 'invoice-offset', 'transaction_invoice_qbo',
+   null, 'account_cash_qbo', '2026-08-01', 'accrual', 100, 0, 100, 'USD', repeat('0', 64), '[]'::jsonb, 'batch_qbo', '{}'::jsonb),
+  ('qbo_payment_posting', 'tenant_qbo', 'source_qbo', 'payment-posting', 'transaction_payment_qbo',
+   'qbo_payment_line', 'account_cash_qbo', '2026-08-10', 'accrual', 40, 0, 40, 'USD', repeat('0', 64), '[]'::jsonb, 'batch_qbo', '{}'::jsonb),
+  ('qbo_payment_offset', 'tenant_qbo', 'source_qbo', 'payment-offset', 'transaction_payment_qbo',
+   null, 'account_revenue_qbo', '2026-08-10', 'accrual', 0, 40, -40, 'USD', repeat('0', 64), '[]'::jsonb, 'batch_qbo', '{}'::jsonb);
+`);
+
+    const deltaResources = quickBooksSubledgerResources("40.00", true, "2026-08-11T10:00:00.000Z");
+    const deletedPayment = {
+      ...deltaResources,
+      operationalDocuments: deltaResources.operationalDocuments?.map((resource) =>
+        resource.resource.sourceTransactionId === "payment_700"
+          ? { ...resource, syncAction: "deleted" as const }
+          : resource
+      )
+    };
+    const delta = await runner.transaction((client) => persistQuickBooksSubledgerResources({
+      client,
+      companyId: "company_qbo",
+      importedAt: "2026-08-11T10:01:00.000Z",
+      facts,
+      resources: deletedPayment
+    }));
+    expect(delta).toMatchObject({ voidedDocuments: 1, removedLedgerPostings: 2 });
+    await expect(quickBooksDocumentState(pool)).resolves.toEqual([
+      { source_id: "invoice_600", original_amount: "100.00", open_amount: "100.00", status: "open" },
+      { source_id: "payment_700", original_amount: "40.00", open_amount: "0", status: "voided" }
+    ]);
+
+    const invoiceOnly = {
+      ...quickBooksSubledgerResources("40.00", false, "2026-08-12T10:00:00.000Z"),
+      operationalDocuments: quickBooksSubledgerResources("40.00", false, "2026-08-12T10:00:00.000Z")
+        .operationalDocuments?.filter((resource) => resource.resource.sourceTransactionId === "payment_700")
+    };
+    const full = await runner.transaction((client) => persistQuickBooksSubledgerResources({
+      client,
+      companyId: "company_qbo",
+      importedAt: "2026-08-12T10:01:00.000Z",
+      facts,
+      resources: invoiceOnly,
+      replaceMissingDocuments: true
+    }));
+    expect(full).toMatchObject({ voidedDocuments: 1, removedLedgerPostings: 2 });
+    await expect(quickBooksDocumentState(pool)).resolves.toEqual([
+      { source_id: "invoice_600", original_amount: "100.00", open_amount: "0", status: "voided" },
+      { source_id: "payment_700", original_amount: "40.00", open_amount: "40.00", status: "open" }
+    ]);
   });
 
   it("reads canonical journal and fiscal controls through the public SDK", async () => {
@@ -128,6 +361,110 @@ describeIntegration("ERP Financials real PostgreSQL", () => {
     await expect(sdk.queries.getPostingLock("source_1")).resolves.toMatchObject({
       postingLockDate: "2026-08-31",
       version: 1
+    });
+  });
+
+  it("reads both sides of the QuickBooks-to-Spartan cutoff through one reporting book", async () => {
+    await migratePostgresSchema(runner, { appliedByRef: "integration:cutoff-continuity" });
+    await seedAccountingScope(pool);
+    await pool.query(`
+update erp_financials.accounting_sources set source_system = 'quickbooks' where source_id = 'source_1';
+insert into erp_financials.company_sources values ('company_source_2', 'tenant_1', 'company_1', 'source_2', now());
+insert into erp_financials.accounts (account_id, tenant_id, source_id, source_account_id, name, type, classification, active)
+values ('native_cash', 'tenant_1', 'source_2', 'cash', 'Cash', 'Bank', 'asset', true),
+       ('native_ar', 'tenant_1', 'source_2', 'ar', 'Receivable', 'Accounts Receivable', 'asset', true),
+       ('native_ap', 'tenant_1', 'source_2', 'ap', 'Payable', 'Accounts Payable', 'liability', true),
+       ('native_income', 'tenant_1', 'source_2', 'income', 'Service Revenue', 'Income', 'income', true);
+insert into erp_financials.parties (party_id, tenant_id, source_id, source_party_id, party_type, display_name, active)
+values ('native_customer', 'tenant_1', 'source_2', 'customer:1', 'customer', 'Customer One', true),
+       ('native_vendor', 'tenant_1', 'source_2', 'vendor:1', 'vendor', 'Vendor One', true);
+`);
+    const operation = sdkOperation();
+    const sdk = createErpFinancialsSdk({
+      database: runner, tenantId: "tenant_1", companyId: "company_1", bookId: "book_cutoff",
+      writeSourceId: "source_2", currencyCode: "USD", postingPolicy: "legacy_unrestricted",
+      now: () => "2026-09-02T12:00:00.000Z"
+    });
+    await sdk.books.define({ operation, bookId: "book_cutoff", name: "Cutoff book", baseCurrencyCode: "USD" });
+    await sdk.books.bindSource({
+      operation, bookId: "book_cutoff", sourceId: "source_1", sourceRole: "historical",
+      effectiveThrough: "2026-08-31"
+    });
+    await sdk.books.bindSource({
+      operation, bookId: "book_cutoff", sourceId: "source_2", sourceRole: "active",
+      effectiveFrom: "2026-09-01"
+    });
+    for (const account of [
+      { bookAccountKey: "cash", accountNumber: "1000", name: "Cash", classification: "asset" as const },
+      { bookAccountKey: "receivable", accountNumber: "1100", name: "Accounts receivable", classification: "asset" as const },
+      { bookAccountKey: "payable", accountNumber: "2000", name: "Accounts payable", classification: "liability" as const },
+      { bookAccountKey: "revenue", accountNumber: "4000", name: "Service revenue", classification: "income" as const },
+    ]) {
+      await sdk.books.defineAccount({ operation, bookId: "book_cutoff", expectedVersion: 0, accountRole: "posting", type: account.name, ...account });
+    }
+    for (const mapping of [
+      ["source_1", "account_cash", "cash"], ["source_1", "account_ar", "receivable"],
+      ["source_1", "account_ap", "payable"], ["source_1", "account_income", "revenue"],
+      ["source_2", "native_cash", "cash"], ["source_2", "native_ar", "receivable"],
+      ["source_2", "native_ap", "payable"], ["source_2", "native_income", "revenue"],
+    ] as const) {
+      await sdk.books.mapAccount({ operation, bookId: "book_cutoff", sourceId: mapping[0], accountId: mapping[1], bookAccountKey: mapping[2] });
+    }
+    const qbo = createErpFinancials({
+      database: runner, tenantId: "tenant_1", companyId: "company_1", sourceId: "source_1",
+      currencyCode: "USD", postingPolicy: "legacy_unrestricted", now: () => "2026-08-31T23:00:00.000Z"
+    });
+    const native = createErpFinancials({
+      database: runner, tenantId: "tenant_1", companyId: "company_1", sourceId: "source_2",
+      currencyCode: "USD", postingPolicy: "legacy_unrestricted", now: () => "2026-09-01T12:00:00.000Z"
+    });
+    await qbo.invoices.create({
+      operation, idempotencyKey: "cutoff-qbo-invoice", date: "2026-08-31", dueDate: "2026-09-30",
+      customerId: "customer_1", receivableAccount: { accountId: "account_ar" },
+      revenueLines: [{ accountId: "account_income", amount: "100.00" }]
+    });
+    await qbo.vendorBills.create({
+      operation, idempotencyKey: "cutoff-qbo-bill", date: "2026-08-31", dueDate: "2026-09-30",
+      vendorId: "vendor_1", payableAccount: { accountId: "account_ap" },
+      expenseLines: [{ accountId: "account_cash", amount: "40.00" }]
+    });
+    await expect(native.invoices.create({
+      operation: { ...operation, requestId: "cutoff-backdated-native" },
+      idempotencyKey: "cutoff-backdated-native", date: "2026-08-31", dueDate: "2026-09-30",
+      customerId: "native_customer", receivableAccount: { accountId: "native_ar" },
+      revenueLines: [{ accountId: "native_income", amount: "1.00" }]
+    })).rejects.toThrow("outside every reporting-book window");
+    await native.invoices.create({
+      operation, idempotencyKey: "cutoff-native-invoice", date: "2026-09-01", dueDate: "2026-10-01",
+      customerId: "native_customer", receivableAccount: { accountId: "native_ar" },
+      revenueLines: [{ accountId: "native_income", amount: "100.00" }]
+    });
+    await native.vendorBills.create({
+      operation, idempotencyKey: "cutoff-native-bill", date: "2026-09-01", dueDate: "2026-10-01",
+      vendorId: "native_vendor", payableAccount: { accountId: "native_ap" },
+      expenseLines: [{ accountId: "native_cash", amount: "40.00" }]
+    });
+
+    const window = { periodStart: "2026-08-31" as const, periodEnd: "2026-09-01" as const };
+    const ledger = await sdk.queries.listGeneralLedger({ ...window, limit: 100 });
+    expect(new Set(ledger.items.map((line) => line.sourceProvenance.sourceId))).toEqual(new Set(["source_1", "source_2"]));
+    await expect(sdk.queries.getGeneralLedgerSummary(window)).resolves.toMatchObject({
+      postingCount: 8, totalDebits: "280.00", totalCredits: "280.00", difference: "0.00"
+    });
+    await expect(sdk.queries.getFinancialStatement({ reportName: "profit_and_loss", ...window })).resolves.toMatchObject({
+      totals: { income: "200.00" }
+    });
+    await expect(sdk.queries.getFinancialStatement({ reportName: "balance_sheet", ...window, asOfDate: "2026-09-01" })).resolves.toMatchObject({
+      reportName: "balance_sheet"
+    });
+    await expect(sdk.queries.getFinancialStatement({ reportName: "trial_balance", ...window, asOfDate: "2026-09-01" })).resolves.toMatchObject({
+      reportName: "trial_balance"
+    });
+    await expect(sdk.queries.getAging({ kind: "receivables", asOfDate: "2026-09-01" })).resolves.toMatchObject({
+      totals: { total: "200.00" }
+    });
+    await expect(sdk.queries.getAging({ kind: "payables", asOfDate: "2026-09-01" })).resolves.toMatchObject({
+      totals: { total: "80.00" }
     });
   });
 
@@ -996,6 +1333,285 @@ where table_schema = 'erp_financials' and table_name = 'report_snapshots'
   and column_name in ('company_id', 'source_id') order by column_name`
   );
   return result.rows.map((row) => row.column_name);
+}
+
+async function seedQuickBooksImportScope(pool: Pool): Promise<void> {
+  await pool.query(`
+insert into erp_financials.accounting_companies values
+  ('company_qbo', 'tenant_qbo', 'Spartan', 'Spartan', 'USD', 1, 'sandbox', 'quickbooks', 'realm_qbo');
+insert into erp_financials.accounting_sources (
+  source_id, tenant_id, source_system, provider_environment, connection_ref,
+  import_batch_id, checkpoint_id, latest_synced_at, status
+) values (
+  'source_qbo', 'tenant_qbo', 'quickbooks', 'sandbox', 'connection:qbo',
+  'batch_qbo', 'checkpoint_qbo', '2026-08-10T10:00:00Z', 'active'
+);
+insert into erp_financials.company_sources values
+  ('company_source_qbo', 'tenant_qbo', 'company_qbo', 'source_qbo', '2026-08-10T10:00:00Z');
+insert into erp_financials.import_batches (
+  import_batch_id, tenant_id, source_id, mode, status, started_at, completed_at, source_object_counts
+) values (
+  'batch_qbo', 'tenant_qbo', 'source_qbo', 'initial', 'completed',
+  '2026-08-10T09:00:00Z', '2026-08-10T10:00:00Z', '{}'::jsonb
+);
+insert into erp_financials.sync_checkpoints (
+  checkpoint_id, tenant_id, source_id, source_object, cursor_kind, cursor_value,
+  fresh_through, latest_source_updated_at, status
+) values (
+  'checkpoint_qbo', 'tenant_qbo', 'source_qbo', 'quickbooks_full_sync', 'full_scan', 'full:realm_qbo',
+  '2026-08-10T10:00:00Z', '2026-08-10T10:00:00Z', 'current'
+);
+insert into erp_financials.accounts (
+  account_id, tenant_id, source_id, source_account_id, name, type, classification, active
+) values
+  ('account_cash_qbo', 'tenant_qbo', 'source_qbo', 'cash', 'Cash', 'Bank', 'asset', true),
+  ('account_revenue_qbo', 'tenant_qbo', 'source_qbo', 'revenue', 'Revenue', 'Income', 'income', true);
+insert into erp_financials.parties (
+  party_id, tenant_id, source_id, source_party_id, party_type, display_name, active
+) values ('customer_qbo', 'tenant_qbo', 'source_qbo', 'customer_20', 'customer', 'Acme', true);
+insert into erp_financials.transactions (
+  transaction_id, tenant_id, source_id, source_transaction_id, source_transaction_type,
+  transaction_number, transaction_date, posted_at, updated_at, party_id, currency_code, status,
+  source_payload_ref
+) values
+  ('transaction_invoice_qbo', 'tenant_qbo', 'source_qbo', 'invoice_600', 'Invoice', 'INV-600',
+    '2026-08-01', '2026-08-01T12:00:00Z', '2026-08-10T10:00:00Z', 'customer_qbo', 'USD', 'posted', '{}'::jsonb),
+  ('transaction_payment_qbo', 'tenant_qbo', 'source_qbo', 'payment_700', 'Payment', 'PMT-700',
+    '2026-08-10', '2026-08-10T12:00:00Z', '2026-08-10T10:00:00Z', 'customer_qbo', 'USD', 'posted', '{}'::jsonb);
+`);
+}
+
+function quickBooksSubledgerFacts(): CanonicalAccountingFactSet {
+  return {
+    company: {
+      companyId: "company_qbo", tenantId: "tenant_qbo", legalName: "Spartan", displayName: "Spartan",
+      baseCurrencyCode: "USD", fiscalYearStartMonth: 1, providerEnvironment: "sandbox",
+      sourceSystem: "quickbooks", sourceCompanyRef: "realm_qbo"
+    },
+    source: {
+      tenantId: "tenant_qbo", sourceId: "source_qbo", sourceSystem: "quickbooks",
+      providerEnvironment: "sandbox", connectionRef: "connection:qbo", importBatchId: "batch_qbo",
+      checkpointId: "checkpoint_qbo", latestSyncedAt: "2026-08-10T10:00:00.000Z", status: "active"
+    },
+    importBatch: {
+      tenantId: "tenant_qbo", sourceId: "source_qbo", importBatchId: "batch_qbo", mode: "initial",
+      status: "completed", startedAt: "2026-08-10T09:00:00.000Z",
+      completedAt: "2026-08-10T10:00:00.000Z", sourceObjectCounts: {}
+    },
+    checkpoint: {
+      tenantId: "tenant_qbo", sourceId: "source_qbo", checkpointId: "checkpoint_qbo",
+      sourceObject: "quickbooks_full_sync", cursorKind: "full_scan", cursorValue: "full:realm_qbo",
+      freshThrough: "2026-08-10T10:00:00.000Z", latestSourceUpdatedAt: "2026-08-10T10:00:00.000Z",
+      status: "current"
+    },
+    accounts: [
+      { accountId: "account_cash_qbo", tenantId: "tenant_qbo", sourceId: "source_qbo", sourceAccountId: "cash", name: "Cash", type: "Bank", classification: "asset", active: true },
+      { accountId: "account_revenue_qbo", tenantId: "tenant_qbo", sourceId: "source_qbo", sourceAccountId: "revenue", name: "Revenue", type: "Income", classification: "income", active: true }
+    ],
+    parties: [
+      { partyId: "customer_qbo", tenantId: "tenant_qbo", sourceId: "source_qbo", sourcePartyId: "customer_20", partyType: "customer", displayName: "Acme", active: true }
+    ],
+    items: [],
+    dimensions: [],
+    transactions: [
+      { transactionId: "transaction_invoice_qbo", tenantId: "tenant_qbo", sourceId: "source_qbo", sourceTransactionId: "invoice_600", sourceTransactionType: "Invoice", transactionNumber: "INV-600", transactionDate: "2026-08-01", partyId: "customer_qbo", currencyCode: "USD", status: "posted" },
+      { transactionId: "transaction_payment_qbo", tenantId: "tenant_qbo", sourceId: "source_qbo", sourceTransactionId: "payment_700", sourceTransactionType: "Payment", transactionNumber: "PMT-700", transactionDate: "2026-08-10", partyId: "customer_qbo", currencyCode: "USD", status: "posted" }
+    ],
+    transactionLines: [],
+    postings: []
+  };
+}
+
+function quickBooksSubledgerResources(
+  paymentAmount: string,
+  linked: boolean,
+  sourceUpdatedAt: string
+): HandrailQuickBooksSdkResourceSet {
+  const envelope = {
+    sourceSystem: "quickbooks" as const,
+    tenantId: "tenant_qbo",
+    sourceId: "source_qbo",
+    providerEnvironment: "sandbox" as const,
+    realmId: "realm_qbo",
+    importBatchId: "batch_qbo",
+    checkpointId: "checkpoint_qbo",
+    sourceUpdatedAt
+  };
+  return {
+    companyInfo: {
+      ...envelope, resourceType: "CompanyInfo", resourceId: "realm_qbo",
+      resource: { CompanyName: "Spartan", LegalName: "Spartan" }
+    },
+    accounts: [],
+    journalEntries: [],
+    operationalDocuments: [
+      {
+        ...envelope, resourceType: "LedgerTransaction", resourceId: "invoice_600",
+        resource: {
+          sourceTransactionId: "invoice_600", sourceTransactionType: "Invoice", transactionDate: "2026-08-01",
+          transactionNumber: "INV-600", dueDate: "2026-08-31", totalAmount: "100.00", openAmount: "100.00",
+          sourceUpdatedAt, currencyCode: "USD",
+          partyRef: { sourceObjectId: "customer_20", displayName: "Acme", partyType: "customer" },
+          lines: [{
+            sourceLineId: "invoice-line-1", lineNumber: 1, description: "Consulting", sourceAmount: "100.00",
+            sourceQuantity: "2.00", sourceUnitAmount: "50.00",
+            accountRef: { sourceObjectId: "revenue", displayName: "Revenue" }, postings: []
+          }]
+        }
+      },
+      {
+        ...envelope, resourceType: "LedgerTransaction", resourceId: "payment_700",
+        resource: {
+          sourceTransactionId: "payment_700", sourceTransactionType: "Payment", transactionDate: "2026-08-10",
+          transactionNumber: "PMT-700", totalAmount: paymentAmount, unappliedAmount: linked ? "0.00" : paymentAmount,
+          sourceUpdatedAt, currencyCode: "USD",
+          partyRef: { sourceObjectId: "customer_20", displayName: "Acme", partyType: "customer" },
+          lines: [{
+            sourceLineId: "payment-line-1", lineNumber: 1, description: "Invoice payment", sourceAmount: paymentAmount,
+            accountRef: { sourceObjectId: "cash", displayName: "Cash" },
+            linkedTransactions: linked ? [{ sourceTransactionId: "invoice_600", sourceTransactionType: "Invoice" }] : [],
+            postings: []
+          }]
+        }
+      }
+    ]
+  };
+}
+
+const quickBooksDocumentFamilyDefinitions = [
+  { sourceId: "invoice_all", sourceType: "Invoice", number: "INV-ALL", date: "2026-08-01", dueDate: "2026-08-31", amount: "100.00", unitAmount: "50.00", partyId: "customer_qbo", partySourceId: "customer_20", partyType: "customer", accountId: "revenue" },
+  { sourceId: "payment_all", sourceType: "Payment", number: "PMT-ALL", date: "2026-08-02", amount: "20.00", unitAmount: "10.00", partyId: "customer_qbo", partySourceId: "customer_20", partyType: "customer", accountId: "cash", linkedSourceId: "invoice_all", linkedSourceType: "Invoice" },
+  { sourceId: "credit_all", sourceType: "CreditMemo", number: "CM-ALL", date: "2026-08-03", amount: "10.00", unitAmount: "5.00", partyId: "customer_qbo", partySourceId: "customer_20", partyType: "customer", accountId: "revenue", linkedSourceId: "invoice_all", linkedSourceType: "Invoice" },
+  { sourceId: "refund_all", sourceType: "RefundReceipt", number: "REF-ALL", date: "2026-08-04", amount: "5.00", unitAmount: "2.50", partyId: "customer_qbo", partySourceId: "customer_20", partyType: "customer", accountId: "cash" },
+  { sourceId: "bill_all", sourceType: "Bill", number: "BILL-ALL", date: "2026-08-05", dueDate: "2026-08-25", amount: "80.00", unitAmount: "40.00", partyId: "vendor_qbo", partySourceId: "vendor_30", partyType: "vendor", accountId: "expense" },
+  { sourceId: "bill_payment_all", sourceType: "BillPayment", number: "BP-ALL", date: "2026-08-06", amount: "20.00", unitAmount: "10.00", partyId: "vendor_qbo", partySourceId: "vendor_30", partyType: "vendor", accountId: "cash", linkedSourceId: "bill_all", linkedSourceType: "Bill" },
+  { sourceId: "deposit_all", sourceType: "Deposit", number: "DEP-ALL", date: "2026-08-07", amount: "30.00", unitAmount: "15.00", accountId: "cash" },
+  { sourceId: "transfer_all", sourceType: "Transfer", number: "TRF-ALL", date: "2026-08-08", amount: "25.00", unitAmount: "12.50", accountId: "cash" },
+  { sourceId: "sales_receipt_all", sourceType: "SalesReceipt", number: "SR-ALL", date: "2026-08-09", amount: "40.00", unitAmount: "20.00", partyId: "customer_qbo", partySourceId: "customer_20", partyType: "customer", accountId: "revenue" },
+  { sourceId: "purchase_all", sourceType: "Purchase", number: "PUR-ALL", date: "2026-08-10", amount: "50.00", unitAmount: "25.00", partyId: "vendor_qbo", partySourceId: "vendor_30", partyType: "vendor", accountId: "expense" },
+  { sourceId: "vendor_credit_all", sourceType: "VendorCredit", number: "VC-ALL", date: "2026-08-11", amount: "10.00", unitAmount: "5.00", partyId: "vendor_qbo", partySourceId: "vendor_30", partyType: "vendor", accountId: "expense", linkedSourceId: "bill_all", linkedSourceType: "Bill" }
+] as const;
+
+async function seedQuickBooksAllDocumentScope(pool: Pool): Promise<void> {
+  await seedQuickBooksImportScope(pool);
+  await pool.query(`
+insert into erp_financials.accounts (
+  account_id, tenant_id, source_id, source_account_id, name, type, classification, active
+) values ('account_expense_qbo', 'tenant_qbo', 'source_qbo', 'expense', 'Expense', 'Expense', 'expense', true);
+insert into erp_financials.parties (
+  party_id, tenant_id, source_id, source_party_id, party_type, display_name, active
+) values ('vendor_qbo', 'tenant_qbo', 'source_qbo', 'vendor_30', 'vendor', 'Supply Co', true);
+delete from erp_financials.transactions
+where tenant_id = 'tenant_qbo' and source_id = 'source_qbo';
+`);
+  for (const definition of quickBooksDocumentFamilyDefinitions) {
+    await pool.query(
+      `insert into erp_financials.transactions (
+        transaction_id, tenant_id, source_id, source_transaction_id, source_transaction_type,
+        transaction_number, transaction_date, posted_at, updated_at, party_id, currency_code, status,
+        source_payload_ref
+      ) values ($1, 'tenant_qbo', 'source_qbo', $2, $3, $4, $5, $6, $6, $7, 'USD', 'posted', '{}'::jsonb)`,
+      [
+        `transaction_${definition.sourceId}`,
+        definition.sourceId,
+        definition.sourceType,
+        definition.number,
+        definition.date,
+        `${definition.date}T12:00:00Z`,
+        "partyId" in definition ? definition.partyId : null
+      ]
+    );
+  }
+}
+
+function quickBooksAllDocumentFacts(): CanonicalAccountingFactSet {
+  const base = quickBooksSubledgerFacts();
+  return {
+    ...base,
+    accounts: [
+      ...base.accounts,
+      { accountId: "account_expense_qbo", tenantId: "tenant_qbo", sourceId: "source_qbo", sourceAccountId: "expense", name: "Expense", type: "Expense", classification: "expense", active: true }
+    ],
+    parties: [
+      ...base.parties,
+      { partyId: "vendor_qbo", tenantId: "tenant_qbo", sourceId: "source_qbo", sourcePartyId: "vendor_30", partyType: "vendor", displayName: "Supply Co", active: true }
+    ],
+    transactions: quickBooksDocumentFamilyDefinitions.map((definition) => ({
+      transactionId: `transaction_${definition.sourceId}`,
+      tenantId: "tenant_qbo",
+      sourceId: "source_qbo",
+      sourceTransactionId: definition.sourceId,
+      sourceTransactionType: definition.sourceType,
+      transactionNumber: definition.number,
+      transactionDate: definition.date,
+      ...("partyId" in definition ? { partyId: definition.partyId } : {}),
+      currencyCode: "USD",
+      status: "posted" as const
+    }))
+  };
+}
+
+function quickBooksAllDocumentResources(): HandrailQuickBooksSdkResourceSet {
+  const base = quickBooksSubledgerResources("20.00", false, "2026-08-10T10:00:00.000Z");
+  return {
+    ...base,
+    operationalDocuments: quickBooksDocumentFamilyDefinitions.map((definition, index) => ({
+      sourceSystem: "quickbooks" as const,
+      tenantId: "tenant_qbo",
+      sourceId: "source_qbo",
+      providerEnvironment: "sandbox" as const,
+      realmId: "realm_qbo",
+      importBatchId: "batch_qbo",
+      checkpointId: "checkpoint_qbo",
+      sourceUpdatedAt: "2026-08-10T10:00:00.000Z",
+      resourceType: "LedgerTransaction" as const,
+      resourceId: definition.sourceId,
+      resource: {
+        sourceTransactionId: definition.sourceId,
+        sourceTransactionType: definition.sourceType,
+        transactionDate: definition.date,
+        transactionNumber: definition.number,
+        ...("dueDate" in definition ? { dueDate: definition.dueDate } : {}),
+        totalAmount: definition.amount,
+        sourceUpdatedAt: "2026-08-10T10:00:00.000Z",
+        currencyCode: "USD",
+        ...("partySourceId" in definition ? {
+          partyRef: {
+            sourceObjectId: definition.partySourceId,
+            displayName: definition.partyType === "vendor" ? "Supply Co" : "Acme",
+            partyType: definition.partyType
+          }
+        } : {}),
+        lines: [{
+          sourceLineId: `${definition.sourceId}-line-1`,
+          lineNumber: 1,
+          description: `${definition.sourceType} detail`,
+          sourceAmount: definition.amount,
+          sourceQuantity: "2.00",
+          sourceUnitAmount: definition.unitAmount,
+          taxCode: index === 0 ? "TAX" : "NON",
+          accountRef: { sourceObjectId: definition.accountId, displayName: definition.accountId },
+          ...("linkedSourceId" in definition ? {
+            linkedTransactions: [{
+              sourceTransactionId: definition.linkedSourceId,
+              sourceTransactionType: definition.linkedSourceType
+            }]
+          } : {}),
+          postings: []
+        }]
+      }
+    }))
+  };
+}
+
+async function quickBooksDocumentState(pool: Pool): Promise<readonly Record<string, unknown>[]> {
+  const result = await pool.query<Record<string, unknown>>(`
+select metadata ->> 'sourceTransactionId' as source_id, original_amount::text, open_amount::text, status
+from erp_financials.subledger_documents
+where tenant_id = 'tenant_qbo' and source_id = 'source_qbo'
+order by source_id
+`);
+  return result.rows;
 }
 
 async function seedAccountingScope(pool: Pool): Promise<void> {

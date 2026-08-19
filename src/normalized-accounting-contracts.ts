@@ -406,17 +406,29 @@ export type NormalizedQuickBooksLedgerPosting = {
   readonly sourcePayloadRef?: NormalizedAccountingSafeSourceRef;
 };
 
+export type NormalizedQuickBooksLinkedTransaction = {
+  readonly sourceTransactionId: string;
+  readonly sourceTransactionType?: string;
+  readonly sourceLineId?: string;
+};
+
 export type NormalizedQuickBooksLedgerLine = {
   readonly sourceLineId?: string;
   readonly lineNumber: number;
   readonly description?: string;
   readonly amount?: DecimalString;
+  /** Provider document-line amount before ledger polarity/offset derivation. */
+  readonly sourceAmount?: DecimalString;
+  readonly sourceQuantity?: DecimalString;
+  readonly sourceUnitAmount?: DecimalString;
+  readonly taxCode?: string;
   readonly quantity?: DecimalString;
   readonly unitAmount?: DecimalString;
   readonly accountRef?: NormalizedQuickBooksRef;
   readonly partyRef?: NormalizedQuickBooksPartyRef;
   readonly itemRef?: NormalizedQuickBooksItemRef;
   readonly dimensionRefs?: readonly NormalizedQuickBooksDimensionRef[];
+  readonly linkedTransactions?: readonly NormalizedQuickBooksLinkedTransaction[];
   readonly postings: readonly NormalizedQuickBooksLedgerPosting[];
   readonly sourcePayloadRef?: NormalizedAccountingSafeSourceRef;
 };
@@ -426,6 +438,12 @@ export type NormalizedQuickBooksLedgerTransaction = {
   readonly sourceTransactionType: string;
   readonly transactionDate: IsoDate;
   readonly transactionNumber?: string;
+  readonly dueDate?: IsoDate;
+  readonly totalAmount?: DecimalString;
+  readonly openAmount?: DecimalString;
+  readonly unappliedAmount?: DecimalString;
+  readonly emailStatus?: string;
+  readonly printStatus?: string;
   readonly postedAt?: IsoDateTime;
   readonly sourceUpdatedAt?: IsoDateTime;
   readonly sourceRevision?: string;
@@ -684,6 +702,8 @@ export type NormalizedQuickBooksResourceSet = {
   readonly accounts: readonly NormalizedQuickBooksAccountResource[];
   readonly journalEntries?: readonly NormalizedQuickBooksLedgerEntryResource[];
   readonly ledgerTransactions?: readonly NormalizedQuickBooksLedgerTransactionResource[];
+  /** Commercial documents, including records that do not emit provider ledger rows. */
+  readonly operationalDocuments?: readonly NormalizedQuickBooksLedgerTransactionResource[];
   readonly ledgerPostings?: readonly NormalizedQuickBooksLedgerPostingResource[];
   readonly parties?: readonly NormalizedQuickBooksPartyResource[];
   readonly customers?: readonly NormalizedQuickBooksCustomerResource[];

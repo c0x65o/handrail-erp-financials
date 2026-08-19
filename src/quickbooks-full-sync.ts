@@ -21,6 +21,7 @@ import type {
   NormalizedQuickBooksFullSyncResponseEnvelope,
   NormalizedQuickBooksResourceSet
 } from "./normalized-accounting-contracts.js";
+import type { QuickBooksSubledgerImportResult } from "./quickbooks-subledger-import.js";
 
 export type QuickBooksFullSyncClient = Pick<HandrailQuickBooksFullSyncServiceHandler, "fullSync">;
 
@@ -60,6 +61,7 @@ export type QuickBooksFullSyncRunResult = QuickBooksFullSyncMapResult & {
   readonly response: NormalizedQuickBooksFullSyncResponseEnvelope;
   readonly persistence: CanonicalFactPersistenceResult;
   readonly evidence: CoreErpPersistenceEvidence;
+  readonly subledgerPersistence?: QuickBooksSubledgerImportResult;
   readonly removedLedgerFacts?: DeleteLedgerFactsOutsideImportBatchResult;
 };
 
@@ -74,6 +76,12 @@ export function createQuickBooksFullSyncWorker(options: QuickBooksFullSyncWorker
       const response = await options.quickBooksClient.fullSync(request);
       const mapped = mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(response, options);
       const persistence = await persistQuickBooksFullSyncFacts(options.persistence, mapped.facts);
+      const subledgerPersistence = await persistQuickBooksSubledgerFacts(
+        options.persistence,
+        mapped.facts,
+        mapped.adapterInput,
+        options.companyId
+      );
       const removedLedgerFacts =
         options.replaceLedgerFactsOnFullSync === true
           ? await replaceLedgerFactsOutsideImportBatch(options.persistence, persistence)
@@ -83,6 +91,7 @@ export function createQuickBooksFullSyncWorker(options: QuickBooksFullSyncWorker
         response,
         ...mapped,
         persistence,
+        ...(subledgerPersistence === undefined ? {} : { subledgerPersistence }),
         evidence: buildCoreErpPersistenceEvidence({
           facts: mapped.facts,
           persistence,
@@ -92,6 +101,23 @@ export function createQuickBooksFullSyncWorker(options: QuickBooksFullSyncWorker
       };
     }
   };
+}
+
+async function persistQuickBooksSubledgerFacts(
+  persistence: QuickBooksFullSyncPersistence,
+  facts: CanonicalAccountingFactSet,
+  adapterInput: HandrailQuickBooksSdkResourcesAdapterInput,
+  companyId: string
+): Promise<QuickBooksSubledgerImportResult | undefined> {
+  const candidate = persistence as Partial<Pick<PostgresStorageAdapter, "persistQuickBooksSubledgerResources">>;
+  if (typeof candidate.persistQuickBooksSubledgerResources !== "function") return undefined;
+  return candidate.persistQuickBooksSubledgerResources({
+    companyId,
+    importedAt: adapterInput.context.importedAt,
+    facts,
+    resources: adapterInput.resources,
+    replaceMissingDocuments: true
+  });
 }
 
 function replaceLedgerFactsOutsideImportBatch(

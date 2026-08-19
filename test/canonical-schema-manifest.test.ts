@@ -37,8 +37,8 @@ const WRITE_OFF_APPLICATION_UPGRADE_SQL = readFileSync(
 
 describe("canonical schema manifest", () => {
   it("is versioned and covers the documented canonical entities", () => {
-    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.manifestVersion).toBe("2026-08-16.bill-payment-disbursements");
-    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion).toBe(18);
+    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.manifestVersion).toBe("2026-08-19.imported-operational-documents");
+    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion).toBe(19);
 
     const tableNames = POSTGRES_CANONICAL_SCHEMA_MANIFEST.tables.map((table) => table.name);
 
@@ -252,7 +252,8 @@ describe("canonical schema manifest", () => {
       [14, 15],
       [15, 16],
       [16, 17],
-      [17, 18]
+      [17, 18],
+      [18, 19]
     ]);
     expect(renderPostgresSchemaSql()).toContain('create table if not exists "erp_financials"."schema_migrations"');
     expect(FUTURE_ERP_CANONICAL_SCHEMA_MIGRATION_SQL).not.toMatch(
@@ -286,7 +287,7 @@ describe("canonical schema manifest", () => {
     expect(WRITE_OFF_APPLICATION_UPGRADE_SQL).toContain("source_document_type is distinct from 'write_off'");
     expect(WRITE_OFF_APPLICATION_UPGRADE_SQL).toContain("target_document_type is distinct from 'invoice'");
     expect(renderPostgresSchemaSql()).toContain(
-      "application_type in ('customer_payment_to_invoice', 'bill_payment_to_bill', 'credit_to_invoice', 'write_off_to_invoice')"
+      "application_type in ('customer_payment_to_invoice', 'bill_payment_to_bill', 'credit_to_invoice', 'vendor_credit_to_bill', 'write_off_to_invoice')"
     );
   });
 });

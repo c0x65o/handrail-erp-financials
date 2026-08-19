@@ -999,7 +999,8 @@ function normalizeProviderReportResponse(
       ...(response.latestSourceUpdatedAt === undefined ? {} : { latestSourceUpdatedAt: response.latestSourceUpdatedAt }),
       ...(response.generatedAt === undefined ? {} : { generatedAt: response.generatedAt }),
       ...(response.sourceUpdatedAt === undefined ? {} : { sourceUpdatedAt: response.sourceUpdatedAt }),
-      totals: response.totals
+      totals: response.totals,
+      ...(response.accountTotals === undefined ? {} : { accountTotals: response.accountTotals })
     });
   }
 

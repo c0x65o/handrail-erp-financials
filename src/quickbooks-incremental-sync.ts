@@ -21,6 +21,8 @@ import type {
   NormalizedQuickBooksResourceSet,
   NormalizedQuickBooksSyncResourceSet
 } from "./normalized-accounting-contracts.js";
+import type { PostgresStorageAdapter } from "./postgres-storage.js";
+import type { QuickBooksSubledgerImportResult } from "./quickbooks-subledger-import.js";
 
 export type QuickBooksIncrementalSyncClient = Pick<HandrailQuickBooksFullSyncServiceHandler, "incrementalSync">;
 
@@ -61,6 +63,7 @@ export type QuickBooksIncrementalSyncRunResult = QuickBooksIncrementalSyncMapRes
   readonly response: NormalizedQuickBooksIncrementalSyncResponseEnvelope;
   readonly persistence: CanonicalFactPersistenceResult;
   readonly evidence: CoreErpPersistenceEvidence;
+  readonly subledgerPersistence?: QuickBooksSubledgerImportResult;
 };
 
 export type QuickBooksIncrementalSyncWorker = {
@@ -80,11 +83,18 @@ export function createQuickBooksIncrementalSyncWorker(
         ...(resumeFromCheckpointId === undefined ? {} : { resumeFromCheckpointId })
       });
       const persistence = await persistQuickBooksIncrementalSyncFacts(options.persistence, mapped.facts);
+      const subledgerPersistence = await persistQuickBooksIncrementalSubledgerFacts(
+        options.persistence,
+        mapped.facts,
+        mapped.adapterInput,
+        options.companyId
+      );
 
       return {
         response,
         ...mapped,
         persistence,
+        ...(subledgerPersistence === undefined ? {} : { subledgerPersistence }),
         evidence: buildCoreErpPersistenceEvidence({
           facts: mapped.facts,
           persistence,
@@ -95,6 +105,22 @@ export function createQuickBooksIncrementalSyncWorker(
       };
     }
   };
+}
+
+async function persistQuickBooksIncrementalSubledgerFacts(
+  persistence: QuickBooksIncrementalSyncPersistence,
+  facts: CanonicalAccountingFactSet,
+  adapterInput: HandrailQuickBooksSdkResourcesAdapterInput,
+  companyId: string
+): Promise<QuickBooksSubledgerImportResult | undefined> {
+  const candidate = persistence as Partial<Pick<PostgresStorageAdapter, "persistQuickBooksSubledgerResources">>;
+  if (typeof candidate.persistQuickBooksSubledgerResources !== "function") return undefined;
+  return candidate.persistQuickBooksSubledgerResources({
+    companyId,
+    importedAt: adapterInput.context.importedAt,
+    facts,
+    resources: adapterInput.resources
+  });
 }
 
 export function mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts(
@@ -334,7 +360,7 @@ function allIncrementalResourceEnvelopes(
     ...(resources.companyInfo === undefined ? [] : [resources.companyInfo]),
     ...(resources.accounts ?? []),
     ...(resources.journalEntries ?? []),
-    ...(resources.ledgerTransactions ?? []),
+    ...(resources.operationalDocuments ?? resources.ledgerTransactions ?? []),
     ...(resources.ledgerPostings ?? []),
     ...(resources.parties ?? []),
     ...(resources.customers ?? []),

@@ -684,6 +684,9 @@ describe("Future ERP canonical reporting read model", () => {
       reportName: "profit_and_loss"
     });
     expect(reportParity(snapshot, "profit_and_loss")?.toleranceAmount).toBe("0.00");
+    expect(reportParity(snapshot, "trial_balance")?.providerReport?.accountTotals).toEqual(
+      quickBooksFixtures.providerReports.trialBalance.response.accountTotals
+    );
     expect(
       reportParity(snapshot, "profit_and_loss")?.deltas?.map((delta) => ({
         totalKey: delta.totalKey,

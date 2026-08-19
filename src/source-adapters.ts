@@ -245,6 +245,8 @@ export type HandrailQuickBooksSdkResourceSet = {
   readonly accounts: readonly HandrailQuickBooksAccountResource[];
   readonly journalEntries: readonly HandrailQuickBooksJournalEntryResource[];
   readonly ledgerTransactions?: readonly HandrailQuickBooksLedgerTransactionResource[];
+  /** Provider documents retained for subledger semantics; never used as a second ledger feed. */
+  readonly operationalDocuments?: readonly HandrailQuickBooksLedgerTransactionResource[];
   readonly ledgerPostings?: readonly NormalizedQuickBooksLedgerPostingResource[];
   readonly parties?: readonly NormalizedQuickBooksPartyResource[];
   readonly customers?: readonly NormalizedQuickBooksCustomerResource[];

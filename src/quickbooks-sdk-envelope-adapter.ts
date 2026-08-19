@@ -346,6 +346,12 @@ function mapSdkResources(
     sourceObjectCounts: normalizeResourceCounts(response.normalizedResourceCounts),
     ...(issueSummary === undefined ? {} : { warningSummary: issueSummary as JsonValue })
   };
+  const ledgerTransactions = ledgerTransactionResources(
+    context,
+    input.ledger_entries ?? [],
+    input.transactions ?? [],
+    input.transaction_lines ?? []
+  );
 
   return {
     identity: context.sourceIdentity,
@@ -353,11 +359,140 @@ function mapSdkResources(
     checkpoint,
     companyInfo: companyInfoResource(context, latestSourceUpdatedAt),
     accounts: (input.accounts ?? []).map((value, index) => accountResource(context, value, index)),
-    ledgerTransactions: ledgerTransactionResources(context, input.ledger_entries ?? []),
+    ledgerTransactions,
+    operationalDocuments: operationalDocumentResources(
+      context,
+      input.transactions ?? [],
+      input.transaction_lines ?? [],
+      ledgerTransactions
+    ),
     parties: (input.parties ?? []).map((value, index) => partyResource(context, value, index)),
     items: (input.items ?? []).map((value, index) => itemResource(context, value, index)),
     classes: (input.classes ?? []).map((value, index) => classResource(context, value, index)),
     departments: (input.locations ?? []).map((value, index) => departmentResource(context, value, index))
+  };
+}
+
+function operationalDocumentResources(
+  context: AdapterContext,
+  transactionValues: readonly unknown[],
+  transactionLineValues: readonly unknown[],
+  ledgerTransactions: readonly NormalizedQuickBooksLedgerTransactionResource[]
+): readonly NormalizedQuickBooksLedgerTransactionResource[] {
+  const ledgerByKey = new Map(ledgerTransactions.map((resource) => [
+    `${resource.resource.sourceTransactionType}:${resource.resource.sourceTransactionId}`,
+    resource
+  ]));
+  const linesByKey = new Map<string, Record<string, unknown>[]>();
+  transactionLineValues.forEach((value, index) => {
+    const line = record(value, `normalizedResources.transaction_lines[${String(index)}]`);
+    const metadata = providerMetadata(line, `normalizedResources.transaction_lines[${String(index)}]`);
+    const transactionId = requiredString(line, "transactionId", `QuickBooks transaction line ${metadata.sourceObjectId}`);
+    const key = `${metadata.sourceObject}:${transactionId}`;
+    linesByKey.set(key, [...(linesByKey.get(key) ?? []), line]);
+  });
+
+  return transactionValues.map((value, index) => {
+    const header = record(value, `normalizedResources.transactions[${String(index)}]`);
+    const metadata = providerMetadata(header, `normalizedResources.transactions[${String(index)}]`);
+    const key = `${metadata.sourceObject}:${metadata.sourceObjectId}`;
+    const ledger = ledgerByKey.get(key);
+    if (ledger !== undefined) return ledger;
+
+    const sourcePayloadRef = safeSourcePayloadRef(
+      context,
+      metadata.sourceObject,
+      metadata.sourceObjectId,
+      metadata.sourceUpdatedAt,
+      metadata.sourcePayloadRef
+    );
+    const transactionDate = optionalString(header, "transactionDate") ?? metadata.importedAt.slice(0, 10);
+    const partyRef = normalizedPartyReference(optionalReference(header.party), quickBooksPartyType(metadata.sourceObject));
+    const currencyCode = optionalReference(header.currency)?.value ?? context.currencyCode;
+    const transactionNumber = optionalString(header, "documentNumber");
+    const dueDate = optionalString(header, "dueDate");
+    const totalAmount = optionalNumber(header, "amount");
+    const openAmount = optionalNumber(header, "balance");
+    const unappliedAmount = optionalNumber(header, "unappliedAmount");
+    const emailStatus = optionalString(header, "emailStatus");
+    const printStatus = optionalString(header, "printStatus");
+    const memo = optionalString(header, "privateNote");
+    const resource: NormalizedQuickBooksLedgerTransaction = {
+      sourceTransactionId: metadata.sourceObjectId,
+      sourceTransactionType: metadata.sourceObject,
+      transactionDate,
+      ...(transactionNumber === undefined ? {} : { transactionNumber }),
+      ...(dueDate === undefined ? {} : { dueDate }),
+      ...(totalAmount === undefined ? {} : { totalAmount: decimalFromNumber(totalAmount) }),
+      ...(openAmount === undefined ? {} : { openAmount: decimalFromNumber(openAmount) }),
+      ...(unappliedAmount === undefined ? {} : { unappliedAmount: decimalFromNumber(unappliedAmount) }),
+      ...(emailStatus === undefined ? {} : { emailStatus }),
+      ...(printStatus === undefined ? {} : { printStatus }),
+      ...(memo === undefined ? {} : { memo }),
+      ...(metadata.sourceUpdatedAt === undefined ? {} : { sourceUpdatedAt: metadata.sourceUpdatedAt }),
+      ...(partyRef === undefined ? {} : { partyRef }),
+      currencyCode,
+      lines: (linesByKey.get(key) ?? [])
+        .sort((left, right) => (optionalNumber(left, "lineOrder") ?? 0) - (optionalNumber(right, "lineOrder") ?? 0))
+        .map((line, lineIndex) => operationalDocumentLine(context, line, metadata, lineIndex)),
+      sourcePayloadRef
+    };
+    return resourceEnvelope(
+      context,
+      "LedgerTransaction",
+      metadata.sourceObjectId,
+      resource,
+      metadata.sourceUpdatedAt,
+      sourcePayloadRef,
+      resourceAction(header, context)
+    );
+  });
+}
+
+function operationalDocumentLine(
+  context: AdapterContext,
+  input: Record<string, unknown>,
+  transactionMetadata: ProviderMetadata,
+  lineIndex: number
+): NormalizedQuickBooksLedgerLine {
+  const metadata = providerMetadata(input, `QuickBooks transaction line ${String(lineIndex + 1)}`);
+  const lineId = requiredString(input, "lineId", `QuickBooks transaction line ${metadata.sourceObjectId}`);
+  const amount = optionalNumber(input, "amount");
+  const quantity = optionalNumber(input, "quantity");
+  const unitAmount = optionalNumber(input, "unitAmount");
+  const accountRef = normalizedReference(optionalReference(input.account));
+  const partyRef = normalizedPartyReference(optionalReference(input.party), quickBooksPartyType(metadata.sourceObject));
+  const itemRef = normalizedReference(optionalReference(input.item));
+  const taxCode = optionalReference(input.taxCode)?.value;
+  const description = optionalString(input, "description");
+  const linkedTransactions = normalizedQuickBooksLinkedTransactions(input.linkedTransactions);
+  const dimensionRefs = [
+    normalizedDimensionReference(optionalReference(input.classRef), "class"),
+    normalizedDimensionReference(optionalReference(input.department), "department")
+  ].filter((value) => value !== undefined);
+  const sourcePayloadRef = safeSourcePayloadRef(
+    context,
+    `${metadata.sourceObject}Line`,
+    `${transactionMetadata.sourceObjectId}:${lineId}`,
+    metadata.sourceUpdatedAt,
+    metadata.sourcePayloadRef
+  );
+  return {
+    sourceLineId: lineId,
+    lineNumber: optionalNumber(input, "lineOrder") ?? lineIndex + 1,
+    ...(description === undefined ? {} : { description }),
+    amount: decimalFromNumber(amount ?? 0),
+    ...(amount === undefined ? {} : { sourceAmount: decimalFromNumber(Math.abs(amount)) }),
+    ...(quantity === undefined ? {} : { sourceQuantity: decimalFromNumber(quantity) }),
+    ...(unitAmount === undefined ? {} : { sourceUnitAmount: decimalFromNumber(unitAmount) }),
+    ...(taxCode === undefined ? {} : { taxCode }),
+    ...(accountRef === undefined ? {} : { accountRef }),
+    ...(partyRef === undefined ? {} : { partyRef }),
+    ...(itemRef === undefined ? {} : { itemRef }),
+    dimensionRefs,
+    ...(linkedTransactions.length === 0 ? {} : { linkedTransactions }),
+    postings: [],
+    sourcePayloadRef
   };
 }
 
@@ -628,8 +763,24 @@ function dimensionResource<ResourceType extends "Class" | "Department", Kind ext
 
 function ledgerTransactionResources(
   context: AdapterContext,
-  values: readonly unknown[]
+  values: readonly unknown[],
+  transactionValues: readonly unknown[],
+  transactionLineValues: readonly unknown[]
 ): readonly NormalizedQuickBooksLedgerTransactionResource[] {
+  const transactionHeaders = new Map<string, Record<string, unknown>>();
+  transactionValues.forEach((value, index) => {
+    const input = record(value, `normalizedResources.transactions[${String(index)}]`);
+    const metadata = providerMetadata(input, `normalizedResources.transactions[${String(index)}]`);
+    transactionHeaders.set(`${metadata.sourceObject}:${metadata.sourceObjectId}`, input);
+  });
+  const transactionLines = new Map<string, Record<string, unknown>>();
+  transactionLineValues.forEach((value, index) => {
+    const input = record(value, `normalizedResources.transaction_lines[${String(index)}]`);
+    const metadata = providerMetadata(input, `normalizedResources.transaction_lines[${String(index)}]`);
+    const transactionId = requiredString(input, "transactionId", `QuickBooks transaction line ${metadata.sourceObjectId}`);
+    const lineId = requiredString(input, "lineId", `QuickBooks transaction line ${metadata.sourceObjectId}`);
+    transactionLines.set(`${metadata.sourceObject}:${transactionId}:${lineId}`, input);
+  });
   const grouped = new Map<string, Array<{ readonly input: Record<string, unknown>; readonly metadata: ProviderMetadata }>>();
   values.forEach((value, index) => {
     const input = record(value, `normalizedResources.ledger_entries[${String(index)}]`);
@@ -645,12 +796,16 @@ function ledgerTransactionResources(
     grouped.set(key, [...(grouped.get(key) ?? []), { input, metadata }]);
   });
 
-  return [...grouped.values()].map((entries) => ledgerTransactionResource(context, entries));
+  return [...grouped.entries()].map(([key, entries]) =>
+    ledgerTransactionResource(context, entries, transactionHeaders.get(key), transactionLines)
+  );
 }
 
 function ledgerTransactionResource(
   context: AdapterContext,
-  entries: readonly { readonly input: Record<string, unknown>; readonly metadata: ProviderMetadata }[]
+  entries: readonly { readonly input: Record<string, unknown>; readonly metadata: ProviderMetadata }[],
+  header: Record<string, unknown> | undefined,
+  transactionLines: ReadonlyMap<string, Record<string, unknown>>
 ): NormalizedQuickBooksLedgerTransactionResource {
   const first = entries[0];
   if (first === undefined) {
@@ -658,9 +813,18 @@ function ledgerTransactionResource(
   }
   const transactionId = requiredString(first.input, "transactionId", `QuickBooks ledger entry ${first.metadata.sourceObjectId}`);
   const transactionDate = optionalString(first.input, "transactionDate") ?? first.metadata.importedAt.slice(0, 10);
-  const transactionNumber = optionalString(first.input, "documentNumber");
+  const transactionNumber = optionalString(header, "documentNumber") ?? optionalString(first.input, "documentNumber");
   const postedAt = optionalString(first.input, "postedAt");
-  const partyRef = normalizedPartyReference(optionalReference(first.input.party), "other");
+  const partyRef = normalizedPartyReference(
+    optionalReference(header?.party ?? first.input.party),
+    quickBooksPartyType(first.metadata.sourceObject)
+  );
+  const dueDate = optionalString(header, "dueDate");
+  const totalAmount = optionalNumber(header, "amount");
+  const openAmount = optionalNumber(header, "balance");
+  const unappliedAmount = optionalNumber(header, "unappliedAmount");
+  const emailStatus = optionalString(header, "emailStatus");
+  const printStatus = optionalString(header, "printStatus");
   const groupedLines = new Map<string, typeof entries[number][] >();
   for (const entry of entries) {
     const lineId = requiredString(entry.input, "lineId", `QuickBooks ledger entry ${entry.metadata.sourceObjectId}`);
@@ -678,11 +842,19 @@ function ledgerTransactionResource(
     sourceTransactionType: first.metadata.sourceObject,
     transactionDate,
     ...(transactionNumber === undefined ? {} : { transactionNumber }),
+    ...(dueDate === undefined ? {} : { dueDate }),
+    ...(totalAmount === undefined ? {} : { totalAmount: decimalFromNumber(totalAmount) }),
+    ...(openAmount === undefined ? {} : { openAmount: decimalFromNumber(openAmount) }),
+    ...(unappliedAmount === undefined ? {} : { unappliedAmount: decimalFromNumber(unappliedAmount) }),
+    ...(emailStatus === undefined ? {} : { emailStatus }),
+    ...(printStatus === undefined ? {} : { printStatus }),
     ...(postedAt === undefined ? {} : { postedAt }),
     ...(first.metadata.sourceUpdatedAt === undefined ? {} : { sourceUpdatedAt: first.metadata.sourceUpdatedAt }),
     ...(partyRef === undefined ? {} : { partyRef }),
     currencyCode: optionalReference(first.input.currency)?.value ?? context.currencyCode,
-    lines: [...groupedLines.values()].map((lineEntries, index) => ledgerLine(context, lineEntries, index)),
+    lines: [...groupedLines.values()].map((lineEntries, index) =>
+      ledgerLine(context, lineEntries, index, transactionLines)
+    ),
     sourcePayloadRef
   };
 
@@ -700,7 +872,8 @@ function ledgerTransactionResource(
 function ledgerLine(
   context: AdapterContext,
   entries: readonly { readonly input: Record<string, unknown>; readonly metadata: ProviderMetadata }[],
-  lineIndex: number
+  lineIndex: number,
+  transactionLines: ReadonlyMap<string, Record<string, unknown>>
 ): NormalizedQuickBooksLedgerLine {
   const first = entries[0];
   if (first === undefined) {
@@ -708,6 +881,12 @@ function ledgerLine(
   }
   const lineId = requiredString(first.input, "lineId", `QuickBooks ledger entry ${first.metadata.sourceObjectId}`);
   const transactionId = requiredString(first.input, "transactionId", `QuickBooks ledger entry ${first.metadata.sourceObjectId}`);
+  const normalizedLine = transactionLines.get(`${first.metadata.sourceObject}:${transactionId}:${lineId}`);
+  const linkedTransactions = normalizedQuickBooksLinkedTransactions(normalizedLine?.linkedTransactions);
+  const sourceAmount = optionalNumber(normalizedLine, "amount");
+  const sourceQuantity = optionalNumber(normalizedLine, "quantity");
+  const sourceUnitAmount = optionalNumber(normalizedLine, "unitAmount");
+  const taxCode = optionalReference(normalizedLine?.taxCode)?.value;
   const postings = entries.map((entry, index) => ledgerPosting(context, entry.input, entry.metadata, index));
   const amount = postings.reduce(
     (sum, posting) => sum + Number(posting.debitAmount ?? "0") - Number(posting.creditAmount ?? "0"),
@@ -727,10 +906,15 @@ function ledgerLine(
     lineNumber: lineIndex + 1,
     ...(description === undefined ? {} : { description }),
     amount: decimalFromNumber(amount),
+    ...(sourceAmount === undefined ? {} : { sourceAmount: decimalFromNumber(Math.abs(sourceAmount)) }),
+    ...(sourceQuantity === undefined ? {} : { sourceQuantity: decimalFromNumber(sourceQuantity) }),
+    ...(sourceUnitAmount === undefined ? {} : { sourceUnitAmount: decimalFromNumber(sourceUnitAmount) }),
+    ...(taxCode === undefined ? {} : { taxCode }),
     ...(firstPosting === undefined ? {} : { accountRef: firstPosting.accountRef }),
     ...(firstPosting?.partyRef === undefined ? {} : { partyRef: firstPosting.partyRef }),
     ...(firstPosting?.itemRef === undefined ? {} : { itemRef: firstPosting.itemRef }),
     dimensionRefs: firstPosting?.dimensionRefs ?? [],
+    ...(linkedTransactions.length === 0 ? {} : { linkedTransactions }),
     postings,
     sourcePayloadRef
   };
@@ -1050,6 +1234,16 @@ function normalizedAccountClassification(
     : undefined;
 }
 
+function quickBooksPartyType(sourceObject: string): "customer" | "vendor" | "other" {
+  if (["Invoice", "Payment", "CreditMemo", "RefundReceipt", "SalesReceipt"].includes(sourceObject)) {
+    return "customer";
+  }
+  if (["Bill", "BillPayment", "Purchase", "VendorCredit"].includes(sourceObject)) {
+    return "vendor";
+  }
+  return "other";
+}
+
 function firstNormalizedResource(resources: HandrailQuickBooksSdkNormalizedResourceMap): unknown {
   return Object.values(resources).find((values) => values.length > 0)?.[0];
 }
@@ -1107,6 +1301,27 @@ function optionalString(input: Record<string, unknown> | undefined, key: string)
 function optionalBoolean(input: Record<string, unknown>, key: string): boolean | undefined {
   const value = input[key];
   return typeof value === "boolean" ? value : undefined;
+}
+
+function optionalNumber(input: Record<string, unknown> | undefined, key: string): number | undefined {
+  const value = input?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function normalizedQuickBooksLinkedTransactions(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((candidate) => {
+    const linked = optionalRecord(candidate);
+    const sourceTransactionId = optionalString(linked, "transactionId");
+    if (sourceTransactionId === undefined) return [];
+    const sourceTransactionType = optionalString(linked, "transactionType");
+    const sourceLineId = optionalString(linked, "transactionLineId");
+    return [{
+      sourceTransactionId,
+      ...(sourceTransactionType === undefined ? {} : { sourceTransactionType }),
+      ...(sourceLineId === undefined ? {} : { sourceLineId })
+    }];
+  });
 }
 
 function requiredFiniteNumber(input: Record<string, unknown>, key: string, label: string): number {

@@ -38,6 +38,11 @@ import {
   createCompanySourceBinding,
   createCompactDrilldownRef
 } from "./canonical-model.js";
+import { persistQuickBooksSubledgerResources } from "./quickbooks-subledger-import.js";
+import type {
+  PersistQuickBooksSubledgerResourcesInput,
+  QuickBooksSubledgerImportResult
+} from "./quickbooks-subledger-import.js";
 import {
   assertPaymentApplication,
   assertPostingRule,
@@ -281,6 +286,9 @@ export type PostgresStorageAdapter = StandardReportPresentationReadModelStorage 
   upsertTransactions(transactions: readonly AccountingTransaction[]): Promise<number>;
   upsertTransactionLines(lines: readonly TransactionLine[]): Promise<number>;
   upsertLedgerPostings(postings: readonly LedgerPosting[]): Promise<number>;
+  persistQuickBooksSubledgerResources(
+    input: PersistQuickBooksSubledgerResourcesInput
+  ): Promise<QuickBooksSubledgerImportResult>;
   upsertPostingRules(rules: readonly PostingRule[]): Promise<number>;
   upsertTransactionMatchCandidates(candidates: readonly TransactionMatchCandidate[]): Promise<number>;
   recordTransactionMatchDecisions(decisions: readonly TransactionMatchDecision[]): Promise<number>;
@@ -497,6 +505,9 @@ export function createPostgresStorageAdapter(
         "accounting_basis",
         "source_posting_id"
       ]);
+    },
+    persistQuickBooksSubledgerResources(input) {
+      return persistQuickBooksSubledgerResources({ client, ...input });
     },
     async upsertPostingRules(rules) {
       rules.forEach(assertPostingRule);
@@ -1051,6 +1062,7 @@ async function deleteLedgerFactsOutsideImportBatch(
     throw new Error("deleteLedgerFactsOutsideImportBatch requires tenantId, sourceId, and importBatchId");
   }
 
+  await client.query(`select set_config('erp_financials.quickbooks_projection_refresh', 'on', true)`);
   const postingsResult = await client.query(
     `delete from ${qualifiedTable(manifest, "ledger_postings")}
 where "tenant_id" = $1 and "source_id" = $2 and "import_batch_id" <> $3`,
@@ -1067,6 +1079,12 @@ where transactions."transaction_id" = lines."transaction_id"
     select 1 from ${qualifiedTable(manifest, "ledger_postings")} postings
     where postings."tenant_id" = transactions."tenant_id"
       and postings."transaction_id" = transactions."transaction_id"
+  )
+  and not exists (
+    select 1 from ${qualifiedTable(manifest, "subledger_documents")} document
+    where document."tenant_id" = transactions."tenant_id"
+      and document."source_id" = transactions."source_id"
+      and document."transaction_id" = transactions."transaction_id"
   )`,
     [input.tenantId, input.sourceId]
   );
@@ -1078,9 +1096,16 @@ where transactions."tenant_id" = $1
     select 1 from ${qualifiedTable(manifest, "ledger_postings")} postings
     where postings."tenant_id" = transactions."tenant_id"
       and postings."transaction_id" = transactions."transaction_id"
+  )
+  and not exists (
+    select 1 from ${qualifiedTable(manifest, "subledger_documents")} document
+    where document."tenant_id" = transactions."tenant_id"
+      and document."source_id" = transactions."source_id"
+      and document."transaction_id" = transactions."transaction_id"
   )`,
     [input.tenantId, input.sourceId]
   );
+  await client.query(`select set_config('erp_financials.quickbooks_projection_refresh', 'off', true)`);
 
   return {
     postings: postingsResult.rowCount ?? 0,

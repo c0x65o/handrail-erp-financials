@@ -189,7 +189,10 @@ export type SubledgerDocumentType =
   | "bill_payment"
   | "write_off"
   | "deposit"
-  | "transfer";
+  | "transfer"
+  | "sales_receipt"
+  | "purchase"
+  | "vendor_credit";
 
 export type SubledgerAmountLine = ErpFinancialsAccountReference & CommercialDocumentLineInput;
 
@@ -483,6 +486,7 @@ export type SubledgerApplicationType =
   | "customer_payment_to_invoice"
   | "bill_payment_to_bill"
   | "credit_to_invoice"
+  | "vendor_credit_to_bill"
   | "write_off_to_invoice";
 
 export type ApplySubledgerPaymentInput = {
@@ -2533,6 +2537,7 @@ function assertSubledgerApplicationDocuments(
     customer_payment_to_invoice: ["customer_payment", "invoice"],
     bill_payment_to_bill: ["bill_payment", "vendor_bill"],
     credit_to_invoice: ["credit_memo", "invoice"],
+    vendor_credit_to_bill: ["vendor_credit", "vendor_bill"],
     write_off_to_invoice: ["write_off", "invoice"]
   };
   const types = expectedTypes[input.applicationType];
@@ -2865,6 +2870,7 @@ function assertSubledgerApplicationType(value: SubledgerApplicationType): void {
     "customer_payment_to_invoice",
     "bill_payment_to_bill",
     "credit_to_invoice",
+    "vendor_credit_to_bill",
     "write_off_to_invoice"
   ].includes(value)) {
     throw new ErpFinancialsValidationError(`Unsupported subledger application type ${value}`);

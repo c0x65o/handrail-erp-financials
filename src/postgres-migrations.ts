@@ -143,6 +143,10 @@ const migrationFiles = {
   billPaymentDisbursementsV18: new URL(
     "../migrations/future-erp/20260816010000_add_bill_payment_disbursements.sql",
     import.meta.url
+  ),
+  importedOperationalDocumentsV19: new URL(
+    "../migrations/future-erp/20260819010000_add_imported_operational_document_types.sql",
+    import.meta.url
   )
 } as const;
 
@@ -255,6 +259,13 @@ export const POSTGRES_MIGRATIONS: readonly PostgresMigrationDefinition[] = [
     17,
     18,
     migrationFiles.billPaymentDisbursementsV18
+  ),
+  migration(
+    "20260819010000_add_imported_operational_document_types",
+    "Add imported operational document and vendor-credit application types",
+    18,
+    19,
+    migrationFiles.importedOperationalDocumentsV19
   )
 ] as const;
 

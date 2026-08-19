@@ -25,6 +25,67 @@ export type Page<Result> = {
   readonly nextCursor?: string;
 };
 
+/** Provider-neutral party identity exposed to operational applications. */
+export type PartyListItem = {
+  readonly partyId: string;
+  readonly sourceId: string;
+  readonly sourcePartyId: string;
+  readonly partyType: "customer" | "vendor" | "employee" | "other";
+  readonly displayName: string;
+  readonly active: boolean;
+};
+
+export type OperationalDocumentType =
+  | "invoice"
+  | "customer_payment"
+  | "credit_memo"
+  | "refund"
+  | "vendor_bill"
+  | "bill_payment"
+  | "write_off"
+  | "deposit"
+  | "transfer"
+  | "sales_receipt"
+  | "purchase"
+  | "vendor_credit";
+
+export type OperationalDocumentStatus =
+  | "draft"
+  | "open"
+  | "partially_applied"
+  | "settled"
+  | "voided"
+  | "replaced";
+
+/** One provider-neutral operational register spanning native and imported subledgers. */
+export type OperationalDocumentListItem = {
+  readonly documentId: string;
+  readonly sourceId: string;
+  readonly sourceSystem: string;
+  readonly providerEnvironment: string;
+  readonly documentType: OperationalDocumentType;
+  readonly transactionId: string;
+  readonly sourceTransactionId?: string;
+  readonly sourceTransactionType?: string;
+  readonly partyId?: string;
+  readonly partyName?: string;
+  readonly documentNumber?: string;
+  readonly documentDate: IsoDate;
+  readonly dueDate?: IsoDate;
+  readonly currencyCode: IsoCurrencyCode;
+  readonly originalAmount: DecimalString;
+  readonly openAmount: DecimalString;
+  readonly status: OperationalDocumentStatus;
+  readonly version: number;
+};
+
+export type OperationalDocumentDetail = OperationalDocumentListItem & {
+  readonly memo?: string;
+  readonly lines: readonly CommercialDocumentLineReadModel[];
+  readonly applications: readonly PaymentApplicationListItem[];
+  readonly metadata?: JsonValue;
+};
+
 export type InvoiceListStatus = "draft" | "open" | "sent" | "overdue" | "partial" | "paid" | "voided";
 
 export type InvoiceListItem = {
@@ -201,7 +262,7 @@ export type PaymentApplicationMatchProvenance = {
 export type PaymentApplicationListItem = {
   readonly applicationId: string;
   readonly sourceId: string;
-  readonly applicationType: "customer_payment_to_invoice" | "bill_payment_to_bill" | "credit_to_invoice";
+  readonly applicationType: "customer_payment_to_invoice" | "bill_payment_to_bill" | "credit_to_invoice" | "vendor_credit_to_bill";
   readonly status: "applied" | "unapplied" | "voided";
   readonly version: number;
   readonly applicationDate: IsoDate;
@@ -731,6 +792,19 @@ export type PostingLockReadModel = {
 };
 
 export type FinancialReadModels = {
+  listParties(input?: PageRequest & {
+    readonly partyType?: PartyListItem["partyType"];
+    readonly includeInactive?: boolean;
+  }): Promise<Page<PartyListItem>>;
+  listOperationalDocuments(input?: PageRequest & {
+    readonly documentTypes?: readonly OperationalDocumentType[];
+    readonly status?: OperationalDocumentStatus;
+    readonly sourceId?: string;
+    readonly partyId?: string;
+    readonly periodStart?: IsoDate;
+    readonly periodEnd?: IsoDate;
+  }): Promise<Page<OperationalDocumentListItem>>;
+  getOperationalDocument(documentId: string): Promise<OperationalDocumentDetail>;
   listJournalEntries(input?: PageRequest & {
     readonly sourceId?: string;
     readonly status?: JournalEntryStatus;
@@ -822,6 +896,9 @@ export function createFinancialReadModels(input: Scope): FinancialReadModels {
   assertNonEmpty(input.companyId, "companyId");
   assertNonEmpty(input.bookId, "bookId");
   return {
+    listParties: (request = {}) => listParties(input, request),
+    listOperationalDocuments: (request = {}) => listOperationalDocuments(input, request),
+    getOperationalDocument: (documentId) => getOperationalDocument(input, documentId),
     listJournalEntries: (request = {}) => listJournalEntries(input, request),
     getJournalEntry: (journalEntryId) => getJournalEntry(input, journalEntryId),
     listFiscalPeriods: (request) => listFiscalPeriods(input, request),
@@ -855,6 +932,147 @@ export function createFinancialReadModels(input: Scope): FinancialReadModels {
     listBankReconciliation: (request = {}) => listBankReconciliation(input, request),
     getBankReconciliationSummary: () => getBankReconciliationSummary(input)
   };
+}
+
+async function listParties(
+  scope: Scope,
+  input: PageRequest & {
+    readonly partyType?: PartyListItem["partyType"];
+    readonly includeInactive?: boolean;
+  }
+): Promise<Page<PartyListItem>> {
+  const page = pageInput(input, `parties:${input.partyType ?? "all"}:${input.includeInactive === true ? "all" : "active"}`, scope.bookId);
+  return scope.database.transaction(async (client) => {
+    await resolveBook(client, scope);
+    const result = await client.query(
+      `select party."party_id", party."source_id", party."source_party_id", party."party_type",
+  party."display_name", party."active"
+from "erp_financials"."parties" party
+join "erp_financials"."reporting_book_sources" source
+  on source."tenant_id" = party."tenant_id" and source."company_id" = $2
+ and source."book_id" = $3 and source."source_id" = party."source_id"
+where party."tenant_id" = $1
+  and ($4::text is null or party."party_type" = $4)
+  and ($5::boolean or party."active")
+  and ($6::text is null or party."party_id" > $6)
+order by party."party_id"
+limit $7`,
+      [scope.tenantId, scope.companyId, scope.bookId, input.partyType, input.includeInactive === true, page.id, page.limit + 1]
+    );
+    return toPage(result.rows.map(partyFromRow), page.limit,
+      `parties:${input.partyType ?? "all"}:${input.includeInactive === true ? "all" : "active"}`,
+      scope.bookId,
+      (item) => ({ date: "0001-01-01", id: item.partyId }));
+  });
+}
+
+async function listOperationalDocuments(
+  scope: Scope,
+  input: PageRequest & {
+    readonly documentTypes?: readonly OperationalDocumentType[];
+    readonly status?: OperationalDocumentStatus;
+    readonly sourceId?: string;
+    readonly partyId?: string;
+    readonly periodStart?: IsoDate;
+    readonly periodEnd?: IsoDate;
+    readonly documentId?: string;
+  }
+): Promise<Page<OperationalDocumentListItem>> {
+  const kinds = input.documentTypes === undefined ? "all" : [...input.documentTypes].sort().join(",");
+  const pageKind = `operational-documents:${kinds}:${input.status ?? "all"}:${input.sourceId ?? "all"}:${input.partyId ?? "all"}:${input.periodStart ?? "all"}:${input.periodEnd ?? "all"}`;
+  const page = pageInput(input, pageKind, scope.bookId);
+  return scope.database.transaction(async (client) => {
+    const book = await resolveBook(client, scope);
+    const result = await client.query(
+      `select document."subledger_document_id" as "document_id", document."source_id",
+  accounting_source."source_system", accounting_source."provider_environment", document."document_type",
+  document."transaction_id", transaction."source_transaction_id", transaction."source_transaction_type",
+  document."party_id", party."display_name" as "party_name", document."document_number",
+  document."document_date", document."due_date", document."currency_code", document."original_amount",
+  document."open_amount", document."status", document."version"
+from "erp_financials"."subledger_documents" document
+join "erp_financials"."reporting_book_sources" book_source
+  on book_source."tenant_id" = document."tenant_id" and book_source."company_id" = document."company_id"
+ and book_source."book_id" = $3 and book_source."source_id" = document."source_id"
+ and (book_source."effective_from" is null or book_source."effective_from" <= document."document_date")
+ and (book_source."effective_through" is null or book_source."effective_through" >= document."document_date")
+join "erp_financials"."accounting_sources" accounting_source
+  on accounting_source."tenant_id" = document."tenant_id" and accounting_source."source_id" = document."source_id"
+join "erp_financials"."transactions" transaction
+  on transaction."tenant_id" = document."tenant_id" and transaction."source_id" = document."source_id"
+ and transaction."transaction_id" = document."transaction_id"
+left join "erp_financials"."parties" party
+  on party."tenant_id" = document."tenant_id" and party."source_id" = document."source_id"
+ and party."party_id" = document."party_id"
+where document."tenant_id" = $1 and document."company_id" = $2 and document."currency_code" = $4
+  and ($5::text[] is null or document."document_type" = any($5::text[]))
+  and ($6::text is null or document."status" = $6)
+  and ($7::text is null or document."source_id" = $7)
+  and ($8::text is null or document."party_id" = $8)
+  and ($9::date is null or document."document_date" >= $9)
+  and ($10::date is null or document."document_date" <= $10)
+  and ($11::text is null or document."subledger_document_id" = $11)
+  and ($12::date is null or (document."document_date", document."subledger_document_id") < ($12::date, $13::text))
+order by document."document_date" desc, document."subledger_document_id" desc
+limit $14`,
+      [scope.tenantId, scope.companyId, scope.bookId, book.currencyCode,
+        input.documentTypes, input.status, input.sourceId, input.partyId, input.periodStart, input.periodEnd,
+        input.documentId, page.date, page.id, page.limit + 1]
+    );
+    return toPage(result.rows.map(operationalDocumentFromRow), page.limit, pageKind, scope.bookId, (item) => ({
+      date: item.documentDate,
+      id: item.documentId
+    }));
+  });
+}
+
+async function getOperationalDocument(scope: Scope, documentId: string): Promise<OperationalDocumentDetail> {
+  assertNonEmpty(documentId, "documentId");
+  const page = await listOperationalDocuments(scope, { documentId, limit: 1 });
+  const document = page.items[0];
+  if (document === undefined) {
+    throw new ErpFinancialsError(
+      "missing_document",
+      `Operational document ${documentId} does not exist in reporting book ${scope.bookId}`,
+      { details: { documentId, bookId: scope.bookId } }
+    );
+  }
+  return scope.database.transaction(async (client) => {
+    const [header, lines, outgoing, incoming] = await Promise.all([
+      client.query(
+        `select transaction."memo", document."metadata"
+from "erp_financials"."subledger_documents" document
+join "erp_financials"."transactions" transaction
+  on transaction."tenant_id" = document."tenant_id" and transaction."source_id" = document."source_id"
+ and transaction."transaction_id" = document."transaction_id"
+where document."tenant_id" = $1 and document."company_id" = $2 and document."source_id" = $3
+  and document."subledger_document_id" = $4`,
+        [scope.tenantId, scope.companyId, document.sourceId, document.documentId]
+      ),
+      client.query(
+        `select "subledger_document_line_id" as "line_id", *
+from "erp_financials"."subledger_document_lines"
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3 and "subledger_document_id" = $4
+order by "line_number"`,
+        [scope.tenantId, scope.companyId, document.sourceId, document.documentId]
+      ),
+      queryPaymentApplications(client, scope, { sourcePaymentId: document.documentId }),
+      queryPaymentApplications(client, scope, { targetDocumentId: document.documentId })
+    ]);
+    const applications = new Map([...outgoing, ...incoming].map((application) => [application.applicationId, application]));
+    const row = header.rows[0];
+    const memo = optionalString(row?.memo);
+    const metadata = optionalJson(row?.metadata);
+    return {
+      ...document,
+      ...(memo === undefined ? {} : { memo }),
+      lines: lines.rows.map(commercialLineFromRow),
+      applications: [...applications.values()].sort((left, right) =>
+        right.applicationDate.localeCompare(left.applicationDate) || right.applicationId.localeCompare(left.applicationId)
+      ),
+      ...(metadata === undefined ? {} : { metadata })
+    };
+  });
 }
 
 type JournalEntryFilters = {
@@ -4069,6 +4287,50 @@ function bankLineFromRow(row: Readonly<Record<string, unknown>>): BankReconcilia
     version: integer(row.version, "version"),
     ...(transactionId === undefined ? {} : { matchedTransactionId: transactionId }),
     ...(method === undefined ? {} : { matchMethod: method })
+  };
+}
+
+function partyFromRow(row: Readonly<Record<string, unknown>>): PartyListItem {
+  const partyType = string(row.party_type, "party_type");
+  if (partyType !== "customer" && partyType !== "vendor" && partyType !== "employee" && partyType !== "other") {
+    throw new Error(`Stored party_type ${partyType} is invalid`);
+  }
+  return {
+    partyId: string(row.party_id, "party_id"),
+    sourceId: string(row.source_id, "source_id"),
+    sourcePartyId: string(row.source_party_id, "source_party_id"),
+    partyType,
+    displayName: string(row.display_name, "display_name"),
+    active: row.active === true
+  };
+}
+
+function operationalDocumentFromRow(row: Readonly<Record<string, unknown>>): OperationalDocumentListItem {
+  const partyId = optionalString(row.party_id);
+  const partyName = optionalString(row.party_name);
+  const documentNumber = optionalString(row.document_number);
+  const dueDate = optionalDate(row.due_date, "due_date");
+  const sourceTransactionId = optionalString(row.source_transaction_id);
+  const sourceTransactionType = optionalString(row.source_transaction_type);
+  return {
+    documentId: string(row.document_id, "document_id"),
+    sourceId: string(row.source_id, "source_id"),
+    sourceSystem: string(row.source_system, "source_system"),
+    providerEnvironment: string(row.provider_environment, "provider_environment"),
+    documentType: string(row.document_type, "document_type") as OperationalDocumentType,
+    transactionId: string(row.transaction_id, "transaction_id"),
+    ...(sourceTransactionId === undefined ? {} : { sourceTransactionId }),
+    ...(sourceTransactionType === undefined ? {} : { sourceTransactionType }),
+    ...(partyId === undefined ? {} : { partyId }),
+    ...(partyName === undefined ? {} : { partyName }),
+    ...(documentNumber === undefined ? {} : { documentNumber }),
+    documentDate: date(row.document_date, "document_date"),
+    ...(dueDate === undefined ? {} : { dueDate }),
+    currencyCode: string(row.currency_code, "currency_code"),
+    originalAmount: money(row.original_amount, "original_amount"),
+    openAmount: money(row.open_amount, "open_amount"),
+    status: string(row.status, "status") as OperationalDocumentStatus,
+    version: integer(row.version, "version")
   };
 }
 

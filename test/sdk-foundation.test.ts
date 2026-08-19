@@ -16,6 +16,58 @@ import type {
 } from "../src/index.js";
 
 describe("pre-v1 SDK foundation", () => {
+  it("lists provider-neutral parties from every source bound to the reporting book", async () => {
+    const queries = createFinancialReadModels({
+      database: { transaction: async (work) => work(new PartyClient()) },
+      tenantId: "tenant_1",
+      companyId: "company_1",
+      bookId: "book_1"
+    });
+
+    await expect(queries.listParties({ partyType: "vendor", limit: 25 })).resolves.toEqual({
+      items: [{
+        partyId: "party_vendor_1",
+        sourceId: "quickbooks_1",
+        sourcePartyId: "42",
+        partyType: "vendor",
+        displayName: "Secure Supply Co",
+        active: true
+      }]
+    });
+  });
+
+  it("lists every imported operational document family through one canonical register", async () => {
+    const queries = createFinancialReadModels({
+      database: { transaction: async (work) => work(new OperationalDocumentClient()) },
+      tenantId: "tenant_1",
+      companyId: "company_1",
+      bookId: "book_1"
+    });
+
+    await expect(queries.listOperationalDocuments({
+      documentTypes: ["sales_receipt", "purchase", "deposit", "transfer"],
+      sourceId: "quickbooks_1",
+      periodStart: "2026-01-01",
+      periodEnd: "2026-08-31",
+      limit: 25
+    })).resolves.toEqual({
+      items: [expect.objectContaining({
+        documentId: "qbo_sales_receipt_1",
+        sourceId: "quickbooks_1",
+        sourceSystem: "quickbooks",
+        providerEnvironment: "production",
+        documentType: "sales_receipt",
+        sourceTransactionId: "9001",
+        sourceTransactionType: "SalesReceipt",
+        partyName: "Acme",
+        documentNumber: "SR-9001",
+        originalAmount: "125.00",
+        openAmount: "0.00",
+        status: "settled"
+      })]
+    });
+  });
+
   it("normalizes commercial lines with exact quantity, discount, and tax arithmetic", () => {
     expect(normalizeCommercialDocumentLine({
       amount: "24.50",
@@ -742,6 +794,64 @@ class AdjustmentClient implements PostgresQueryClient {
       } as unknown as Row] });
     }
     throw new Error(`Unexpected adjustment query: ${sql}`);
+  }
+}
+
+class PartyClient implements PostgresQueryClient {
+  query<Row extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string
+  ): Promise<PostgresQueryResult<Row>> {
+    if (sql.includes('from "erp_financials"."reporting_books"')) {
+      return Promise.resolve({
+        rows: [{ base_currency_code: "USD", accounting_basis: "accrual", status: "active" } as unknown as Row]
+      });
+    }
+    if (sql.includes('from "erp_financials"."parties" party')) {
+      return Promise.resolve({ rows: [{
+        party_id: "party_vendor_1",
+        source_id: "quickbooks_1",
+        source_party_id: "42",
+        party_type: "vendor",
+        display_name: "Secure Supply Co",
+        active: true
+      } as unknown as Row] });
+    }
+    throw new Error(`Unexpected party query: ${sql}`);
+  }
+}
+
+class OperationalDocumentClient implements PostgresQueryClient {
+  query<Row extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string
+  ): Promise<PostgresQueryResult<Row>> {
+    if (sql.includes('from "erp_financials"."reporting_books"')) {
+      return Promise.resolve({
+        rows: [{ base_currency_code: "USD", accounting_basis: "accrual", status: "active" } as unknown as Row]
+      });
+    }
+    if (sql.includes('from "erp_financials"."subledger_documents" document') && sql.includes('accounting_source."source_system"')) {
+      return Promise.resolve({ rows: [{
+        document_id: "qbo_sales_receipt_1",
+        source_id: "quickbooks_1",
+        source_system: "quickbooks",
+        provider_environment: "production",
+        document_type: "sales_receipt",
+        transaction_id: "transaction_sales_receipt_1",
+        source_transaction_id: "9001",
+        source_transaction_type: "SalesReceipt",
+        party_id: "customer_1",
+        party_name: "Acme",
+        document_number: "SR-9001",
+        document_date: "2026-08-15",
+        due_date: null,
+        currency_code: "USD",
+        original_amount: "125",
+        open_amount: "0",
+        status: "settled",
+        version: 1
+      } as unknown as Row] });
+    }
+    throw new Error(`Unexpected operational document query: ${sql}`);
   }
 }
 
