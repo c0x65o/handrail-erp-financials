@@ -123,6 +123,30 @@ describe("QuickBooks SDK envelope adapter", () => {
       /invalid postingType Unknown; expected Debit or Credit/
     );
   });
+
+  it("preserves negative posting polarity and omits zero-value ledger rows", () => {
+    const sdkEnvelope = fullSyncEnvelope({ firstAmount: 0, secondAmount: -1250 });
+
+    const adapted = adaptHandrailQuickBooksSdkFullSyncEnvelope(sdkEnvelope, adapterOptions());
+    const lines = adapted.resources.ledgerTransactions?.[0]?.resource.lines;
+
+    expect(lines).toHaveLength(1);
+    expect(lines?.[0]?.postings).toEqual([
+      expect.objectContaining({
+        debitAmount: "1250.00",
+        accountRef: { sourceObjectId: "400", displayName: "Service Revenue" }
+      })
+    ]);
+
+    const mapped = mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(adapted, {
+      companyId: "company_spartan",
+      accountingBasis: "accrual",
+      currencyCode: "USD"
+    });
+    expect(mapped.facts.postings.map((posting) => [posting.debitAmount, posting.creditAmount])).toEqual([
+      ["1250.00", "0.00"]
+    ]);
+  });
 });
 
 function adapterOptions() {
@@ -135,7 +159,12 @@ function adapterOptions() {
 }
 
 function fullSyncEnvelope(
-  overrides: { readonly resourceTenantId?: string; readonly postingType?: string } = {}
+  overrides: {
+    readonly resourceTenantId?: string;
+    readonly postingType?: string;
+    readonly firstAmount?: number;
+    readonly secondAmount?: number;
+  } = {}
 ): HandrailQuickBooksSdkFullSyncEnvelope {
   return {
     contractId: "handrail.quickbooks.normalized-sync-envelope.v1",
@@ -256,6 +285,8 @@ function normalizedResources(overrides: {
   readonly jobId?: string;
   readonly resourceTenantId?: string;
   readonly postingType?: string;
+  readonly firstAmount?: number;
+  readonly secondAmount?: number;
 }): HandrailQuickBooksSdkNormalizedResourceMap {
   const importBatchId = overrides.importBatchId ?? "batch_full_spartan";
   const jobId = overrides.jobId ?? "job_full_spartan";
@@ -307,7 +338,7 @@ function normalizedResources(overrides: {
         lineId: "1",
         transactionDate: "2026-08-13",
         postingType: overrides.postingType ?? "Debit",
-        amount: 1250,
+        amount: overrides.firstAmount ?? 1250,
         account: { value: "100", name: "Operating Cash" },
         currency: { value: "USD" }
       },
@@ -318,7 +349,7 @@ function normalizedResources(overrides: {
         lineId: "2",
         transactionDate: "2026-08-13",
         postingType: "Credit",
-        amount: 1250,
+        amount: overrides.secondAmount ?? 1250,
         account: { value: "400", name: "Service Revenue" },
         currency: { value: "USD" }
       }

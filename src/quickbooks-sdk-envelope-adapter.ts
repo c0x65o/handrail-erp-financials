@@ -634,6 +634,12 @@ function ledgerTransactionResources(
   values.forEach((value, index) => {
     const input = record(value, `normalizedResources.ledger_entries[${String(index)}]`);
     const metadata = providerMetadata(input, `normalizedResources.ledger_entries[${String(index)}]`);
+    // QuickBooks includes zero-value detail/subtotal rows in the normalized
+    // ledger feed. They carry source context but have no accounting effect and
+    // cannot form a valid single-sided canonical posting.
+    if (requiredFiniteNumber(input, "amount", `QuickBooks ledger entry ${metadata.sourceObjectId}`) === 0) {
+      return;
+    }
     const transactionId = requiredString(input, "transactionId", `QuickBooks ledger entry ${metadata.sourceObjectId}`);
     const key = `${metadata.sourceObject}:${transactionId}`;
     grouped.set(key, [...(grouped.get(key) ?? []), { input, metadata }]);
@@ -762,13 +768,19 @@ function ledgerPosting(
     metadata.sourcePayloadRef
   );
   const absoluteAmount = decimalFromNumber(Math.abs(amount));
+  // QuickBooks represents reversing detail rows as a negative amount on the
+  // nominal posting side. Canonical postings are nonnegative, so retain the
+  // signed accounting effect by moving a negative amount to the opposite side.
+  const effectivePostingType = amount < 0
+    ? postingType === "Debit" ? "Credit" : "Debit"
+    : postingType;
 
   return {
     sourcePostingId: metadata.id,
     accountRef: { sourceObjectId: account.value, ...(account.name === undefined ? {} : { displayName: account.name }) },
     postingDate: transactionDate,
     accountingBasis: context.accountingBasis,
-    ...(postingType === "Debit" ? { debitAmount: absoluteAmount } : { creditAmount: absoluteAmount }),
+    ...(effectivePostingType === "Debit" ? { debitAmount: absoluteAmount } : { creditAmount: absoluteAmount }),
     currencyCode: optionalReference(input.currency)?.value ?? context.currencyCode,
     ...(partyRef === undefined ? {} : { partyRef }),
     ...(itemRef === undefined ? {} : { itemRef }),
