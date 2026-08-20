@@ -954,19 +954,24 @@ const normalizedQuickBooksProviderReportRequests = {
 
 const normalizedQuickBooksProviderReportResults = {
   profitAndLoss: normalizedQboProviderReportResult(normalizedQuickBooksProviderReportRequests.profitAndLoss, [
-    normalizedQboProviderReportTotal("profit_and_loss", "income", "Income", "20000.00"),
-    normalizedQboProviderReportTotal("profit_and_loss", "expenses", "Expenses", "6200.00"),
+    normalizedQboProviderReportTotal("profit_and_loss", "total_income", "Total Income", "20000.00"),
+    normalizedQboProviderReportTotal("profit_and_loss", "total_cost_of_goods_sold", "Total Cost of Goods Sold", "3000.00"),
+    normalizedQboProviderReportTotal("profit_and_loss", "gross_profit", "Gross Profit", "17000.00"),
+    normalizedQboProviderReportTotal("profit_and_loss", "total_expenses", "Total Expenses", "3200.00"),
+    normalizedQboProviderReportTotal("profit_and_loss", "net_operating_income", "Net Operating Income", "13800.00"),
+    normalizedQboProviderReportTotal("profit_and_loss", "total_other_income", "Total Other Income", "0.00"),
+    normalizedQboProviderReportTotal("profit_and_loss", "total_other_expense", "Total Other Expense", "0.00"),
     normalizedQboProviderReportTotal("profit_and_loss", "net_income", "Net Income", "13800.00")
   ]),
   balanceSheet: normalizedQboProviderReportResult(normalizedQuickBooksProviderReportRequests.balanceSheet, [
-    normalizedQboProviderReportTotal("balance_sheet", "assets", "Assets", "74000.00"),
-    normalizedQboProviderReportTotal("balance_sheet", "liabilities", "Liabilities", "11200.00"),
-    normalizedQboProviderReportTotal("balance_sheet", "equity", "Equity", "62800.00")
+    normalizedQboProviderReportTotal("balance_sheet", "total_assets", "Total Assets", "74000.00"),
+    normalizedQboProviderReportTotal("balance_sheet", "total_liabilities", "Total Liabilities", "11200.00"),
+    normalizedQboProviderReportTotal("balance_sheet", "total_equity", "Total Equity", "62800.00"),
+    normalizedQboProviderReportTotal("balance_sheet", "total_liabilities_and_equity", "Total Liabilities and Equity", "74000.00")
   ]),
   trialBalance: normalizedQboProviderReportResult(normalizedQuickBooksProviderReportRequests.trialBalance, [
-    normalizedQboProviderReportTotal("trial_balance", "debits", "Debits", "81900.00"),
-    normalizedQboProviderReportTotal("trial_balance", "credits", "Credits", "81900.00"),
-    normalizedQboProviderReportTotal("trial_balance", "net", "Net", "0.00")
+    normalizedQboProviderReportTotal("trial_balance", "total_debits", "Total Debits", "81900.00"),
+    normalizedQboProviderReportTotal("trial_balance", "total_credits", "Total Credits", "81900.00")
   ])
 };
 

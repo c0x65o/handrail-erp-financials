@@ -642,16 +642,51 @@ describe("Future ERP canonical reporting read model", () => {
       }))
     ).toEqual([
       {
-        totalKey: "income",
+        totalKey: "total_income",
         canonicalAmount: "20000.00",
         providerAmount: "20000.00",
         difference: "0.00",
         status: "matched"
       },
       {
-        totalKey: "expenses",
-        canonicalAmount: "6200.00",
-        providerAmount: "6200.00",
+        totalKey: "total_cost_of_goods_sold",
+        canonicalAmount: "3000.00",
+        providerAmount: "3000.00",
+        difference: "0.00",
+        status: "matched"
+      },
+      {
+        totalKey: "gross_profit",
+        canonicalAmount: "17000.00",
+        providerAmount: "17000.00",
+        difference: "0.00",
+        status: "matched"
+      },
+      {
+        totalKey: "total_expenses",
+        canonicalAmount: "3200.00",
+        providerAmount: "3200.00",
+        difference: "0.00",
+        status: "matched"
+      },
+      {
+        totalKey: "net_operating_income",
+        canonicalAmount: "13800.00",
+        providerAmount: "13800.00",
+        difference: "0.00",
+        status: "matched"
+      },
+      {
+        totalKey: "total_other_income",
+        canonicalAmount: "0.00",
+        providerAmount: "0.00",
+        difference: "0.00",
+        status: "matched"
+      },
+      {
+        totalKey: "total_other_expense",
+        canonicalAmount: "0.00",
+        providerAmount: "0.00",
         difference: "0.00",
         status: "matched"
       },
@@ -663,11 +698,9 @@ describe("Future ERP canonical reporting read model", () => {
         status: "matched"
       }
     ]);
-    expect(profitAndLossTotals.map((total) => total.drilldownRef?.sourceObjectType)).toEqual([
-      "ReportTotal",
-      "ReportTotal",
-      "ReportTotal"
-    ]);
+    expect(profitAndLossTotals.map((total) => total.drilldownRef?.sourceObjectType)).toEqual(
+      Array.from({ length: 8 }, () => "ReportTotal")
+    );
     expect(reportParity(snapshot, "profit_and_loss")?.reconciliationDifferenceDrilldownRef).toMatchObject({
       token: "profit_and_loss:quickbooks_reconciliation_difference",
       query: {
@@ -687,44 +720,15 @@ describe("Future ERP canonical reporting read model", () => {
     expect(reportParity(snapshot, "trial_balance")?.providerReport?.accountTotals).toEqual(
       quickBooksFixtures.providerReports.trialBalance.response.accountTotals
     );
-    expect(
-      reportParity(snapshot, "profit_and_loss")?.deltas?.map((delta) => ({
-        totalKey: delta.totalKey,
-        status: delta.status,
-        canonicalAmount: delta.canonicalAmount,
-        providerAmount: delta.providerAmount,
-        difference: delta.difference,
-        absoluteDifference: delta.absoluteDifference,
-        toleranceAmount: delta.toleranceAmount
-      }))
-    ).toEqual([
-      {
-        totalKey: "income",
-        status: "matched",
-        canonicalAmount: "20000.00",
-        providerAmount: "20000.00",
-        difference: "0.00",
-        absoluteDifference: "0.00",
-        toleranceAmount: "0.00"
-      },
-      {
-        totalKey: "expenses",
-        status: "matched",
-        canonicalAmount: "6200.00",
-        providerAmount: "6200.00",
-        difference: "0.00",
-        absoluteDifference: "0.00",
-        toleranceAmount: "0.00"
-      },
-      {
-        totalKey: "net_income",
-        status: "matched",
-        canonicalAmount: "13800.00",
-        providerAmount: "13800.00",
-        difference: "0.00",
-        absoluteDifference: "0.00",
-        toleranceAmount: "0.00"
-      }
+    expect(reportParity(snapshot, "profit_and_loss")?.deltas?.map((delta) => [delta.totalKey, delta.status])).toEqual([
+      ["total_income", "matched"],
+      ["total_cost_of_goods_sold", "matched"],
+      ["gross_profit", "matched"],
+      ["total_expenses", "matched"],
+      ["net_operating_income", "matched"],
+      ["total_other_income", "matched"],
+      ["total_other_expense", "matched"],
+      ["net_income", "matched"]
     ]);
     expect(reportParity(snapshot, "profit_and_loss")?.deltas?.[0]?.providerDrilldownRef).toMatchObject({
       sourceObjectType: "ReportTotal"
@@ -742,7 +746,6 @@ describe("Future ERP canonical reporting read model", () => {
       }
     });
     expect(reportParity(snapshot, "profit_and_loss")?.deltas?.[1]?.canonicalDrilldownRef).toMatchObject({
-      token: "profit_and_loss:expenses:canonical_total",
       query: {
         kind: "ledger_postings",
         tenantId: fixture.company.tenantId,
@@ -758,14 +761,14 @@ describe("Future ERP canonical reporting read model", () => {
       })
     );
     expect(reportParity(snapshot, "balance_sheet")?.evidence?.totals.map((total) => total.totalKey)).toEqual([
-      "assets",
-      "liabilities",
-      "equity"
+      "total_assets",
+      "total_liabilities",
+      "total_equity",
+      "total_liabilities_and_equity"
     ]);
     expect(reportParity(snapshot, "trial_balance")?.evidence?.totals.map((total) => [total.totalKey, total.canonicalAmount])).toEqual([
-      ["debits", "81900.00"],
-      ["credits", "81900.00"],
-      ["net", "0.00"]
+      ["total_debits", "81900.00"],
+      ["total_credits", "81900.00"]
     ]);
     expect(reportParity(snapshot, "profit_and_loss")?.request).toMatchObject({
       reportName: "profit_and_loss",
@@ -830,8 +833,8 @@ describe("Future ERP canonical reporting read model", () => {
       ...quickBooksProviderParityRequest(new FixtureQuickBooksProviderReportClient()),
       canonicalTotalsByReport: {
         profit_and_loss: [
-          canonicalTotal("income", "20000.00"),
-          canonicalTotal("expenses", "6200.00"),
+          canonicalTotal("total_income", "20000.00"),
+          canonicalTotal("total_expenses", "3200.00"),
           canonicalTotal("net_income", "13799.97")
         ]
       }
@@ -869,9 +872,9 @@ describe("Future ERP canonical reporting read model", () => {
     });
 
     const expectedStatuses = new Map<NormalizedQuickBooksProviderReportName, readonly string[]>([
-      ["profit_and_loss", ["matched", "matched", "mismatched"]],
-      ["balance_sheet", ["mismatched", "matched", "matched"]],
-      ["trial_balance", ["matched", "mismatched", "mismatched"]]
+      ["profit_and_loss", ["matched", "matched", "matched", "matched", "matched", "matched", "matched", "mismatched"]],
+      ["balance_sheet", ["mismatched", "matched", "matched", "matched"]],
+      ["trial_balance", ["matched", "mismatched"]]
     ]);
 
     for (const reportName of ["profit_and_loss", "balance_sheet", "trial_balance"] as const) {
@@ -888,8 +891,8 @@ describe("Future ERP canonical reporting read model", () => {
       ...quickBooksProviderParityRequest(new FixtureQuickBooksProviderReportClient()),
       canonicalTotalsByReport: {
         profit_and_loss: [
-          canonicalTotal("income", "20000.00"),
-          canonicalTotal("other_income", "25.00")
+          canonicalTotal("total_income", "20000.00"),
+          canonicalTotal("missing_provider_total", "25.00")
         ]
       }
     });
@@ -901,14 +904,14 @@ describe("Future ERP canonical reporting read model", () => {
       reconciliationDifference: "25.00"
     });
     expect(profitAndLoss?.evidence?.totals.at(-1)).toEqual({
-      totalKey: "other_income",
+      totalKey: "missing_provider_total",
       canonicalAmount: "25.00",
       providerAmount: "0.00",
       difference: "-25.00",
       status: "missing"
     });
     expect(profitAndLoss?.deltas?.at(-1)).toMatchObject({
-      totalKey: "other_income",
+      totalKey: "missing_provider_total",
       status: "missing",
       difference: "-25.00",
       absoluteDifference: "25.00",
@@ -981,8 +984,8 @@ describe("Future ERP canonical reporting read model", () => {
 
     const profitAndLoss = reportParity(snapshot, "profit_and_loss");
     expect(profitAndLoss?.status).toBe("matched");
-    expect(profitAndLoss?.evidence?.totals).toHaveLength(3);
-    expect(profitAndLoss?.providerReport?.totals).toHaveLength(3);
+    expect(profitAndLoss?.evidence?.totals).toHaveLength(8);
+    expect(profitAndLoss?.providerReport?.totals).toHaveLength(8);
     expect(JSON.stringify(profitAndLoss)).not.toMatch(
       /fixture-access-token|fixture-refresh-token|rawPayload|reportRows|Intuit|OAuth|access[_-]?token|refresh[_-]?token|client[_-]?secret/i
     );

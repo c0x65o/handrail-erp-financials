@@ -12,6 +12,7 @@ import {
   buildQuickBooksProviderReportReconciliationEvidence,
   buildQuickBooksTrialBalanceReconciliationEvidence
 } from "./quickbooks-sync-service.js";
+import { buildQuickBooksCanonicalReportTotalsFromBuiltReport } from "./quickbooks-provider-report-parity.js";
 import { createSnapshotRefreshContract, reconcileReportFreshness } from "./rollup-jobs.js";
 import { assertNoCredentialKeys, assertSafeSourcePayloadRef, createCompactDrilldownRef } from "./canonical-model.js";
 import type {
@@ -569,8 +570,7 @@ function compareQuickBooksProviderReportResponse(
     reconciliationDifferenceDrilldownRef: providerReconciliationDrilldownRef(
       parityRequest,
       reportName,
-      providerReport as SupportedProviderReportEnvelope,
-      evidence
+      providerReport as SupportedProviderReportEnvelope
     )
   };
 }
@@ -657,69 +657,7 @@ function canonicalTotalsForProviderComparison(
     return [];
   }
 
-  return canonicalTotalsFromBuiltReport(reportName, report, request.currencyCode);
-}
-
-function canonicalTotalsFromBuiltReport(
-  reportName: NormalizedQuickBooksProviderReportName,
-  report: BuiltReport,
-  currencyCode: IsoCurrencyCode | undefined
-): readonly NormalizedQuickBooksCanonicalReportTotal[] {
-  const totals = new Map(report.totals.map((total) => [total.totalKey, total.amount]));
-  const canonicalTotal = (totalKey: string, amount: DecimalString | undefined): NormalizedQuickBooksCanonicalReportTotal | undefined =>
-    amount === undefined
-      ? undefined
-      : {
-          totalKey,
-          amount,
-          ...(currencyCode === undefined ? {} : { currencyCode })
-        };
-  const sum = (...totalKeys: readonly string[]): DecimalString | undefined => {
-    let found = false;
-    let amountMinor = 0n;
-    for (const totalKey of totalKeys) {
-      const amount = totals.get(totalKey);
-      if (amount === undefined) {
-        continue;
-      }
-      found = true;
-      amountMinor += parseMoney(amount);
-    }
-
-    return found ? formatMoney(amountMinor) : undefined;
-  };
-  const difference = (leftTotalKey: string, rightTotalKey: string): DecimalString | undefined => {
-    const left = totals.get(leftTotalKey);
-    const right = totals.get(rightTotalKey);
-    if (left === undefined || right === undefined) {
-      return undefined;
-    }
-
-    return formatMoney(parseMoney(left) - parseMoney(right));
-  };
-
-  const mappedTotals =
-    reportName === "profit_and_loss"
-      ? [
-          canonicalTotal("income", totals.get("total_income")),
-          canonicalTotal("expenses", sum("total_cost_of_goods_sold", "total_expenses", "total_other_expense")),
-          canonicalTotal("net_income", totals.get("net_income"))
-        ]
-      : reportName === "balance_sheet"
-        ? [
-            canonicalTotal("assets", totals.get("total_assets")),
-            canonicalTotal("liabilities", totals.get("total_liabilities")),
-            canonicalTotal("equity", totals.get("total_equity"))
-          ]
-        : reportName === "trial_balance"
-          ? [
-              canonicalTotal("debits", totals.get("total_debits")),
-              canonicalTotal("credits", totals.get("total_credits")),
-              canonicalTotal("net", difference("total_debits", "total_credits"))
-            ]
-          : [];
-
-  return mappedTotals.filter((total): total is NormalizedQuickBooksCanonicalReportTotal => total !== undefined);
+  return buildQuickBooksCanonicalReportTotalsFromBuiltReport(report, request.currencyCode);
 }
 
 function canonicalDrilldownRefsForProviderComparison(
@@ -731,35 +669,7 @@ function canonicalDrilldownRefsForProviderComparison(
     return new Map();
   }
 
-  const totals = new Map(report.totals.map((total) => [total.totalKey, total.drilldownRef]));
-  const mappedEntries =
-    reportName === "profit_and_loss"
-      ? [
-          canonicalDrilldownEntry(report, "income", totals.get("total_income")),
-          canonicalDrilldownEntry(
-            report,
-            "expenses",
-            combineCanonicalDrilldownRefs(report, "expenses", [
-              totals.get("total_cost_of_goods_sold"),
-              totals.get("total_expenses"),
-              totals.get("total_other_expense")
-            ])
-          ),
-          canonicalDrilldownEntry(report, "net_income", totals.get("net_income"))
-        ]
-      : reportName === "balance_sheet"
-        ? [
-            canonicalDrilldownEntry(report, "assets", totals.get("total_assets")),
-            canonicalDrilldownEntry(report, "liabilities", totals.get("total_liabilities")),
-            canonicalDrilldownEntry(report, "equity", totals.get("total_equity"))
-          ]
-        : reportName === "trial_balance"
-          ? [
-              canonicalDrilldownEntry(report, "debits", totals.get("total_debits")),
-              canonicalDrilldownEntry(report, "credits", totals.get("total_credits")),
-              canonicalDrilldownEntry(report, "net", combineCanonicalDrilldownRefs(report, "net", [totals.get("total_debits"), totals.get("total_credits")]))
-            ]
-          : [];
+  const mappedEntries = report.totals.map((total) => canonicalDrilldownEntry(report, total.totalKey, total.drilldownRef));
 
   return new Map(mappedEntries.filter((entry): entry is readonly [string, DrilldownRef] => entry !== undefined));
 }
@@ -774,35 +684,6 @@ function canonicalDrilldownEntry(
   }
   assertNoCredentialKeys(drilldownRef.query);
   return [totalKey, drilldownRef];
-}
-
-function combineCanonicalDrilldownRefs(
-  report: BuiltReport,
-  totalKey: string,
-  refs: readonly (DrilldownRef | undefined)[]
-): DrilldownRef | undefined {
-  const drilldownRefs = refs.filter((ref): ref is DrilldownRef => ref !== undefined);
-  if (drilldownRefs.length === 0) {
-    return undefined;
-  }
-  if (drilldownRefs.length === 1) {
-    return drilldownRefs[0];
-  }
-
-  return createCompactDrilldownRef({
-    token: `${report.snapshot.reportName}:${totalKey}:canonical_total`,
-    postingIds: uniqueStrings(drilldownRefs.flatMap((ref) => ref.postingIds ?? [])),
-    accountIds: uniqueStrings(drilldownRefs.flatMap((ref) => ref.accountIds ?? [])),
-    query: {
-      kind: "ledger_postings",
-      tenantId: report.snapshot.tenantId,
-      ...(report.snapshot.freshness.sourceId === undefined ? {} : { sourceId: report.snapshot.freshness.sourceId }),
-      accountingBasis: report.snapshot.accountingBasis,
-      periodStart: report.snapshot.periodStart,
-      periodEnd: report.snapshot.periodEnd
-    },
-    sourceRefs: drilldownRefs.flatMap((ref) => ref.sourceRefs ?? [])
-  });
 }
 
 function assertFutureErpTenantReadAccess(
@@ -936,17 +817,9 @@ function reportReconciliationDifferenceDrilldown(
 function providerReconciliationDrilldownRef(
   request: FutureErpQuickBooksProviderReportParityRequest,
   reportName: NormalizedQuickBooksProviderReportName,
-  providerReport: SupportedProviderReportEnvelope,
-  evidence: NormalizedAccountingReconciliationEvidence
+  providerReport: SupportedProviderReportEnvelope
 ): DrilldownRef {
   const report = request.reports?.[reportName];
-  const canonicalRefs =
-    report === undefined
-      ? []
-      : [
-          ...report.lines.flatMap((line) => line.drilldownRef.sourceRefs ?? []),
-          ...report.totals.flatMap((total) => total.drilldownRef.sourceRefs ?? [])
-        ];
 
   return createCompactDrilldownRef({
     token: `${reportName}:quickbooks_reconciliation_difference`,
@@ -974,9 +847,7 @@ function providerReconciliationDrilldownRef(
     },
     sourceRefs: [
       providerReport.providerReportRef.sourcePayloadRef,
-      evidence.providerReportRef.sourcePayloadRef,
-      ...evidence.totals.flatMap((total) => (total.drilldownRef === undefined ? [] : [total.drilldownRef])),
-      ...canonicalRefs
+      ...(report === undefined ? [] : [canonicalReportSnapshotSourceRef(report)])
     ]
   });
 }
