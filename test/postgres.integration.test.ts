@@ -455,7 +455,8 @@ values ('native_customer', 'tenant_1', 'source_2', 'customer:1', 'customer', 'Cu
       totals: { income: "200.00" }
     });
     await expect(sdk.queries.getFinancialStatement({ reportName: "balance_sheet", ...window, asOfDate: "2026-09-01" })).resolves.toMatchObject({
-      reportName: "balance_sheet"
+      reportName: "balance_sheet",
+      totals: { difference: "0.00" }
     });
     await expect(sdk.queries.getFinancialStatement({ reportName: "trial_balance", ...window, asOfDate: "2026-09-01" })).resolves.toMatchObject({
       reportName: "trial_balance"

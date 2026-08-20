@@ -3260,7 +3260,48 @@ where "tenant_id" = $1 and "company_id" = $2 and "book_id" = $3 and "active"
 order by "account_number" nulls last, "name", "book_account_key"`,
       [scope.tenantId, scope.companyId, scope.bookId, input.reportName]
     );
-    const direct = mergeBookStatementLines(result.rows.map(statementLineFromRow), defined.rows);
+    const derivedEquityLines: FinancialStatementLine[] = [];
+    if (input.reportName === "balance_sheet") {
+      const earningsResult = await client.query(
+        `select
+  coalesce(-sum(posting."net_amount") filter (where posting."posting_date" < $6::date), 0) as "retained_earnings",
+  coalesce(-sum(posting."net_amount") filter (where posting."posting_date" between $6::date and $7::date), 0) as "net_income"
+from "erp_financials"."accounts" account
+join "erp_financials"."reporting_book_sources" source
+  on source."tenant_id" = $1 and source."company_id" = $2 and source."book_id" = $3 and source."source_id" = account."source_id"
+left join "erp_financials"."reporting_book_account_mappings" mapping
+  on mapping."tenant_id" = $1 and mapping."company_id" = $2 and mapping."book_id" = $3
+ and mapping."source_id" = account."source_id" and mapping."account_id" = account."account_id"
+left join "erp_financials"."reporting_book_accounts" book_account
+  on book_account."tenant_id" = $1 and book_account."company_id" = $2 and book_account."book_id" = $3
+ and book_account."book_account_key" = mapping."book_account_key"
+join "erp_financials"."ledger_postings" posting
+  on posting."tenant_id" = account."tenant_id" and posting."source_id" = account."source_id" and posting."account_id" = account."account_id"
+ and posting."accounting_basis" = $4 and posting."currency_code" = $5
+ and posting."posting_date" <= $7::date
+ and (source."effective_from" is null or source."effective_from" <= posting."posting_date")
+ and (source."effective_through" is null or source."effective_through" >= posting."posting_date")
+where account."tenant_id" = $1 and (mapping."book_account_key" is null or book_account."active")
+  and coalesce(book_account."classification", account."classification") in
+    ('income', 'cost_of_goods_sold', 'expense', 'other_income', 'other_expense')`,
+        [scope.tenantId, scope.companyId, scope.bookId, book.accountingBasis, book.currencyCode,
+          input.periodStart, asOfDate]
+      );
+      const earnings = requiredRow(earningsResult.rows[0], "balance sheet earnings");
+      for (const [key, name, value] of [
+        ["retained_earnings", "Retained Earnings", earnings.retained_earnings],
+        ["net_income", "Net Income", earnings.net_income]
+      ] as const) {
+        const amount = money(value, key);
+        if (moneyMinor(amount) !== 0n) {
+          derivedEquityLines.push(derivedEquityStatementLine(key, name, amount));
+        }
+      }
+    }
+    const direct = [
+      ...mergeBookStatementLines(result.rows.map(statementLineFromRow), defined.rows),
+      ...derivedEquityLines
+    ];
     const lines = rollupStatementLines(direct);
     return {
       reportName: input.reportName,
@@ -4250,6 +4291,23 @@ function statementLineFromRow(row: Readonly<Record<string, unknown>>): Financial
     amount,
     debitAmount: money(row.debit_amount, "debit_amount"),
     creditAmount: money(row.credit_amount, "credit_amount")
+  };
+}
+
+function derivedEquityStatementLine(
+  key: "retained_earnings" | "net_income",
+  name: string,
+  amount: DecimalString
+): FinancialStatementLine {
+  const amountMinor = moneyMinor(amount);
+  return {
+    bookAccountKey: `__derived_equity__:${key}`,
+    name,
+    classification: "equity",
+    directAmount: amount,
+    amount,
+    debitAmount: amountMinor < 0n ? minorMoney(-amountMinor) : "0.00",
+    creditAmount: amountMinor > 0n ? amount : "0.00"
   };
 }
 

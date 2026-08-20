@@ -158,6 +158,33 @@ describe("pre-v1 SDK foundation", () => {
     expect(report.totals).toMatchObject({ income: "150.00", expenses: "20.00", netIncome: "130.00" });
   });
 
+  it("rolls historical and current earnings into balance-sheet equity", async () => {
+    const queries = createFinancialReadModels({
+      database: { transaction: async (work) => work(new BalanceSheetStatementClient()) },
+      tenantId: "tenant_1",
+      companyId: "company_1",
+      bookId: "book_1"
+    });
+
+    const report = await queries.getFinancialStatement({
+      reportName: "balance_sheet",
+      periodStart: "2026-01-01",
+      periodEnd: "2026-08-12",
+      asOfDate: "2026-08-12"
+    });
+
+    expect(report.lines).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "Retained Earnings", classification: "equity", amount: "500.00" }),
+      expect.objectContaining({ name: "Net Income", classification: "equity", amount: "130.00" })
+    ]));
+    expect(report.totals).toEqual({
+      assets: "680.00",
+      liabilities: "50.00",
+      equity: "630.00",
+      difference: "0.00"
+    });
+  });
+
   it("exposes canonical credit/refund register and adjustment detail models", async () => {
     const client = new AdjustmentClient();
     const queries = createFinancialReadModels({
@@ -504,6 +531,51 @@ class StatementClient implements PostgresQueryClient {
       ] as unknown as Row[] });
     }
     throw new Error(`Unexpected statement query: ${sql}`);
+  }
+}
+
+class BalanceSheetStatementClient implements PostgresQueryClient {
+  query<Row extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string
+  ): Promise<PostgresQueryResult<Row>> {
+    if (sql.includes('from "erp_financials"."reporting_books"')) {
+      return Promise.resolve({
+        rows: [{ base_currency_code: "USD", accounting_basis: "accrual", status: "active" } as unknown as Row]
+      });
+    }
+    if (sql.includes('as "retained_earnings"')) {
+      return Promise.resolve({
+        rows: [{ retained_earnings: "500", net_income: "130" } as unknown as Row]
+      });
+    }
+    if (sql.includes('from "erp_financials"."accounts"')) {
+      return Promise.resolve({ rows: [
+        {
+          book_account_key: "cash",
+          parent_book_account_key: null,
+          account_number: "1000",
+          account_name: "Cash",
+          classification: "asset",
+          debit_amount: "680",
+          credit_amount: "0",
+          net_amount: "680"
+        },
+        {
+          book_account_key: "payables",
+          parent_book_account_key: null,
+          account_number: "2000",
+          account_name: "Payables",
+          classification: "liability",
+          debit_amount: "0",
+          credit_amount: "50",
+          net_amount: "-50"
+        }
+      ] as unknown as Row[] });
+    }
+    if (sql.includes('from "erp_financials"."reporting_book_accounts"')) {
+      return Promise.resolve({ rows: [] });
+    }
+    throw new Error(`Unexpected balance-sheet statement query: ${sql}`);
   }
 }
 
