@@ -123,6 +123,50 @@ describe("QuickBooks SDK envelope adapter", () => {
     });
   });
 
+  it("accepts parentAccountId as a stable SDK fallback and maps it to the canonical parent id", () => {
+    const envelope = fullSyncEnvelope();
+    const accounts = (envelope.normalizedResources?.accounts ?? []) as readonly Record<string, unknown>[];
+    const hierarchyEnvelope = {
+      ...envelope,
+      normalizedResources: {
+        ...envelope.normalizedResources,
+        accounts: accounts.map((account) => account.sourceObjectId === "400"
+          ? { ...account, parentAccountId: "100", subAccount: true }
+          : account)
+      }
+    };
+
+    const adapted = adaptHandrailQuickBooksSdkFullSyncEnvelope(hierarchyEnvelope, adapterOptions());
+    expect(adapted.resources.accounts.find((account) => account.resource.sourceAccountId === "400")?.resource)
+      .toMatchObject({ parentAccountRef: { sourceObjectId: "100" } });
+
+    const mapped = mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(adapted, {
+      companyId: "company_spartan",
+      accountingBasis: "accrual",
+      currencyCode: "USD"
+    });
+    const parent = mapped.facts.accounts.find((account) => account.sourceAccountId === "100");
+    const child = mapped.facts.accounts.find((account) => account.sourceAccountId === "400");
+    expect(child?.parentAccountId).toBe(parent?.accountId);
+  });
+
+  it("rejects conflicting provider parent fields at the ERP SDK boundary", () => {
+    const envelope = fullSyncEnvelope();
+    const accounts = (envelope.normalizedResources?.accounts ?? []) as readonly Record<string, unknown>[];
+    const malformedEnvelope = {
+      ...envelope,
+      normalizedResources: {
+        ...envelope.normalizedResources,
+        accounts: accounts.map((account) => account.sourceObjectId === "400"
+          ? { ...account, parentRef: { value: "100" }, parentAccountId: "999", subAccount: true }
+          : account)
+      }
+    };
+
+    expect(() => adaptHandrailQuickBooksSdkFullSyncEnvelope(malformedEnvelope, adapterOptions()))
+      .toThrow(/conflicting parentRef\.value and parentAccountId/);
+  });
+
   it("persists adapted QuickBooks operational documents without inventing unresolved applications", async () => {
     const adapted = adaptHandrailQuickBooksSdkFullSyncEnvelope(fullSyncEnvelope(), adapterOptions());
     const mapped = mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(adapted, {

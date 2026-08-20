@@ -578,6 +578,25 @@ function accountResource(
   const metadata = providerMetadata(input, `normalizedResources.accounts[${String(index)}]`);
   const accountType = requiredString(input, "accountType", `QuickBooks account ${metadata.sourceObjectId}`);
   const parentRef = optionalReference(input.parentRef);
+  const parentAccountId = optionalString(input, "parentAccountId")?.trim() || undefined;
+  const parentAccountName = optionalString(input, "parentAccountName");
+  if (parentRef !== undefined && parentAccountId !== undefined && parentRef.value.trim() !== parentAccountId) {
+    throw new Error(
+      `QuickBooks account ${metadata.sourceObjectId} has conflicting parentRef.value and parentAccountId values.`
+    );
+  }
+  const resolvedParentAccountId = parentRef?.value.trim() || parentAccountId;
+  const resolvedParentAccountName = parentRef?.name ?? parentAccountName;
+  const subAccount = optionalBoolean(input, "subAccount");
+  if (subAccount === true && resolvedParentAccountId === undefined) {
+    throw new Error(`QuickBooks sub-account ${metadata.sourceObjectId} is missing a stable parent account id.`);
+  }
+  if (subAccount === false && resolvedParentAccountId !== undefined) {
+    throw new Error(`QuickBooks account ${metadata.sourceObjectId} has a parent account id but is marked as a root account.`);
+  }
+  if (resolvedParentAccountId === metadata.sourceObjectId) {
+    throw new Error(`QuickBooks account ${metadata.sourceObjectId} cannot be its own parent.`);
+  }
   const currency = optionalReference(input.currency);
   const classification = normalizedAccountClassification(optionalString(input, "classification"));
   const accountSubType = optionalString(input, "accountSubType");
@@ -600,9 +619,14 @@ function accountResource(
       accountType,
       ...(accountSubType === undefined ? {} : { accountSubType }),
       ...(classification === undefined ? {} : { classification }),
-      ...(parentRef === undefined
+      ...(resolvedParentAccountId === undefined
         ? {}
-        : { parentAccountRef: { sourceObjectId: parentRef.value, ...(parentRef.name === undefined ? {} : { displayName: parentRef.name }) } }),
+        : {
+            parentAccountRef: {
+              sourceObjectId: resolvedParentAccountId,
+              ...(resolvedParentAccountName === undefined ? {} : { displayName: resolvedParentAccountName })
+            }
+          }),
       ...(active === undefined ? {} : { active }),
       ...(currency?.value === undefined ? {} : { currencyCode: currency.value }),
       ...(metadata.sourceUpdatedAt === undefined ? {} : { sourceUpdatedAt: metadata.sourceUpdatedAt }),

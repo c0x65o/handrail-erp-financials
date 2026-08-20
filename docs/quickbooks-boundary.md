@@ -110,13 +110,25 @@ Recommended identity fields:
 - checkpoint id
 - source payload ref
 
-QuickBooks `parentAccountRef` may be resolved by source adapters into canonical
-`Account.parentAccountId`, but that is the boundary. Report builders, hierarchy
+QuickBooks SDK accounts may provide `parentRef.value`, `parentAccountId`, or
+both when they agree. The envelope adapter resolves that stable provider id to
+`parentAccountRef`, and source adapters resolve it into canonical
+`Account.parentAccountId`. Conflicting, missing, or self-referential provider
+parent fields are rejected before canonical mapping. Report builders, hierarchy
 rollup helpers, snapshot/read-model code, validators, and drilldown helpers must
 not infer hierarchy from QuickBooks names, `FullyQualifiedName`, account
 numbers, categories, `sourceAccountId`, OAuth state, or raw provider payloads.
 The provider-neutral hierarchy and nested report row contract is defined in
 [account-hierarchy-rules.md](account-hierarchy-rules.md).
+
+Postgres account upserts validate the complete prospective tenant/source graph
+before writing, overlaying incremental account changes on stored accounts. SDK
+Chart of Accounts and financial-statement reads use canonical
+`accounts.parent_account_id` when a source account has no explicit
+reporting-book mapping. An explicit mapped reporting-book account and its
+`parent_book_account_key` remain authoritative. General Ledger account filters
+expand through that same effective hierarchy so a parent drilldown includes
+direct postings and every descendant.
 
 ## Public Normalized Contracts
 

@@ -38,6 +38,7 @@ import {
   createCompanySourceBinding,
   createCompactDrilldownRef
 } from "./canonical-model.js";
+import { assertValidAccountHierarchy } from "./account-hierarchy.js";
 import { persistQuickBooksSubledgerResources } from "./quickbooks-subledger-import.js";
 import type {
   PersistQuickBooksSubledgerResourcesInput,
@@ -451,6 +452,7 @@ export function createPostgresStorageAdapter(
       ]);
     },
     async upsertAccounts(accounts) {
+      await assertProspectiveAccountHierarchy(client, manifest, accounts);
       return upsertRows(client, manifest, "accounts", accounts.map(accountRow), [
         "tenant_id",
         "source_id",
@@ -617,6 +619,57 @@ export function createPostgresStorageAdapter(
       return loadStandardReportPresentation(client, manifest, request);
     }
   };
+}
+
+async function assertProspectiveAccountHierarchy(
+  client: PostgresQueryClient,
+  manifest: PostgresSchemaManifest,
+  accounts: readonly Account[]
+): Promise<void> {
+  const byScope = new Map<string, Account[]>();
+  for (const account of accounts) {
+    const scopeKey = `${account.tenantId}\u0000${account.sourceId}`;
+    const scoped = byScope.get(scopeKey) ?? [];
+    scoped.push(account);
+    byScope.set(scopeKey, scoped);
+  }
+
+  for (const scopedAccounts of byScope.values()) {
+    const first = scopedAccounts[0];
+    if (first === undefined) continue;
+    const existing = await loadAccounts(client, manifest, {
+      tenantId: first.tenantId,
+      sourceId: first.sourceId
+    });
+    const prospective = new Map(existing.map((account) => [account.accountId, account]));
+    for (const account of scopedAccounts) prospective.set(account.accountId, account);
+    const prospectiveAccounts = [...prospective.values()];
+    const prospectiveIds = new Set(prospective.keys());
+    const unresolvedParentIds = [...new Set(prospectiveAccounts
+      .map((account) => account.parentAccountId)
+      .filter((parentAccountId): parentAccountId is string =>
+        parentAccountId !== undefined && !prospectiveIds.has(parentAccountId)))];
+    const crossScopeCandidates = await loadAccountCandidatesByIds(client, manifest, unresolvedParentIds);
+    assertValidAccountHierarchy([...prospectiveAccounts, ...crossScopeCandidates], {
+      accountsToValidate: prospectiveAccounts
+    });
+  }
+}
+
+async function loadAccountCandidatesByIds(
+  client: PostgresQueryClient,
+  manifest: PostgresSchemaManifest,
+  accountIds: readonly string[]
+): Promise<readonly Account[]> {
+  if (accountIds.length === 0) return [];
+  const result = await client.query(
+    `select "account_id", "tenant_id", "source_id", "source_account_id", "account_number", "name", "type", "subtype", "classification", "parent_account_id", "currency_code", "active"
+from ${qualifiedTable(manifest, "accounts")}
+where "account_id" = any($1::text[])
+order by "tenant_id", "source_id", "account_id"`,
+    [accountIds]
+  );
+  return result.rows.map(accountFromRow);
 }
 
 export async function installPostgresSchema(

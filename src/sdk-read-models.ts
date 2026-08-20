@@ -2865,7 +2865,40 @@ async function listGeneralLedger(
   return scope.database.transaction(async (client) => {
     const book = await resolveBook(client, scope);
     const result = await client.query(
-      `select posting."posting_id", posting."source_id", posting."source_posting_id", posting."transaction_id",
+      `with recursive effective_accounts as (
+  select account."tenant_id", account."source_id", account."account_id",
+    coalesce(mapping."book_account_key", account."source_id" || ':' || account."account_id") as "book_account_key",
+    case when mapping."book_account_key" is not null then book_account."parent_book_account_key"
+      else coalesce(parent_mapping."book_account_key",
+        case when parent_account."account_id" is null then null
+          else parent_account."source_id" || ':' || parent_account."account_id" end)
+    end as "parent_book_account_key"
+  from "erp_financials"."accounts" account
+  join "erp_financials"."reporting_book_sources" hierarchy_source
+    on hierarchy_source."tenant_id" = $1 and hierarchy_source."company_id" = $2
+   and hierarchy_source."book_id" = $3 and hierarchy_source."source_id" = account."source_id"
+  left join "erp_financials"."reporting_book_account_mappings" mapping
+    on mapping."tenant_id" = $1 and mapping."company_id" = $2 and mapping."book_id" = $3
+   and mapping."source_id" = account."source_id" and mapping."account_id" = account."account_id"
+  left join "erp_financials"."reporting_book_accounts" book_account
+    on book_account."tenant_id" = $1 and book_account."company_id" = $2 and book_account."book_id" = $3
+   and book_account."book_account_key" = mapping."book_account_key"
+  left join "erp_financials"."accounts" parent_account
+    on parent_account."tenant_id" = account."tenant_id" and parent_account."source_id" = account."source_id"
+   and parent_account."account_id" = account."parent_account_id"
+  left join "erp_financials"."reporting_book_account_mappings" parent_mapping
+    on parent_mapping."tenant_id" = $1 and parent_mapping."company_id" = $2 and parent_mapping."book_id" = $3
+   and parent_mapping."source_id" = parent_account."source_id" and parent_mapping."account_id" = parent_account."account_id"
+  where account."tenant_id" = $1
+), selected_account_keys("book_account_key") as (
+  select $8::text where $8::text is not null
+  union
+  select account."book_account_key"
+  from effective_accounts account
+  join selected_account_keys selected
+    on account."parent_book_account_key" = selected."book_account_key"
+)
+select posting."posting_id", posting."source_id", posting."source_posting_id", posting."transaction_id",
   transaction."source_transaction_id", transaction."source_transaction_type", transaction."transaction_number",
   transaction."transaction_date", posting."posting_date", posting."account_id",
   coalesce(mapping."book_account_key", posting."source_id" || ':' || posting."account_id") as "book_account_key",
@@ -2894,7 +2927,9 @@ left join "erp_financials"."parties" party
   on party."tenant_id" = posting."tenant_id" and party."source_id" = posting."source_id" and party."party_id" = posting."party_id"
 where posting."tenant_id" = $1 and posting."accounting_basis" = $4 and posting."currency_code" = $5
   and posting."posting_date" between $6::date and $7::date
-  and ($8::text is null or coalesce(mapping."book_account_key", posting."source_id" || ':' || posting."account_id") = $8)
+  and ($8::text is null or coalesce(mapping."book_account_key", posting."source_id" || ':' || posting."account_id") in (
+    select "book_account_key" from selected_account_keys
+  ))
   and ($9::text is null or posting."source_id" = $9)
   and ($10::text is null or transaction."source_transaction_type" = $10)
   and ($11::text is null or exists (
@@ -2934,7 +2969,40 @@ async function getGeneralLedgerSummary(
   return scope.database.transaction(async (client) => {
     const book = await resolveBook(client, scope);
     const result = await client.query(
-      `select count(*)::integer as "posting_count", coalesce(sum(posting."debit_amount"), 0) as "debits",
+      `with recursive effective_accounts as (
+  select account."tenant_id", account."source_id", account."account_id",
+    coalesce(mapping."book_account_key", account."source_id" || ':' || account."account_id") as "book_account_key",
+    case when mapping."book_account_key" is not null then book_account."parent_book_account_key"
+      else coalesce(parent_mapping."book_account_key",
+        case when parent_account."account_id" is null then null
+          else parent_account."source_id" || ':' || parent_account."account_id" end)
+    end as "parent_book_account_key"
+  from "erp_financials"."accounts" account
+  join "erp_financials"."reporting_book_sources" hierarchy_source
+    on hierarchy_source."tenant_id" = $1 and hierarchy_source."company_id" = $2
+   and hierarchy_source."book_id" = $3 and hierarchy_source."source_id" = account."source_id"
+  left join "erp_financials"."reporting_book_account_mappings" mapping
+    on mapping."tenant_id" = $1 and mapping."company_id" = $2 and mapping."book_id" = $3
+   and mapping."source_id" = account."source_id" and mapping."account_id" = account."account_id"
+  left join "erp_financials"."reporting_book_accounts" book_account
+    on book_account."tenant_id" = $1 and book_account."company_id" = $2 and book_account."book_id" = $3
+   and book_account."book_account_key" = mapping."book_account_key"
+  left join "erp_financials"."accounts" parent_account
+    on parent_account."tenant_id" = account."tenant_id" and parent_account."source_id" = account."source_id"
+   and parent_account."account_id" = account."parent_account_id"
+  left join "erp_financials"."reporting_book_account_mappings" parent_mapping
+    on parent_mapping."tenant_id" = $1 and parent_mapping."company_id" = $2 and parent_mapping."book_id" = $3
+   and parent_mapping."source_id" = parent_account."source_id" and parent_mapping."account_id" = parent_account."account_id"
+  where account."tenant_id" = $1
+), selected_account_keys("book_account_key") as (
+  select $8::text where $8::text is not null
+  union
+  select account."book_account_key"
+  from effective_accounts account
+  join selected_account_keys selected
+    on account."parent_book_account_key" = selected."book_account_key"
+)
+select count(*)::integer as "posting_count", coalesce(sum(posting."debit_amount"), 0) as "debits",
   coalesce(sum(posting."credit_amount"), 0) as "credits"
 from "erp_financials"."ledger_postings" posting
 join "erp_financials"."transactions" transaction
@@ -2954,7 +3022,9 @@ left join "erp_financials"."parties" party
   on party."tenant_id" = posting."tenant_id" and party."source_id" = posting."source_id" and party."party_id" = posting."party_id"
 where posting."tenant_id" = $1 and posting."accounting_basis" = $4 and posting."currency_code" = $5
   and posting."posting_date" between $6::date and $7::date
-  and ($8::text is null or coalesce(mapping."book_account_key", posting."source_id" || ':' || posting."account_id") = $8)
+  and ($8::text is null or coalesce(mapping."book_account_key", posting."source_id" || ':' || posting."account_id") in (
+    select "book_account_key" from selected_account_keys
+  ))
   and ($9::text is null or posting."source_id" = $9)
   and ($10::text is null or transaction."source_transaction_type" = $10)
   and ($11::text is null or exists (
@@ -3007,7 +3077,12 @@ async function listChartOfAccounts(
   coalesce(min(book_account."account_type"), min(account."type")) as "account_type",
   coalesce(min(book_account."account_subtype"), min(account."subtype")) as "account_subtype",
   min(book_account."account_role") as "account_role", min(book_account."version") as "version",
-  min(book_account."parent_book_account_key") as "parent_book_account_key",
+  case when count(mapping."book_account_key") > 0
+    then min(book_account."parent_book_account_key")
+    else min(coalesce(parent_mapping."book_account_key",
+      case when parent_account."account_id" is null then null
+        else parent_account."source_id" || ':' || parent_account."account_id" end))
+  end as "parent_book_account_key",
   coalesce(bool_or(book_account."active"), bool_or(account."active")) as "active",
   coalesce(sum(posting."debit_amount"), 0) as "debit_amount",
   coalesce(sum(posting."credit_amount"), 0) as "credit_amount", coalesce(sum(posting."net_amount"), 0) as "balance"
@@ -3021,12 +3096,18 @@ left join "erp_financials"."reporting_book_account_mappings" mapping
 left join "erp_financials"."reporting_book_accounts" book_account
   on book_account."tenant_id" = $1 and book_account."company_id" = $2 and book_account."book_id" = $3
  and book_account."book_account_key" = mapping."book_account_key"
+left join "erp_financials"."accounts" parent_account
+  on parent_account."tenant_id" = account."tenant_id" and parent_account."source_id" = account."source_id"
+ and parent_account."account_id" = account."parent_account_id"
+left join "erp_financials"."reporting_book_account_mappings" parent_mapping
+  on parent_mapping."tenant_id" = $1 and parent_mapping."company_id" = $2 and parent_mapping."book_id" = $3
+ and parent_mapping."source_id" = parent_account."source_id" and parent_mapping."account_id" = parent_account."account_id"
 left join "erp_financials"."ledger_postings" posting
   on posting."tenant_id" = account."tenant_id" and posting."source_id" = account."source_id" and posting."account_id" = account."account_id"
  and posting."accounting_basis" = $5 and posting."currency_code" = $6 and posting."posting_date" <= $4::date
  and (source."effective_from" is null or source."effective_from" <= posting."posting_date")
  and (source."effective_through" is null or source."effective_through" >= posting."posting_date")
-where account."tenant_id" = $1 and ($7::boolean or coalesce(book_account."active", account."active"))
+where account."tenant_id" = $1 and ($7::boolean or mapping."book_account_key" is null or book_account."active")
 group by coalesce(mapping."book_account_key", account."source_id" || ':' || account."account_id")
 order by min(account."account_number") nulls last, min(account."name"), "book_account_key"`,
       [scope.tenantId, scope.companyId, scope.bookId, asOfDate, book.accountingBasis, book.currencyCode, input.includeInactive === true]
@@ -3039,11 +3120,11 @@ where "tenant_id" = $1 and "company_id" = $2 and "book_id" = $3 and ($4::boolean
 order by "account_number" nulls last, "name", "book_account_key"`,
       [scope.tenantId, scope.companyId, scope.bookId, input.includeInactive === true]
     );
-    return rollupChartAccounts(mergeBookChartAccounts(
+    return visibleChartAccounts(rollupChartAccounts(mergeBookChartAccounts(
       result.rows.map((row) => chartAccountFromRow(row, book.currencyCode)),
       defined.rows,
       book.currencyCode
-    ));
+    )), input.includeInactive === true);
   });
 }
 
@@ -3125,7 +3206,12 @@ async function getFinancialStatement(
     const book = await resolveBook(client, scope);
     const result = await client.query(
       `select coalesce(mapping."book_account_key", account."source_id" || ':' || account."account_id") as "book_account_key",
-  min(book_account."parent_book_account_key") as "parent_book_account_key",
+  case when count(mapping."book_account_key") > 0
+    then min(book_account."parent_book_account_key")
+    else min(coalesce(parent_mapping."book_account_key",
+      case when parent_account."account_id" is null then null
+        else parent_account."source_id" || ':' || parent_account."account_id" end))
+  end as "parent_book_account_key",
   coalesce(min(book_account."account_number"), min(account."account_number")) as "account_number",
   coalesce(min(book_account."name"), min(account."name")) as "account_name",
   coalesce(min(book_account."classification"), min(account."classification")) as "classification",
@@ -3141,6 +3227,12 @@ left join "erp_financials"."reporting_book_account_mappings" mapping
 left join "erp_financials"."reporting_book_accounts" book_account
   on book_account."tenant_id" = $1 and book_account."company_id" = $2 and book_account."book_id" = $3
  and book_account."book_account_key" = mapping."book_account_key"
+left join "erp_financials"."accounts" parent_account
+  on parent_account."tenant_id" = account."tenant_id" and parent_account."source_id" = account."source_id"
+ and parent_account."account_id" = account."parent_account_id"
+left join "erp_financials"."reporting_book_account_mappings" parent_mapping
+  on parent_mapping."tenant_id" = $1 and parent_mapping."company_id" = $2 and parent_mapping."book_id" = $3
+ and parent_mapping."source_id" = parent_account."source_id" and parent_mapping."account_id" = parent_account."account_id"
 left join "erp_financials"."ledger_postings" posting
   on posting."tenant_id" = account."tenant_id" and posting."source_id" = account."source_id" and posting."account_id" = account."account_id"
  and posting."accounting_basis" = $4 and posting."currency_code" = $5
@@ -3148,7 +3240,7 @@ left join "erp_financials"."ledger_postings" posting
    or ($8 <> 'profit_and_loss' and posting."posting_date" <= $9::date))
  and (source."effective_from" is null or source."effective_from" <= posting."posting_date")
  and (source."effective_through" is null or source."effective_through" >= posting."posting_date")
-where account."tenant_id" = $1 and coalesce(book_account."active", account."active")
+where account."tenant_id" = $1 and (mapping."book_account_key" is null or book_account."active")
   and (($8 = 'profit_and_loss' and coalesce(book_account."classification", account."classification") in ('income', 'cost_of_goods_sold', 'expense', 'other_income', 'other_expense'))
     or ($8 = 'balance_sheet' and coalesce(book_account."classification", account."classification") in ('asset', 'liability', 'equity'))
     or $8 = 'trial_balance')
@@ -4109,7 +4201,35 @@ function rollupChartAccounts(accounts: readonly ChartOfAccountsItem[]): readonly
     memo.set(account.bookAccountKey, total);
     return total;
   };
-  return accounts.map((account) => ({ ...account, ...visit(account, new Set()) }));
+  return orderAccountHierarchy(
+    accounts.map((account) => ({ ...account, ...visit(account, new Set()) })),
+    (account) => account.bookAccountKey,
+    (account) => account.parentBookAccountKey
+  );
+}
+
+function visibleChartAccounts(
+  accounts: readonly ChartOfAccountsItem[],
+  includeInactive: boolean
+): readonly ChartOfAccountsItem[] {
+  if (includeInactive) return accounts;
+  const children = new Map<string, ChartOfAccountsItem[]>();
+  for (const account of accounts) {
+    if (account.parentBookAccountKey === undefined) continue;
+    const entries = children.get(account.parentBookAccountKey) ?? [];
+    entries.push(account);
+    children.set(account.parentBookAccountKey, entries);
+  }
+  const retained = new Map<string, boolean>();
+  const retain = (account: ChartOfAccountsItem): boolean => {
+    const cached = retained.get(account.bookAccountKey);
+    if (cached !== undefined) return cached;
+    const visible = account.active || account.directBalance !== "0.00" ||
+      (children.get(account.bookAccountKey) ?? []).some(retain);
+    retained.set(account.bookAccountKey, visible);
+    return visible;
+  };
+  return accounts.filter(retain);
 }
 
 function statementLineFromRow(row: Readonly<Record<string, unknown>>): FinancialStatementLine {
@@ -4190,7 +4310,39 @@ function rollupStatementLines(lines: readonly FinancialStatementLine[]): readonl
     memo.set(line.bookAccountKey, total);
     return total;
   };
-  return lines.map((line) => ({ ...line, ...visit(line, new Set()) }));
+  return orderAccountHierarchy(
+    lines.map((line) => ({ ...line, ...visit(line, new Set()) })),
+    (line) => line.bookAccountKey,
+    (line) => line.parentBookAccountKey
+  );
+}
+
+function orderAccountHierarchy<Item>(
+  items: readonly Item[],
+  keyFor: (item: Item) => string,
+  parentFor: (item: Item) => string | undefined
+): readonly Item[] {
+  const byKey = new Map(items.map((item) => [keyFor(item), item]));
+  const children = new Map<string | undefined, Item[]>();
+  for (const item of items) {
+    const parentKey = parentFor(item);
+    const effectiveParent = parentKey !== undefined && byKey.has(parentKey) ? parentKey : undefined;
+    const entries = children.get(effectiveParent) ?? [];
+    entries.push(item);
+    children.set(effectiveParent, entries);
+  }
+  const ordered: Item[] = [];
+  const visited = new Set<string>();
+  const visit = (item: Item): void => {
+    const key = keyFor(item);
+    if (visited.has(key)) return;
+    visited.add(key);
+    ordered.push(item);
+    for (const child of children.get(key) ?? []) visit(child);
+  };
+  for (const root of children.get(undefined) ?? []) visit(root);
+  for (const item of items) visit(item);
+  return ordered;
 }
 
 function statementTotals(

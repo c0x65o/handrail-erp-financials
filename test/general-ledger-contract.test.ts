@@ -68,6 +68,8 @@ describe("general-ledger public contract", () => {
     ]);
     expect(client.listSql).toContain("jsonb_array_elements");
     expect(client.listSql).toContain("strpos(lower(concat_ws");
+    expect(client.listSql).toContain("with recursive effective_accounts");
+    expect(client.listSql).toContain("join selected_account_keys selected");
 
     await expect(queries.getGeneralLedgerSummary(filters)).resolves.toMatchObject({
       postingCount: 2,
@@ -76,6 +78,8 @@ describe("general-ledger public contract", () => {
       difference: "-15.00"
     });
     expect(client.summaryParams.slice(5)).toEqual(client.listParams.slice(5, 15));
+    expect(client.summarySql).toContain("with recursive effective_accounts");
+    expect(client.summarySql).toContain('select "book_account_key" from selected_account_keys');
 
     await expect(queries.listGeneralLedger({
       ...filters,
@@ -205,6 +209,7 @@ class LedgerClient implements PostgresQueryClient {
   listSql = "";
   listParams: readonly unknown[] = [];
   summaryParams: readonly unknown[] = [];
+  summarySql = "";
 
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
@@ -214,7 +219,8 @@ class LedgerClient implements PostgresQueryClient {
     if (sql.includes('from "erp_financials"."reporting_books"')) {
       return result([{ base_currency_code: "USD", accounting_basis: "accrual", status: "active" }]);
     }
-    if (sql.startsWith("select count(*)::integer")) {
+    if (sql.includes('select count(*)::integer as "posting_count"')) {
+      this.summarySql = sql;
       this.summaryParams = params;
       return result([{ posting_count: 2, debits: "10", credits: "25" }]);
     }

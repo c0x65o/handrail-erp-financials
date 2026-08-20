@@ -203,6 +203,19 @@ ids to diagnose the bad hierarchy.
   `sourceAccountId`, OAuth state, raw provider payloads, and other
   provider-owned metadata are not hierarchy authority after canonical mapping.
 
+## Reporting-Book Overrides
+
+- An explicit `reporting_book_account_mappings` row selects the effective
+  reporting-book account for that source account.
+- When that mapping exists, the mapped reporting-book account's
+  `parent_book_account_key` is authoritative, including an explicit root with
+  no parent.
+- When no explicit mapping exists, SDK read models retain the canonical
+  `Account.parentAccountId` edge using provider-neutral effective account keys.
+- A canonical parent that is explicitly mapped may be used as the effective
+  parent of an unmapped canonical child. Consumers must not duplicate or infer
+  a second hierarchy edge.
+
 ## Drilldown Semantics
 
 Hierarchy drilldowns explain the same subtree as the visible line amount.

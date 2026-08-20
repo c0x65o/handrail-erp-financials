@@ -48,10 +48,11 @@ export function validateAccountHierarchy(
   const allAccounts = sortedAccounts(dedupeAccountsByScopeKey([...accounts, ...accountsToValidate]));
   const accountsById = accountsByAccountId(allAccounts);
   const accountsByScopeKey = new Map(allAccounts.map((account) => [accountScopeKey(account), account]));
+  const validationKeys = new Set(accountsToValidate.map(accountScopeKey));
   const validParentByChildKey = new Map<string, string>();
   const diagnostics: AccountHierarchyDiagnostic[] = [];
 
-  for (const account of sortedAccounts(accountsToValidate)) {
+  for (const account of allAccounts) {
     if (account.parentAccountId === undefined) {
       continue;
     }
@@ -60,6 +61,7 @@ export function validateAccountHierarchy(
     const sameScopeParent = parentCandidates.find((parent) => hasSameTenantAndSource(account, parent));
 
     if (sameScopeParent === undefined) {
+      if (!validationKeys.has(accountScopeKey(account))) continue;
       const crossScopeParent = parentCandidates[0];
       diagnostics.push(
         crossScopeParent === undefined
