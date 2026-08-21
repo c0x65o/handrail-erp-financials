@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type { JsonValue } from "./canonical-model.js";
+import type { NormalizedQuickBooksLedgerTransaction } from "./normalized-accounting-contracts.js";
 import type { PostgresQueryClient } from "./postgres-storage.js";
 import type { CanonicalAccountingFactSet } from "./source-adapters.js";
 import type { HandrailQuickBooksSdkResourceSet } from "./source-adapters.js";
@@ -408,6 +409,38 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
     }
   }
 
+  // QuickBooks Balance/UnappliedAmt is the authoritative current snapshot.
+  // Applications preserve the dated history, but a provider may omit or
+  // normalize LinkedTxn evidence differently; never let that make the current
+  // operational balance disagree with QuickBooks.
+  for (const resource of operationalDocuments) {
+    if (resource.syncAction === "voided" || resource.syncAction === "deleted") continue;
+    const normalized = resource.resource;
+    const documentType = importedDocumentType(normalized.sourceTransactionType);
+    const originalAmount = positiveAmount(normalized.totalAmount);
+    if (documentType === undefined || originalAmount === undefined) continue;
+    const openAmount = reportedQuickBooksOpenAmount(documentType, normalized, originalAmount);
+    const documentId = documentIdBySourceId.get(normalized.sourceTransactionId);
+    if (openAmount === undefined || documentId === undefined) continue;
+    await input.client.query(
+      `update "erp_financials"."subledger_documents"
+set "open_amount" = $5,
+  "status" = case when $5::numeric = 0 then 'settled'
+    when $5::numeric = "original_amount" then 'open' else 'partially_applied' end,
+  "version" = "version" + 1, "updated_at" = $6
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
+  and "subledger_document_id" = $4 and "open_amount" is distinct from $5::numeric`,
+      [
+        input.facts.company.tenantId,
+        input.companyId,
+        input.facts.source.sourceId,
+        documentId,
+        openAmount,
+        input.importedAt
+      ]
+    );
+  }
+
   for (const resource of operationalDocuments) {
     if (resource.syncAction !== "voided" && resource.syncAction !== "deleted") continue;
     const source = resource.resource;
@@ -452,6 +485,9 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
   }
 
   const retiredNonDocumentTransactions = [
+    // Older normalized-sync envelopes can omit this family even though the
+    // current resource-set contract materializes it as an empty array.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
     ...(input.resources.journalEntries ?? []).map((resource) => ({
       syncAction: resource.syncAction,
       sourceTransactionType: "JournalEntry",
@@ -644,6 +680,37 @@ function positiveAmount(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
   const amount = Math.abs(Number(value));
   return Number.isFinite(amount) && amount > 0 ? amount.toFixed(2) : undefined;
+}
+
+function reportedQuickBooksOpenAmount(
+  documentType: ImportedDocumentType,
+  normalized: NormalizedQuickBooksLedgerTransaction,
+  originalAmount: string
+): string | undefined {
+  const value = documentType === "customer_payment"
+    ? normalized.unappliedAmount
+    : documentType === "invoice"
+      ? normalized.openAmount
+      : documentType === "bill_payment"
+        ? normalized.unappliedAmount ?? normalized.openAmount
+        : normalized.openAmount ?? normalized.unappliedAmount;
+  if (value === undefined) {
+    if (documentType === "invoice" || documentType === "customer_payment") {
+      const requiredField = documentType === "invoice" ? "Balance" : "UnappliedAmt";
+      throw new Error(
+        `QuickBooks ${normalized.sourceTransactionType} ${normalized.sourceTransactionId} is missing authoritative ${requiredField}; refusing to import an unreliable A/R balance`
+      );
+    }
+    return undefined;
+  }
+  const amount = Math.abs(Number(value));
+  const original = Number(originalAmount);
+  if (!Number.isFinite(amount) || amount < 0 || amount > original) {
+    throw new Error(
+      `QuickBooks ${normalized.sourceTransactionType} ${normalized.sourceTransactionId} reported open amount ${value} outside its original amount ${originalAmount}`
+    );
+  }
+  return amount.toFixed(2);
 }
 
 function commercialLineAmounts(

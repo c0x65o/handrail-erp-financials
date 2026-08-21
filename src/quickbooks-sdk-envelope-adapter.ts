@@ -905,7 +905,12 @@ function ledgerLine(
   }
   const lineId = requiredString(first.input, "lineId", `QuickBooks ledger entry ${first.metadata.sourceObjectId}`);
   const transactionId = requiredString(first.input, "transactionId", `QuickBooks ledger entry ${first.metadata.sourceObjectId}`);
-  const normalizedLine = transactionLines.get(`${first.metadata.sourceObject}:${transactionId}:${lineId}`);
+  const normalizedLine = normalizedTransactionLine(
+    transactionLines,
+    first.metadata.sourceObject,
+    transactionId,
+    lineId
+  );
   const linkedTransactions = normalizedQuickBooksLinkedTransactions(normalizedLine?.linkedTransactions);
   const sourceAmount = optionalNumber(normalizedLine, "amount");
   const sourceQuantity = optionalNumber(normalizedLine, "quantity");
@@ -942,6 +947,27 @@ function ledgerLine(
     postings,
     sourcePayloadRef
   };
+}
+
+function normalizedTransactionLine(
+  transactionLines: ReadonlyMap<string, Record<string, unknown>>,
+  sourceObject: string,
+  transactionId: string,
+  ledgerLineId: string
+): Record<string, unknown> | undefined {
+  const exact = transactionLines.get(`${sourceObject}:${transactionId}:${ledgerLineId}`);
+  if (exact !== undefined) return exact;
+
+  const derivedPrefix = sourceObject === "Payment"
+    ? "derived-ar-"
+    : sourceObject === "BillPayment"
+      ? "derived-ap-"
+      : undefined;
+  if (derivedPrefix === undefined || !ledgerLineId.startsWith(derivedPrefix)) return undefined;
+
+  const sourceLineId = ledgerLineId.slice(derivedPrefix.length);
+  if (sourceLineId.length === 0 || sourceLineId === "offset" || sourceLineId === "unapplied") return undefined;
+  return transactionLines.get(`${sourceObject}:${transactionId}:${sourceLineId}`);
 }
 
 function ledgerPosting(

@@ -306,6 +306,11 @@ describe("pre-v1 SDK foundation", () => {
       "vendor_1",
       "partial"
     ]));
+    expect(client.billListSql).toContain('document."metadata" ->> \'provider\' = \'quickbooks\'');
+    expect(client.billListSql).toContain('then document."open_amount"');
+    expect(client.billListSql).toContain("('bill_payment_to_bill', 'vendor_credit_to_bill')");
+    expect(client.billSummarySql).toContain('document."metadata" ->> \'provider\' = \'quickbooks\'');
+    expect(client.billSummarySql).toContain('then document."open_amount"');
   });
 
   it("exposes guarded bill-payment list filters and versioned lifecycle detail", async () => {
@@ -581,6 +586,8 @@ class BalanceSheetStatementClient implements PostgresQueryClient {
 
 class VendorBillClient implements PostgresQueryClient {
   billListParams: readonly unknown[] = [];
+  billListSql = "";
+  billSummarySql = "";
 
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
@@ -592,6 +599,7 @@ class VendorBillClient implements PostgresQueryClient {
       });
     }
     if (sql.includes("with bill_balances as")) {
+      this.billListSql = sql;
       if (params[6] === "partial") this.billListParams = params;
       return Promise.resolve({ rows: [{
         bill_id: "bill_1",
@@ -648,6 +656,7 @@ class VendorBillClient implements PostgresQueryClient {
       }] as unknown as Row[] });
     }
     if (sql.includes("with bills as")) {
+      this.billSummarySql = sql;
       return Promise.resolve({ rows: [{
         outstanding_amount: "75",
         outstanding_count: 1,

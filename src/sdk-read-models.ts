@@ -1671,7 +1671,12 @@ async function listVendorBills(
   select document."subledger_document_id" as "bill_id", document."source_id", document."transaction_id",
     document."party_id", party."display_name" as "party_name", document."document_number",
     document."document_date", document."due_date", document."currency_code", document."original_amount",
-    greatest(document."original_amount" - coalesce(applied."amount", 0), 0)::numeric as "calculated_open_amount",
+    case
+      when document."metadata" ->> 'provider' = 'quickbooks'
+        and document."updated_at" < ($4::date + interval '1 day')
+        then document."open_amount"
+      else greatest(document."original_amount" - coalesce(applied."amount", 0), 0)::numeric
+    end as "calculated_open_amount",
     document."version",
     coalesce(terminal."correction_date", case
       when document."status" = 'voided' and document."updated_at" < ($4::date + interval '1 day')
@@ -1699,7 +1704,8 @@ async function listVendorBills(
      and ended_event."source_id" = application."source_id" and ended_event."event_id" = application."ended_event_id"
     where application."tenant_id" = document."tenant_id" and application."company_id" = document."company_id"
       and application."source_id" = document."source_id" and application."target_document_id" = document."subledger_document_id"
-      and application."application_type" = 'bill_payment_to_bill' and application."application_date" <= $4::date
+      and application."application_type" in ('bill_payment_to_bill', 'vendor_credit_to_bill')
+      and application."application_date" <= $4::date
       and applied_event."occurred_at" < ($4::date + interval '1 day')
       and (ended_event."event_id" is null or ended_event."occurred_at" >= ($4::date + interval '1 day'))
   ) applied on true
@@ -1859,7 +1865,12 @@ async function getVendorBillSummary(
     const result = await client.query(
       `with bills as (
   select document."original_amount", document."due_date",
-    greatest(document."original_amount" - coalesce(applied."amount", 0), 0)::numeric as "open_amount",
+    case
+      when document."metadata" ->> 'provider' = 'quickbooks'
+        and document."updated_at" < ($4::date + interval '1 day')
+        then document."open_amount"
+      else greatest(document."original_amount" - coalesce(applied."amount", 0), 0)::numeric
+    end as "open_amount",
     coalesce(period_applied."amount", 0)::numeric as "paid_in_period_amount",
     coalesce(terminal."correction_date", case
       when document."status" = 'voided' and document."updated_at" < ($4::date + interval '1 day')
@@ -1884,7 +1895,8 @@ async function getVendorBillSummary(
      and ended_event."source_id" = application."source_id" and ended_event."event_id" = application."ended_event_id"
     where application."tenant_id" = document."tenant_id" and application."company_id" = document."company_id"
       and application."source_id" = document."source_id" and application."target_document_id" = document."subledger_document_id"
-      and application."application_type" = 'bill_payment_to_bill' and application."application_date" <= $4::date
+      and application."application_type" in ('bill_payment_to_bill', 'vendor_credit_to_bill')
+      and application."application_date" <= $4::date
       and applied_event."occurred_at" < ($4::date + interval '1 day')
       and (ended_event."event_id" is null or ended_event."occurred_at" >= ($4::date + interval '1 day'))
   ) applied on true

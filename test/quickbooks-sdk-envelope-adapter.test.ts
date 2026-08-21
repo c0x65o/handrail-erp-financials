@@ -240,7 +240,14 @@ describe("QuickBooks SDK envelope adapter", () => {
           { ...invoiceMetadata("invoice_600:1"), transactionType: "invoice", transactionId: "invoice_600", lineId: "1", lineIndex: 0, lineOrder: 1, amount: 1250, quantity: 5, unitAmount: 250 }
         ],
         ledger_entries: [
-          ...(resources?.ledger_entries ?? []),
+          ...(resources?.ledger_entries ?? []).map((value) => {
+            const entry = fixtureResource(value);
+            return (
+              entry.sourceObject === "Payment" && entry.lineId === "1"
+                ? { ...entry, lineId: "derived-ar-1" }
+                : entry
+            );
+          }),
           { ...invoiceMetadata("invoice_600:1"), transactionId: "invoice_600", transactionType: "invoice", lineId: "1", transactionDate: "2026-08-01", postingType: "Credit", amount: 1250, account: { value: "400", name: "Service Revenue" }, party: { value: "customer_20", name: "Acme" }, currency: { value: "USD" } },
           { ...invoiceMetadata("invoice_600:ar"), transactionId: "invoice_600", transactionType: "invoice", lineId: "derived-ar-offset", transactionDate: "2026-08-01", postingType: "Debit", amount: 1250, account: { value: "110", name: "Accounts Receivable" }, party: { value: "customer_20", name: "Acme" }, currency: { value: "USD" } }
         ]
@@ -273,6 +280,45 @@ describe("QuickBooks SDK envelope adapter", () => {
       unresolvedApplications: []
     });
     expect(calls.filter((sql) => sql.includes('insert into "erp_financials"."subledger_applications"'))).toHaveLength(1);
+    expect(calls.some((sql) => sql.includes('set "open_amount" = $5'))).toBe(true);
+  });
+
+  it("restores BillPayment LinkedTxn evidence from derived A/P ledger line ids", () => {
+    const envelope = fullSyncEnvelope();
+    const resources = envelope.normalizedResources;
+    const adapted = adaptHandrailQuickBooksSdkFullSyncEnvelope({
+      ...envelope,
+      normalizedResources: {
+        ...resources,
+        transactions: (resources?.transactions ?? []).map((value) => ({
+          ...fixtureResource(value),
+          sourceObject: "BillPayment",
+          transactionType: "bill_payment"
+        })),
+        transaction_lines: (resources?.transaction_lines ?? []).map((value) => ({
+          ...fixtureResource(value),
+          sourceObject: "BillPayment",
+          transactionType: "bill_payment"
+        })),
+        ledger_entries: (resources?.ledger_entries ?? []).map((value) => {
+          const entry = fixtureResource(value);
+          return {
+            ...entry,
+            sourceObject: "BillPayment",
+            transactionType: "bill_payment",
+            lineId: entry.lineId === "1" ? "derived-ap-1" : entry.lineId
+          };
+        })
+      }
+    }, adapterOptions());
+
+    expect(adapted.resources.ledgerTransactions?.[0]?.resource.lines).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        sourceLineId: "derived-ap-1",
+        sourceAmount: "1250.00",
+        linkedTransactions: [{ sourceTransactionId: "invoice_600", sourceTransactionType: "Invoice" }]
+      })
+    ]));
   });
 
   it("fails closed when SDK resource identity differs from the envelope", () => {
@@ -323,6 +369,13 @@ function adapterOptions() {
     currencyCode: "USD",
     companyDisplayName: "Spartan Cyber"
   };
+}
+
+function fixtureResource(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("QuickBooks fixture resource must be an object");
+  }
+  return value as Record<string, unknown>;
 }
 
 function fullSyncEnvelope(
