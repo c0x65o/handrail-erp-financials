@@ -63,6 +63,7 @@ export async function persistQuickBooksSubledgerResources(
   const documentIdBySourceId = new Map<string, string>();
   const accountIdBySourceId = new Map(input.facts.accounts.map((account) => [account.sourceAccountId, account.accountId]));
   const itemBySourceId = new Map(input.facts.items.map((item) => [item.sourceItemId, item]));
+  const partyIdBySourceId = new Map(input.facts.parties.map((party) => [party.sourcePartyId, party.partyId]));
   const operationalDocuments = input.resources.operationalDocuments ?? input.resources.ledgerTransactions ?? [];
   for (const resource of operationalDocuments) {
     const normalized = resource.resource;
@@ -201,6 +202,14 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
     documents += result.rowCount ?? 0;
 
     const persistedLineNumbers: number[] = [];
+    if (!importsCommercialDocumentLines(documentType)) {
+      await input.client.query(
+        `delete from "erp_financials"."subledger_document_lines"
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3 and "subledger_document_id" = $4`,
+        [input.facts.company.tenantId, input.companyId, input.facts.source.sourceId, documentId]
+      );
+      continue;
+    }
     for (const line of normalized.lines) {
       const amount = positiveAmount(line.sourceAmount);
       const item = line.itemRef === undefined ? undefined : itemBySourceId.get(line.itemRef.sourceObjectId);
@@ -216,15 +225,19 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
         continue;
       }
       const commercialAmounts = commercialLineAmounts(amount, line.sourceQuantity, line.sourceUnitAmount);
+      const customerPartyId = line.partyRef?.partyType === "customer"
+        ? partyIdBySourceId.get(line.partyRef.sourceObjectId)
+        : undefined;
       const lineResult = await input.client.query(
         `insert into "erp_financials"."subledger_document_lines" (
           "subledger_document_line_id", "tenant_id", "company_id", "source_id",
-          "subledger_document_id", "line_number", "account_id", "item_id", "description",
+          "subledger_document_id", "line_number", "account_id", "item_id", "customer_party_id", "description",
           "quantity", "unit_amount", "discount_amount", "tax_code", "tax_amount",
           "dimension_refs", "line_amount"
-        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16)
+        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,$17)
         on conflict ("tenant_id", "company_id", "source_id", "subledger_document_id", "line_number") do update
         set "account_id" = excluded."account_id", "item_id" = excluded."item_id",
+          "customer_party_id" = excluded."customer_party_id",
           "description" = excluded."description", "quantity" = excluded."quantity",
           "unit_amount" = excluded."unit_amount", "discount_amount" = excluded."discount_amount",
           "tax_code" = excluded."tax_code", "tax_amount" = excluded."tax_amount",
@@ -238,6 +251,7 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
           line.lineNumber,
           accountId,
           item?.itemId ?? null,
+          customerPartyId ?? null,
           line.description ?? null,
           commercialAmounts.quantity,
           commercialAmounts.unitAmount,
@@ -647,6 +661,12 @@ function documentLineItemAccount(
     return item.expenseAccountId;
   }
   return item.assetAccountId ?? item.expenseAccountId ?? item.incomeAccountId;
+}
+
+function importsCommercialDocumentLines(documentType: ImportedDocumentType): boolean {
+  // Payment lines describe allocations to other documents; they are persisted
+  // as subledger applications below, not duplicated as commercial detail.
+  return documentType !== "customer_payment" && documentType !== "bill_payment";
 }
 
 function importedDocumentType(sourceType: string): ImportedDocumentType | undefined {

@@ -190,7 +190,7 @@ describe("QuickBooks SDK envelope adapter", () => {
 
     expect(result).toEqual({
       documents: 1,
-      documentLines: 1,
+      documentLines: 0,
       applications: 0,
       skippedTransactions: 0,
       skippedDocumentLines: 0,
@@ -237,7 +237,7 @@ describe("QuickBooks SDK envelope adapter", () => {
         ],
         transaction_lines: [
           ...(resources?.transaction_lines ?? []),
-          { ...invoiceMetadata("invoice_600:1"), transactionType: "invoice", transactionId: "invoice_600", lineId: "1", lineIndex: 0, lineOrder: 1, amount: 1250, quantity: 5, unitAmount: 250 }
+          { ...invoiceMetadata("invoice_600:1"), transactionType: "invoice", transactionId: "invoice_600", lineId: "1", lineIndex: 0, lineOrder: 1, amount: 1250, quantity: 5, unitAmount: 250, account: { value: "400", name: "Service Revenue" } }
         ],
         ledger_entries: [
           ...(resources?.ledger_entries ?? []).map((value) => {
@@ -270,7 +270,7 @@ describe("QuickBooks SDK envelope adapter", () => {
 
     expect(result).toEqual({
       documents: 2,
-      documentLines: 2,
+      documentLines: 1,
       applications: 1,
       skippedTransactions: 0,
       skippedDocumentLines: 0,
@@ -319,6 +319,109 @@ describe("QuickBooks SDK envelope adapter", () => {
         linkedTransactions: [{ sourceTransactionId: "invoice_600", sourceTransactionType: "Invoice" }]
       })
     ]));
+  });
+
+  it("keeps raw QuickBooks bill splits and their customer allocation out of the GL projection", async () => {
+    const envelope = fullSyncEnvelope();
+    const resources = envelope.normalizedResources;
+    const adapted = adaptHandrailQuickBooksSdkFullSyncEnvelope({
+      ...envelope,
+      normalizedResources: {
+        ...resources,
+        transactions: (resources?.transactions ?? []).map((value) => ({
+          ...fixtureResource(value),
+          sourceObject: "Bill",
+          transactionType: "bill",
+          balance: 0,
+          party: { value: "vendor_1", name: "TD Synnex" },
+          documentNumber: "9662951"
+        })),
+        transaction_lines: (resources?.transaction_lines ?? []).flatMap((value) => {
+          const base = {
+            ...fixtureResource(value),
+            sourceObject: "Bill",
+            transactionType: "bill",
+            quantity: 1,
+            account: { value: "400", name: "Microsoft Office Subscriptions" },
+            party: { value: "customer_20", name: "Houchens Industries, Inc." },
+            linkedTransactions: []
+          };
+          return [
+            { ...base, amount: 400, unitAmount: 400, description: "NCE Microsoft 365 Business Standard" },
+            {
+              ...base,
+              id: "payment_700:2",
+              sourceObjectId: "payment_700:2",
+              lineId: "2",
+              lineIndex: 1,
+              lineOrder: 2,
+              amount: 850,
+              unitAmount: 850,
+              description: "NCE Microsoft 365 Enterprise"
+            }
+          ];
+        }),
+        ledger_entries: (resources?.ledger_entries ?? []).map((value, index) => ({
+          ...fixtureResource(value),
+          sourceObject: "Bill",
+          transactionType: "bill",
+          lineId: `provider-general-ledger-${String(index + 1)}`,
+          party: { value: "vendor_1", name: "TD Synnex" }
+        }))
+      }
+    }, adapterOptions());
+
+    expect(adapted.resources.ledgerTransactions?.[0]?.resource.lines[0]?.postings).not.toHaveLength(0);
+    expect(adapted.resources.operationalDocuments?.[0]?.resource).toMatchObject({
+      transactionNumber: "9662951",
+      openAmount: "0.00",
+      lines: [
+        {
+          sourceLineId: "1",
+          sourceAmount: "400.00",
+          description: "NCE Microsoft 365 Business Standard",
+          accountRef: { sourceObjectId: "400" },
+          partyRef: {
+            sourceObjectId: "customer_20",
+            displayName: "Houchens Industries, Inc.",
+            partyType: "customer"
+          },
+          postings: []
+        },
+        {
+          sourceLineId: "2",
+          sourceAmount: "850.00",
+          description: "NCE Microsoft 365 Enterprise",
+          postings: []
+        }
+      ]
+    });
+
+    const mapped = mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(adapted, {
+      companyId: "company_spartan",
+      accountingBasis: "accrual",
+      currencyCode: "USD"
+    });
+    const lineInserts: readonly unknown[][] = [];
+    await persistQuickBooksSubledgerResources({
+      client: {
+        query(sql, params = []) {
+          if (sql.includes('insert into "erp_financials"."subledger_document_lines"')) {
+            (lineInserts as unknown[][]).push([...params]);
+          }
+          return Promise.resolve({ rows: [], rowCount: 1 });
+        }
+      },
+      companyId: "company_spartan",
+      importedAt: "2026-08-13T12:46:00.000Z",
+      facts: mapped.facts,
+      resources: adapted.resources
+    });
+
+    expect(lineInserts).toHaveLength(2);
+    const customerPartyId = mapped.facts.parties.find((party) => party.sourcePartyId === "customer_20")?.partyId;
+    expect(lineInserts.map((params) => params[8])).toEqual([customerPartyId, customerPartyId]);
+    expect(lineInserts.reduce((sum, params) => sum + Number(params[16]), 0)).toBe(1250);
   });
 
   it("fails closed when SDK resource identity differs from the envelope", () => {

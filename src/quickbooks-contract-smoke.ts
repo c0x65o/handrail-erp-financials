@@ -264,6 +264,7 @@ export function adaptNormalizedQuickBooksResourceSetToAdapterInput(
       accounts: resources.accounts.map(normalizedAccountToSdkResource),
       journalEntries: [],
       ledgerTransactions: normalizedLedgerTransactionResources(resources),
+      operationalDocuments: resources.operationalDocuments ?? [],
       ledgerPostings: resources.ledgerPostings ?? [],
       parties: resources.parties ?? [],
       customers: resources.customers ?? [],

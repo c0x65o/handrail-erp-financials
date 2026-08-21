@@ -147,6 +147,10 @@ const migrationFiles = {
   importedOperationalDocumentsV19: new URL(
     "../migrations/future-erp/20260819010000_add_imported_operational_document_types.sql",
     import.meta.url
+  ),
+  subledgerLineCustomersV20: new URL(
+    "../migrations/future-erp/20260821010000_add_subledger_line_customers.sql",
+    import.meta.url
   )
 } as const;
 
@@ -266,6 +270,13 @@ export const POSTGRES_MIGRATIONS: readonly PostgresMigrationDefinition[] = [
     18,
     19,
     migrationFiles.importedOperationalDocumentsV19
+  ),
+  migration(
+    "20260821010000_add_subledger_line_customers",
+    "Preserve customer allocations on imported subledger lines",
+    19,
+    20,
+    migrationFiles.subledgerLineCustomersV20
   )
 ] as const;
 

@@ -170,12 +170,15 @@ export type VendorBillListItem = {
 export type VendorBillLineReadModel = CommercialDocumentLineReadModel & {
   /** Stable account key from the source system; falls back to sourceId:accountId for legacy facts. */
   readonly sourceAccountKey: string;
+  readonly sourceAccountName?: string;
   readonly bookAccountKey?: string;
   readonly accountMappingProvenance: "reporting_book_mapping" | "source_account";
   readonly accountMappingId?: string;
   readonly sourceItemId?: string;
   readonly itemName?: string;
   readonly itemCategoryAccountId?: string;
+  readonly customerId?: string;
+  readonly customerName?: string;
   readonly categoryMappingProvenance: "item_expense_account" | "line_account_override" | "uncategorized";
 };
 
@@ -1798,7 +1801,9 @@ where document."tenant_id" = $1 and document."company_id" = $2 and document."sou
     );
     const lines = await client.query(
       `select line."subledger_document_line_id" as "line_id", line.*,
-  account."source_account_id", mapping."book_account_mapping_id", mapping."book_account_key",
+  account."source_account_id", account."name" as "source_account_name",
+  mapping."book_account_mapping_id", mapping."book_account_key",
+  customer."party_id" as "customer_party_id", customer."display_name" as "customer_name",
   item."source_item_id", item."name" as "item_name", item."expense_account_id" as "item_expense_account_id"
 from "erp_financials"."subledger_document_lines" line
 join "erp_financials"."accounts" account
@@ -1809,6 +1814,9 @@ left join "erp_financials"."reporting_book_account_mappings" mapping
  and mapping."book_id" = $3 and mapping."source_id" = line."source_id" and mapping."account_id" = line."account_id"
 left join "erp_financials"."items" item
   on item."tenant_id" = line."tenant_id" and item."source_id" = line."source_id" and item."item_id" = line."item_id"
+left join "erp_financials"."parties" customer
+  on customer."tenant_id" = line."tenant_id" and customer."source_id" = line."source_id"
+ and customer."party_id" = line."customer_party_id"
 where line."tenant_id" = $1 and line."company_id" = $2 and line."source_id" = $4
   and line."subledger_document_id" = $5
 order by line."line_number"`,
@@ -3744,16 +3752,22 @@ function vendorBillLineFromRow(row: Readonly<Record<string, unknown>>): VendorBi
   const bookAccountKey = optionalString(row.book_account_key);
   const accountMappingId = optionalString(row.book_account_mapping_id);
   const sourceAccountId = optionalString(row.source_account_id);
+  const sourceAccountName = optionalString(row.source_account_name);
+  const customerId = optionalString(row.customer_party_id);
+  const customerName = optionalString(row.customer_name);
   const sourceId = string(row.source_id, "source_id");
   return {
     ...line,
     sourceAccountKey: sourceAccountId ?? `${sourceId}:${line.accountId}`,
+    ...(sourceAccountName === undefined ? {} : { sourceAccountName }),
     ...(bookAccountKey === undefined ? {} : { bookAccountKey }),
     accountMappingProvenance: accountMappingId === undefined ? "source_account" : "reporting_book_mapping",
     ...(accountMappingId === undefined ? {} : { accountMappingId }),
     ...(sourceItemId === undefined ? {} : { sourceItemId }),
     ...(itemName === undefined ? {} : { itemName }),
     ...(itemCategoryAccountId === undefined ? {} : { itemCategoryAccountId }),
+    ...(customerId === undefined ? {} : { customerId }),
+    ...(customerName === undefined ? {} : { customerName }),
     categoryMappingProvenance: line.itemId === undefined
       ? "uncategorized"
       : itemCategoryAccountId === line.accountId

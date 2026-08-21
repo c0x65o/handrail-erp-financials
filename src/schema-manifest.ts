@@ -53,8 +53,8 @@ export type PostgresTableManifest = {
 };
 
 export type PostgresSchemaManifest = {
-  readonly manifestVersion: "2026-08-19.imported-operational-documents";
-  readonly schemaVersion: 19;
+  readonly manifestVersion: "2026-08-21.subledger-line-customers";
+  readonly schemaVersion: 20;
   readonly dialect: "postgres";
   readonly namespace: "erp_financials";
   readonly requiredTriggers: readonly PostgresTriggerManifest[];
@@ -144,8 +144,8 @@ const table = (
 });
 
 export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
-  manifestVersion: "2026-08-19.imported-operational-documents",
-  schemaVersion: 19,
+  manifestVersion: "2026-08-21.subledger-line-customers",
+  schemaVersion: 20,
   dialect: "postgres",
   namespace: "erp_financials",
   requiredTriggers: [
@@ -2586,7 +2586,8 @@ function sdkV1LineTables(): readonly PostgresTableManifest[] {
         text("company_id"),
         text("source_id"),
         text("subledger_document_id"),
-        ...lineColumns()
+        ...lineColumns(),
+        text("customer_party_id", true)
       ],
       [
         ...amountConstraints("subledger_document_lines"),
@@ -2611,6 +2612,12 @@ function sdkV1LineTables(): readonly PostgresTableManifest[] {
           ["tenant_id", "source_id", "item_id"],
           "items",
           ["tenant_id", "source_id", "item_id"]
+        ),
+        foreignKey(
+          "subledger_document_lines_customer_party_scope_fk",
+          ["tenant_id", "source_id", "customer_party_id"],
+          "parties",
+          ["tenant_id", "source_id", "party_id"]
         )
       ],
       [

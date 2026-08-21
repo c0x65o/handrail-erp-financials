@@ -48,9 +48,9 @@ describeIntegration("ERP Financials real PostgreSQL", () => {
     expect(result.targetVersion).toBe(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion);
     expect(result.applied.at(-1)?.toVersion).toBe(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion);
     expect(schema).toMatchObject({ compatible: true, fixtureSupport: true, issues: [] });
-    expect(history).toMatchObject({ compatible: true, currentVersion: 19, issues: [] });
+    expect(history).toMatchObject({ compatible: true, currentVersion: 20, issues: [] });
     await expect(
-      pool.query("update erp_financials.schema_migrations set name = 'tampered' where to_version = 19")
+      pool.query("update erp_financials.schema_migrations set name = 'tampered' where to_version = 20")
     ).rejects.toThrow("schema migration history is append-only");
   });
 
@@ -123,7 +123,7 @@ describeIntegration("ERP Financials real PostgreSQL", () => {
 
     expect(imported).toMatchObject({
       documents: 11,
-      documentLines: 11,
+      documentLines: 9,
       applications: 4,
       skippedTransactions: 0,
       skippedDocumentLines: 0,

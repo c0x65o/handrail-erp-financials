@@ -401,6 +401,10 @@ function mapHandrailQuickBooksSdkLedgerResourcesToCanonicalFacts(
     ...(input.resources.customers ?? []),
     ...(input.resources.vendors ?? [])
   ]);
+  const partyReferenceTransactions = [
+    ...ledgerTransactions,
+    ...(input.resources.operationalDocuments ?? [])
+  ];
 
   return mapNormalizedLedgerToCanonicalFacts({
     context,
@@ -422,7 +426,7 @@ function mapHandrailQuickBooksSdkLedgerResourcesToCanonicalFacts(
     ],
     parties: [
       ...parties,
-      ...normalizedQuickBooksReferencedPartiesToCanonicalParties(context, ledgerTransactions, parties)
+      ...normalizedQuickBooksReferencedPartiesToCanonicalParties(context, partyReferenceTransactions, parties)
     ],
     items: normalizedQuickBooksItemsToCanonicalItems(context, input.resources.items ?? []),
     dimensions: normalizedQuickBooksDimensionsToCanonicalDimensions(context, [

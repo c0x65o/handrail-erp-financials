@@ -397,7 +397,13 @@ function operationalDocumentResources(
     const metadata = providerMetadata(header, `normalizedResources.transactions[${String(index)}]`);
     const key = `${metadata.sourceObject}:${metadata.sourceObjectId}`;
     const ledger = ledgerByKey.get(key);
-    if (ledger !== undefined) return ledger;
+    const operationalLines = linesByKey.get(key) ?? [];
+    // The provider GL is authoritative for journal polarity, but it is a
+    // lossy representation of commercial documents. Prefer the normalized
+    // transaction lines for subledger projection whenever the connector has
+    // supplied them; retain the GL-shaped resource only as a compatibility
+    // fallback for header-only provider records.
+    if (operationalLines.length === 0 && ledger !== undefined) return ledger;
 
     const sourcePayloadRef = safeSourcePayloadRef(
       context,
@@ -432,9 +438,15 @@ function operationalDocumentResources(
       ...(metadata.sourceUpdatedAt === undefined ? {} : { sourceUpdatedAt: metadata.sourceUpdatedAt }),
       ...(partyRef === undefined ? {} : { partyRef }),
       currencyCode,
-      lines: (linesByKey.get(key) ?? [])
+      lines: operationalLines
         .sort((left, right) => (optionalNumber(left, "lineOrder") ?? 0) - (optionalNumber(right, "lineOrder") ?? 0))
-        .map((line, lineIndex) => operationalDocumentLine(context, line, metadata, lineIndex)),
+        .map((line, lineIndex) => operationalDocumentLine(
+          context,
+          line,
+          metadata,
+          lineIndex,
+          optionalReference(header.party)
+        )),
       sourcePayloadRef
     };
     return resourceEnvelope(
@@ -453,7 +465,8 @@ function operationalDocumentLine(
   context: AdapterContext,
   input: Record<string, unknown>,
   transactionMetadata: ProviderMetadata,
-  lineIndex: number
+  lineIndex: number,
+  transactionParty: { readonly value: string; readonly name?: string } | undefined
 ): NormalizedQuickBooksLedgerLine {
   const metadata = providerMetadata(input, `QuickBooks transaction line ${String(lineIndex + 1)}`);
   const lineId = requiredString(input, "lineId", `QuickBooks transaction line ${metadata.sourceObjectId}`);
@@ -461,7 +474,11 @@ function operationalDocumentLine(
   const quantity = optionalNumber(input, "quantity");
   const unitAmount = optionalNumber(input, "unitAmount");
   const accountRef = normalizedReference(optionalReference(input.account));
-  const partyRef = normalizedPartyReference(optionalReference(input.party), quickBooksPartyType(metadata.sourceObject));
+  const lineParty = optionalReference(input.party);
+  const partyRef = normalizedPartyReference(
+    lineParty,
+    quickBooksOperationalLinePartyType(metadata.sourceObject, lineParty, transactionParty)
+  );
   const itemRef = normalizedReference(optionalReference(input.item));
   const taxCode = optionalReference(input.taxCode)?.value;
   const description = optionalString(input, "description");
@@ -1292,6 +1309,24 @@ function quickBooksPartyType(sourceObject: string): "customer" | "vendor" | "oth
     return "vendor";
   }
   return "other";
+}
+
+function quickBooksOperationalLinePartyType(
+  sourceObject: string,
+  lineParty: { readonly value: string } | undefined,
+  transactionParty: { readonly value: string } | undefined
+): "customer" | "vendor" | "other" {
+  if (
+    ["Bill", "Purchase", "VendorCredit"].includes(sourceObject) &&
+    lineParty !== undefined &&
+    lineParty.value !== transactionParty?.value
+  ) {
+    // QuickBooks uses CustomerRef on payable expense lines to preserve the
+    // customer/job allocation. The normalized connector exposes that value as
+    // the line party, while the transaction party remains the vendor.
+    return "customer";
+  }
+  return quickBooksPartyType(sourceObject);
 }
 
 function firstNormalizedResource(resources: HandrailQuickBooksSdkNormalizedResourceMap): unknown {
