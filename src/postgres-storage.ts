@@ -1172,6 +1172,13 @@ async function loadReportBuilderInput(
   manifest: PostgresSchemaManifest,
   input: LoadReportBuilderInput
 ): Promise<ReportBuilderInput> {
+  const companyResult = await client.query<Row>(
+    `select "fiscal_year_start_month"
+from ${qualifiedTable(manifest, "accounting_companies")}
+where "tenant_id" = $1 and "company_id" = $2
+limit 1`,
+    [input.tenantId, input.companyId]
+  );
   const accountResult = await client.query<Row>(
     `select "account_id", "tenant_id", "source_id", "source_account_id", "account_number", "name", "type", "subtype", "classification", "parent_account_id", "currency_code", "active"
 from ${qualifiedTable(manifest, "accounts")}
@@ -1225,6 +1232,14 @@ limit 1`,
     currencyCode: input.currencyCode,
     periodStart: input.periodStart,
     periodEnd: input.periodEnd,
+    ...(companyResult.rows[0]?.fiscal_year_start_month === undefined
+      ? {}
+      : {
+          fiscalYearStartMonth: requiredNumber(
+            companyResult.rows[0].fiscal_year_start_month,
+            "fiscal_year_start_month"
+          )
+        }),
     ...(input.asOfDate === undefined ? {} : { asOfDate: input.asOfDate }),
     ...(input.generatedAt === undefined ? {} : { generatedAt: input.generatedAt }),
     ...(freshnessResult.rows[0] === undefined ? {} : { freshness: reportFreshnessFromRow(freshnessResult.rows[0]) })

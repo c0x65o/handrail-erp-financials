@@ -228,6 +228,39 @@ describe("deterministic fixture/reference report builders from canonical posting
     expectEveryMaterialOutputHasDrilldown(report);
   });
 
+  it("closes prior fiscal-year P&L balances into retained earnings for trial balance", () => {
+    const accounts = [
+      accountLike("acct_tb_cash", "1000", "Cash", "asset"),
+      accountLike("acct_tb_revenue", "4000", "Revenue", "income"),
+      accountLike("acct_tb_expense", "6000", "Expense", "expense")
+    ];
+    const postings = [
+      { ...postingLike("post_tb_prior_cash", "acct_tb_cash", "100.00", "0.00"), postingDate: "2026-03-31" },
+      { ...postingLike("post_tb_prior_revenue", "acct_tb_revenue", "0.00", "100.00"), postingDate: "2026-03-31" },
+      { ...postingLike("post_tb_current_expense", "acct_tb_expense", "30.00", "0.00"), postingDate: "2026-04-01" },
+      { ...postingLike("post_tb_current_cash", "acct_tb_cash", "0.00", "30.00"), postingDate: "2026-04-01" }
+    ];
+
+    const report = buildTrialBalanceReport({
+      ...reportRequest,
+      accounts,
+      postings,
+      periodStart: "2025-01-01",
+      periodEnd: "2026-08-31",
+      asOfDate: "2026-08-31",
+      fiscalYearStartMonth: 4
+    });
+
+    expectTotals(report, {
+      total_debits: "100.00",
+      total_credits: "100.00"
+    });
+    expect(report.lines.find((line) => line.label === "4000 Revenue")).toBeUndefined();
+    expect(report.lines.find((line) => line.label === "6000 Expense")?.amount).toBe("30.00");
+    expect(report.lines.find((line) => line.label === "Retained Earnings")?.amount).toBe("-100.00");
+    expect(report.snapshot.reconciliationStatus).toBe("balanced");
+  });
+
   it("rolls up nested trial balance accounts without double-counting hierarchy lines", () => {
     const accounts = [
       accountLike("acct_tb_asset_parent", "1000", "Trial Balance Assets", "asset"),

@@ -55,6 +55,7 @@ export type ReportBuilderInput = {
   readonly periodStart: IsoDate;
   readonly periodEnd: IsoDate;
   readonly asOfDate?: IsoDate;
+  readonly fiscalYearStartMonth?: number;
   readonly generatedAt?: IsoDateTime;
   readonly freshness?: ReportFreshness;
 };
@@ -293,11 +294,19 @@ export function buildBalanceSheetReport(input: ReportBuilderInput): BuiltReport 
 export function buildTrialBalanceReport(input: ReportBuilderInput): BuiltReport {
   assertReportBuilderInputComplete(input);
   const accountMap = createAccountMap(input);
-  const postings = filterAsOfPostings(input);
+  const asOfDate = input.asOfDate ?? input.periodEnd;
+  const fiscalYearStart = fiscalYearStartDate(asOfDate, input.fiscalYearStartMonth ?? 1);
+  const postings = filterAsOfPostings(input).filter((posting) => {
+    const account = accountMap.get(posting.accountId);
+    return account !== undefined && (
+      !PROFIT_AND_LOSS_SECTIONS.includes(account.classification) ||
+      posting.postingDate >= fiscalYearStart
+    );
+  });
   const directBalances = aggregateByAccount(postings, accountMap, signedDebitMinusCredit);
   const snapshot = snapshotId("trial_balance", input);
   const directAmounts = accountHierarchyAmountsForBalances(directBalances, TRIAL_BALANCE_ACCOUNT_SECTIONS);
-  const lines = buildAccountHierarchyRollupLines({
+  const lines = [...buildAccountHierarchyRollupLines({
     tenantId: input.tenantId,
     sourceId: input.sourceId,
     reportSnapshotId: snapshot,
@@ -315,8 +324,44 @@ export function buildTrialBalanceReport(input: ReportBuilderInput): BuiltReport 
   }).map((line): ReportSnapshotLine => ({
     ...line,
     section: parseMoney(line.amount) >= 0n ? "debit" : "credit"
-  }));
-  const directAccumulators = accumulatorsForAccountBalances(directBalances, TRIAL_BALANCE_ACCOUNT_SECTIONS);
+  }))];
+  const directAccumulators = [...accumulatorsForAccountBalances(
+    directBalances,
+    TRIAL_BALANCE_ACCOUNT_SECTIONS
+  )];
+  const priorFiscalYearEarnings = earningsAccumulator(input, accountMap, {
+    before: fiscalYearStart,
+    key: "retained_earnings",
+    label: "Retained Earnings"
+  });
+
+  if (priorFiscalYearEarnings.amountMinor !== 0n) {
+    // QuickBooks closes prior fiscal-year P&L balances into Retained Earnings
+    // for Trial Balance presentation. Canonical postings retain their source
+    // accounts, so mirror that year-end close as a report-only accumulator.
+    const retainedEarnings = {
+      ...priorFiscalYearEarnings,
+      amountMinor: -priorFiscalYearEarnings.amountMinor
+    };
+    directAccumulators.push(retainedEarnings);
+    lines.push({
+      tenantId: input.tenantId,
+      reportSnapshotId: snapshot,
+      reportLineId: lineId(snapshot, lines.length + 1, retainedEarnings.key),
+      section: retainedEarnings.amountMinor >= 0n ? "debit" : "credit",
+      label: retainedEarnings.label,
+      amount: formatMoney(retainedEarnings.amountMinor),
+      sortOrder: (lines.length + 1) * 10,
+      drilldownRef: drilldownRef(
+        input,
+        "trial_balance",
+        retainedEarnings.key,
+        retainedEarnings.postingIds,
+        retainedEarnings.accountIds,
+        retainedEarnings.sourceRefs
+      )
+    });
+  }
   const debitAccumulators = directAccumulators.filter((accumulator) => accumulator.amountMinor > 0n);
   const creditAccumulators = directAccumulators
     .filter((accumulator) => accumulator.amountMinor < 0n)
@@ -333,6 +378,16 @@ export function buildTrialBalanceReport(input: ReportBuilderInput): BuiltReport 
     reconciliationStatus: difference === 0n ? "balanced" : "out_of_balance",
     reconciliationDifference: formatMoney(difference)
   });
+}
+
+function fiscalYearStartDate(asOfDate: IsoDate, fiscalYearStartMonth: number): IsoDate {
+  if (!Number.isInteger(fiscalYearStartMonth) || fiscalYearStartMonth < 1 || fiscalYearStartMonth > 12) {
+    throw new Error("Report builder input fiscalYearStartMonth must be an integer between 1 and 12");
+  }
+  const asOfYear = Number(asOfDate.slice(0, 4));
+  const asOfMonth = Number(asOfDate.slice(5, 7));
+  const fiscalYear = asOfMonth >= fiscalYearStartMonth ? asOfYear : asOfYear - 1;
+  return `${String(fiscalYear).padStart(4, "0")}-${String(fiscalYearStartMonth).padStart(2, "0")}-01`;
 }
 
 /**
