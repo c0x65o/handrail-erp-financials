@@ -304,6 +304,29 @@ export function buildTrialBalanceReport(input: ReportBuilderInput): BuiltReport 
     );
   });
   const directBalances = aggregateByAccount(postings, accountMap, signedDebitMinusCredit);
+  const priorFiscalYearEarnings = earningsAccumulator(input, accountMap, {
+    before: fiscalYearStart,
+    key: "retained_earnings",
+    label: "Retained Earnings"
+  });
+  const retainedEarningsAmount = -priorFiscalYearEarnings.amountMinor;
+  const retainedEarningsAccount = findRetainedEarningsAccount([...accountMap.values()]);
+
+  if (retainedEarningsAmount !== 0n && retainedEarningsAccount !== undefined) {
+    const existing = directBalances.get(retainedEarningsAccount.accountId);
+    if (existing === undefined) {
+      directBalances.set(retainedEarningsAccount.accountId, {
+        account: retainedEarningsAccount,
+        amountMinor: retainedEarningsAmount,
+        postingIds: [...priorFiscalYearEarnings.postingIds],
+        sourceRefs: [...priorFiscalYearEarnings.sourceRefs]
+      });
+    } else {
+      existing.amountMinor += retainedEarningsAmount;
+      existing.postingIds.push(...priorFiscalYearEarnings.postingIds);
+      existing.sourceRefs.push(...priorFiscalYearEarnings.sourceRefs);
+    }
+  }
   const snapshot = snapshotId("trial_balance", input);
   const directAmounts = accountHierarchyAmountsForBalances(directBalances, TRIAL_BALANCE_ACCOUNT_SECTIONS);
   const lines = [...buildAccountHierarchyRollupLines({
@@ -329,19 +352,15 @@ export function buildTrialBalanceReport(input: ReportBuilderInput): BuiltReport 
     directBalances,
     TRIAL_BALANCE_ACCOUNT_SECTIONS
   )];
-  const priorFiscalYearEarnings = earningsAccumulator(input, accountMap, {
-    before: fiscalYearStart,
-    key: "retained_earnings",
-    label: "Retained Earnings"
-  });
 
-  if (priorFiscalYearEarnings.amountMinor !== 0n) {
+  if (retainedEarningsAmount !== 0n && retainedEarningsAccount === undefined) {
     // QuickBooks closes prior fiscal-year P&L balances into Retained Earnings
-    // for Trial Balance presentation. Canonical postings retain their source
-    // accounts, so mirror that year-end close as a report-only accumulator.
+    // for Trial Balance presentation. When the canonical chart does not expose
+    // a dedicated retained-earnings account, mirror that year-end close as a
+    // report-only accumulator.
     const retainedEarnings = {
       ...priorFiscalYearEarnings,
-      amountMinor: -priorFiscalYearEarnings.amountMinor
+      amountMinor: retainedEarningsAmount
     };
     directAccumulators.push(retainedEarnings);
     lines.push({
@@ -378,6 +397,25 @@ export function buildTrialBalanceReport(input: ReportBuilderInput): BuiltReport 
     reconciliationStatus: difference === 0n ? "balanced" : "out_of_balance",
     reconciliationDifference: formatMoney(difference)
   });
+}
+
+function findRetainedEarningsAccount(accounts: readonly Account[]): Account | undefined {
+  const equityAccounts = accounts.filter((account) => account.classification === "equity");
+  const subtypeMatches = equityAccounts.filter(
+    (account) => normalizeAccountIdentity(account.subtype) === "retainedearnings"
+  );
+  const matches = subtypeMatches.length > 0
+    ? subtypeMatches
+    : equityAccounts.filter((account) => normalizeAccountIdentity(account.name) === "retainedearnings");
+
+  if (matches.length > 1) {
+    throw new Error("Report builder input has multiple retained-earnings accounts");
+  }
+  return matches[0];
+}
+
+function normalizeAccountIdentity(value: string | undefined): string {
+  return value?.toLowerCase().replaceAll(/[^a-z0-9]/gu, "") ?? "";
 }
 
 function fiscalYearStartDate(asOfDate: IsoDate, fiscalYearStartMonth: number): IsoDate {
