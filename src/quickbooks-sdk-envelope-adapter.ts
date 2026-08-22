@@ -423,6 +423,15 @@ function operationalDocumentResources(
     const emailStatus = optionalString(header, "emailStatus");
     const printStatus = optionalString(header, "printStatus");
     const memo = optionalString(header, "privateNote");
+    const syncAction = operationalDocumentAction(
+      header,
+      context,
+      metadata.sourceObject,
+      totalAmount,
+      memo,
+      operationalLines,
+      ledger
+    );
     const resource: NormalizedQuickBooksLedgerTransaction = {
       sourceTransactionId: metadata.sourceObjectId,
       sourceTransactionType: metadata.sourceObject,
@@ -456,9 +465,45 @@ function operationalDocumentResources(
       resource,
       metadata.sourceUpdatedAt,
       sourcePayloadRef,
-      resourceAction(header, context)
+      syncAction
     );
   });
+}
+
+function operationalDocumentAction(
+  header: Record<string, unknown>,
+  context: AdapterContext,
+  sourceObject: string,
+  totalAmount: number | undefined,
+  memo: string | undefined,
+  lines: readonly Record<string, unknown>[],
+  ledger: NormalizedQuickBooksLedgerTransactionResource | undefined
+): NormalizedAccountingSyncResourceAction | undefined {
+  const explicitAction = optionalString(header, "syncAction");
+  if (explicitAction !== undefined) return resourceAction(header, context);
+
+  if (sourceObject !== "BillPayment" || totalAmount !== 0 || ledger !== undefined) {
+    return context.syncAction;
+  }
+
+  const explicitlyVoided = memo !== undefined && /\bvoid(?:ed)?\b/i.test(memo);
+  const hasLinkedTransactions = lines.some((line) => {
+    const linked = line.linkedTransactions;
+    return Array.isArray(linked) && linked.length > 0;
+  });
+  const hasNonZeroLineAmount = lines.some((line) => {
+    const amount = optionalNumber(line, "amount");
+    return amount !== undefined && amount !== 0;
+  });
+
+  // Compatibility path for staged batches created before the connector
+  // persisted syncAction. A zero cash total can represent credit/application
+  // activity, so infer a void only when the memo says so or no economic/link
+  // evidence remains. Ambiguous records keep their normal action and fail
+  // closed in the subledger projection with structured diagnostics.
+  return explicitlyVoided || (!hasLinkedTransactions && !hasNonZeroLineAmount)
+    ? "voided"
+    : context.syncAction;
 }
 
 function operationalDocumentLine(

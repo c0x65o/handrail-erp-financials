@@ -51,6 +51,32 @@ export type PersistQuickBooksSubledgerResourcesInput = {
   readonly replaceMissingDocuments?: boolean;
 };
 
+export type QuickBooksSubledgerProjectionDiagnostic = {
+  readonly sourceTransactionType: string;
+  readonly sourceTransactionId: string;
+  readonly missingBalancedJournal: boolean;
+  readonly totalAmountState: "missing" | "invalid" | "zero" | "positive";
+  readonly linkedTransactionCount: number;
+  readonly nonZeroLineCount: number;
+};
+
+export class QuickBooksSubledgerProjectionError extends Error {
+  readonly code = "quickbooks_subledger_projection_invalid";
+  readonly diagnostic: QuickBooksSubledgerProjectionDiagnostic;
+
+  constructor(diagnostic: QuickBooksSubledgerProjectionDiagnostic) {
+    const missing = [
+      ...(diagnostic.missingBalancedJournal ? ["balanced journal"] : []),
+      ...(diagnostic.totalAmountState !== "positive" ? ["positive total"] : [])
+    ].join(" and ");
+    super(
+      `QuickBooks ${diagnostic.sourceTransactionType} ${diagnostic.sourceTransactionId} cannot become a canonical subledger document because it is missing ${missing}`
+    );
+    this.name = "QuickBooksSubledgerProjectionError";
+    this.diagnostic = diagnostic;
+  }
+}
+
 export async function persistQuickBooksSubledgerResources(
   input: PersistQuickBooksSubledgerResourcesInput & { readonly client: PostgresQueryClient }
 ): Promise<QuickBooksSubledgerImportResult> {
@@ -97,15 +123,15 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
   let skippedDocumentLines = 0;
 
   for (const resource of operationalDocuments) {
-    if (resource.syncAction === "voided" || resource.syncAction === "deleted") continue;
+    if (resource.syncAction === "voided" || resource.syncAction === "deleted" || resource.syncAction === "skipped") continue;
     const normalized = resource.resource;
     const documentType = importedDocumentType(normalized.sourceTransactionType);
     if (documentType === undefined) continue;
     const transaction = transactionBySourceId.get(normalized.sourceTransactionId);
     const originalAmount = positiveAmount(normalized.totalAmount);
     if (transaction === undefined || originalAmount === undefined) {
-      throw new Error(
-        `QuickBooks ${normalized.sourceTransactionType} ${normalized.sourceTransactionId} cannot become a canonical subledger document because its balanced journal or positive total is missing`
+      throw new QuickBooksSubledgerProjectionError(
+        quickBooksSubledgerProjectionDiagnostic(normalized, transaction === undefined)
       );
     }
     const documentId = documentIdBySourceId.get(normalized.sourceTransactionId);
@@ -281,7 +307,7 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
   let skippedApplications = 0;
   const unresolvedApplications: QuickBooksSubledgerImportResult["unresolvedApplications"][number][] = [];
   for (const resource of operationalDocuments) {
-    if (resource.syncAction === "voided" || resource.syncAction === "deleted") continue;
+    if (resource.syncAction === "voided" || resource.syncAction === "deleted" || resource.syncAction === "skipped") continue;
     const source = resource.resource;
     if (importedApplicationType(source.sourceTransactionType) === undefined) continue;
     const sourceDocumentId = documentIdBySourceId.get(source.sourceTransactionId);
@@ -345,7 +371,7 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
     }
   }
   for (const resource of operationalDocuments) {
-    if (resource.syncAction === "voided" || resource.syncAction === "deleted") continue;
+    if (resource.syncAction === "voided" || resource.syncAction === "deleted" || resource.syncAction === "skipped") continue;
     const source = resource.resource;
     const applicationType = importedApplicationType(source.sourceTransactionType);
     if (applicationType === undefined) continue;
@@ -432,7 +458,7 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
   // normalize LinkedTxn evidence differently; never let that make the current
   // operational balance disagree with QuickBooks.
   for (const resource of operationalDocuments) {
-    if (resource.syncAction === "voided" || resource.syncAction === "deleted") continue;
+    if (resource.syncAction === "voided" || resource.syncAction === "deleted" || resource.syncAction === "skipped") continue;
     const normalized = resource.resource;
     const documentType = importedDocumentType(normalized.sourceTransactionType);
     const originalAmount = positiveAmount(normalized.totalAmount);
@@ -711,6 +737,35 @@ function positiveAmount(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
   const amount = Math.abs(Number(value));
   return Number.isFinite(amount) && amount > 0 ? amount.toFixed(2) : undefined;
+}
+
+function quickBooksSubledgerProjectionDiagnostic(
+  transaction: NormalizedQuickBooksLedgerTransaction,
+  missingBalancedJournal: boolean
+): QuickBooksSubledgerProjectionDiagnostic {
+  const amount = transaction.totalAmount === undefined ? undefined : Number(transaction.totalAmount);
+  const totalAmountState = transaction.totalAmount === undefined
+    ? "missing"
+    : !Number.isFinite(amount)
+      ? "invalid"
+      : amount === 0
+        ? "zero"
+        : "positive";
+  return {
+    sourceTransactionType: transaction.sourceTransactionType,
+    sourceTransactionId: transaction.sourceTransactionId,
+    missingBalancedJournal,
+    totalAmountState,
+    linkedTransactionCount: transaction.lines.reduce(
+      (count, line) => count + (line.linkedTransactions?.length ?? 0),
+      0
+    ),
+    nonZeroLineCount: transaction.lines.filter((line) => {
+      if (line.sourceAmount === undefined) return false;
+      const lineAmount = Number(line.sourceAmount);
+      return Number.isFinite(lineAmount) && lineAmount !== 0;
+    }).length
+  };
 }
 
 function reportedQuickBooksOpenAmount(

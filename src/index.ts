@@ -71,7 +71,11 @@ export { createErpFinancialsSdk } from "./sdk.js";
 export { ErpFinancialsError, erpFinancialsError, isErpFinancialsError } from "./sdk-errors.js";
 export { normalizeCommercialDocumentLine } from "./commercial-lines.js";
 export { createReportingBookService } from "./reporting-books.js";
-export { persistQuickBooksSubledgerResources } from "./quickbooks-subledger-import.js";
+export {
+  persistQuickBooksSubledgerResources,
+  QuickBooksSubledgerProjectionError,
+  type QuickBooksSubledgerProjectionDiagnostic
+} from "./quickbooks-subledger-import.js";
 export { createFinancialOutboxService } from "./financial-outbox.js";
 export { createFinancialRuntime } from "./financial-runtime.js";
 export { createFinancialReadModels } from "./sdk-read-models.js";

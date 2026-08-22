@@ -123,6 +123,100 @@ describe("QuickBooks SDK envelope adapter", () => {
     });
   });
 
+  it("replays a staged zero-effect BillPayment as voided without creating an active payment", async () => {
+    const envelope = fullSyncEnvelope();
+    const resources = envelope.normalizedResources;
+    const stagedEnvelope = {
+      ...envelope,
+      normalizedResources: {
+        ...resources,
+        transactions: (resources?.transactions ?? []).map((value) => ({
+          ...fixtureResource(value),
+          sourceObject: "BillPayment",
+          transactionType: "bill_payment",
+          amount: 0,
+          privateNote: "Voided bill payment"
+        })),
+        transaction_lines: (resources?.transaction_lines ?? []).map((value) => ({
+          ...fixtureResource(value),
+          sourceObject: "BillPayment",
+          transactionType: "bill_payment"
+        })),
+        ledger_entries: []
+      }
+    };
+    const adapted = adaptHandrailQuickBooksSdkFullSyncEnvelope(stagedEnvelope, adapterOptions());
+    expect(adapted.resources.operationalDocuments?.[0]).toMatchObject({
+      syncAction: "voided",
+      resource: {
+        sourceTransactionType: "BillPayment",
+        totalAmount: "0.00"
+      }
+    });
+    const mapped = mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(adapted, {
+      companyId: "company_spartan",
+      accountingBasis: "accrual",
+      currencyCode: "USD"
+    });
+    const result = await persistQuickBooksSubledgerResources({
+      client: { query: () => Promise.resolve({ rows: [], rowCount: 0 }) },
+      companyId: "company_spartan",
+      importedAt: "2026-08-13T12:46:00.000Z",
+      facts: mapped.facts,
+      resources: adapted.resources
+    });
+    expect(result.documents).toBe(0);
+    expect(result.applications).toBe(0);
+  });
+
+  it("fails an ambiguous zero-total BillPayment with structured safe diagnostics", async () => {
+    const envelope = fullSyncEnvelope();
+    const resources = envelope.normalizedResources;
+    const adapted = adaptHandrailQuickBooksSdkFullSyncEnvelope({
+      ...envelope,
+      normalizedResources: {
+        ...resources,
+        transactions: (resources?.transactions ?? []).map((value) => ({
+          ...fixtureResource(value),
+          sourceObject: "BillPayment",
+          transactionType: "bill_payment",
+          amount: 0,
+          privateNote: undefined
+        })),
+        transaction_lines: (resources?.transaction_lines ?? []).map((value) => ({
+          ...fixtureResource(value),
+          sourceObject: "BillPayment",
+          transactionType: "bill_payment"
+        })),
+        ledger_entries: []
+      }
+    }, adapterOptions());
+    expect(adapted.resources.operationalDocuments?.[0]?.syncAction).toBeUndefined();
+    const mapped = mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(adapted, {
+      companyId: "company_spartan",
+      accountingBasis: "accrual",
+      currencyCode: "USD"
+    });
+
+    await expect(persistQuickBooksSubledgerResources({
+      client: { query: () => Promise.resolve({ rows: [], rowCount: 0 }) },
+      companyId: "company_spartan",
+      importedAt: "2026-08-13T12:46:00.000Z",
+      facts: mapped.facts,
+      resources: adapted.resources
+    })).rejects.toMatchObject({
+      code: "quickbooks_subledger_projection_invalid",
+      diagnostic: {
+        sourceTransactionType: "BillPayment",
+        sourceTransactionId: "payment_700",
+        missingBalancedJournal: true,
+        totalAmountState: "zero",
+        linkedTransactionCount: 1,
+        nonZeroLineCount: 1
+      }
+    });
+  });
+
   it("accepts parentAccountId as a stable SDK fallback and maps it to the canonical parent id", () => {
     const envelope = fullSyncEnvelope();
     const accounts = (envelope.normalizedResources?.accounts ?? []) as readonly Record<string, unknown>[];
