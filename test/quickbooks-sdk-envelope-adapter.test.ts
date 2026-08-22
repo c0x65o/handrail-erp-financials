@@ -341,6 +341,7 @@ describe("QuickBooks SDK envelope adapter", () => {
             ...fixtureResource(value),
             sourceObject: "Bill",
             transactionType: "bill",
+            detailType: "AccountBasedExpenseLineDetail",
             quantity: 1,
             account: { value: "400", name: "Microsoft Office Subscriptions" },
             party: { value: "customer_20", name: "Houchens Industries, Inc." },
@@ -358,6 +359,20 @@ describe("QuickBooks SDK envelope adapter", () => {
               amount: 850,
               unitAmount: 850,
               description: "NCE Microsoft 365 Enterprise"
+            },
+            {
+              ...base,
+              id: "payment_700:subtotal",
+              sourceObjectId: "payment_700:subtotal",
+              lineId: "subtotal",
+              lineIndex: 2,
+              lineOrder: 3,
+              detailType: "SubTotalLineDetail",
+              amount: 1250,
+              account: undefined,
+              item: undefined,
+              party: undefined,
+              description: "Subtotal"
             }
           ];
         }),
@@ -378,6 +393,7 @@ describe("QuickBooks SDK envelope adapter", () => {
       lines: [
         {
           sourceLineId: "1",
+          detailType: "AccountBasedExpenseLineDetail",
           sourceAmount: "400.00",
           description: "NCE Microsoft 365 Business Standard",
           accountRef: { sourceObjectId: "400" },
@@ -390,8 +406,16 @@ describe("QuickBooks SDK envelope adapter", () => {
         },
         {
           sourceLineId: "2",
+          detailType: "AccountBasedExpenseLineDetail",
           sourceAmount: "850.00",
           description: "NCE Microsoft 365 Enterprise",
+          postings: []
+        },
+        {
+          sourceLineId: "subtotal",
+          detailType: "SubTotalLineDetail",
+          sourceAmount: "1250.00",
+          description: "Subtotal",
           postings: []
         }
       ]
@@ -403,7 +427,7 @@ describe("QuickBooks SDK envelope adapter", () => {
       currencyCode: "USD"
     });
     const lineInserts: readonly unknown[][] = [];
-    await persistQuickBooksSubledgerResources({
+    const result = await persistQuickBooksSubledgerResources({
       client: {
         query(sql, params = []) {
           if (sql.includes('insert into "erp_financials"."subledger_document_lines"')) {
@@ -419,9 +443,53 @@ describe("QuickBooks SDK envelope adapter", () => {
     });
 
     expect(lineInserts).toHaveLength(2);
+    expect(result.skippedDocumentLines).toBe(1);
     const customerPartyId = mapped.facts.parties.find((party) => party.sourcePartyId === "customer_20")?.partyId;
     expect(lineInserts.map((params) => params[8])).toEqual([customerPartyId, customerPartyId]);
     expect(lineInserts.reduce((sum, params) => sum + Number(params[16]), 0)).toBe(1250);
+  });
+
+  it("still fails closed when a posting bill line has no canonical account", async () => {
+    const envelope = fullSyncEnvelope();
+    const resources = envelope.normalizedResources;
+    const adapted = adaptHandrailQuickBooksSdkFullSyncEnvelope({
+      ...envelope,
+      normalizedResources: {
+        ...resources,
+        transactions: (resources?.transactions ?? []).map((value) => ({
+          ...fixtureResource(value),
+          sourceObject: "Bill",
+          transactionType: "bill",
+          party: { value: "vendor_1", name: "Vendor One" }
+        })),
+        transaction_lines: (resources?.transaction_lines ?? []).map((value) => ({
+          ...fixtureResource(value),
+          sourceObject: "Bill",
+          transactionType: "bill",
+          detailType: "AccountBasedExpenseLineDetail",
+          account: undefined,
+          item: undefined
+        })),
+        ledger_entries: (resources?.ledger_entries ?? []).map((value) => ({
+          ...fixtureResource(value),
+          sourceObject: "Bill",
+          transactionType: "bill"
+        }))
+      }
+    }, adapterOptions());
+    const mapped = mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(adapted, {
+      companyId: "company_spartan",
+      accountingBasis: "accrual",
+      currencyCode: "USD"
+    });
+
+    await expect(persistQuickBooksSubledgerResources({
+      client: { query: () => Promise.resolve({ rows: [], rowCount: 1 }) },
+      companyId: "company_spartan",
+      importedAt: "2026-08-13T12:46:00.000Z",
+      facts: mapped.facts,
+      resources: adapted.resources
+    })).rejects.toThrow(/Bill payment_700 line 1 has an amount but no canonical account/);
   });
 
   it("fails closed when SDK resource identity differs from the envelope", () => {

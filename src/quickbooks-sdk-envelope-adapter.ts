@@ -481,6 +481,7 @@ function operationalDocumentLine(
   );
   const itemRef = normalizedReference(optionalReference(input.item));
   const taxCode = optionalReference(input.taxCode)?.value;
+  const detailType = optionalString(input, "detailType");
   const description = optionalString(input, "description");
   const linkedTransactions = normalizedQuickBooksLinkedTransactions(input.linkedTransactions);
   const dimensionRefs = [
@@ -497,6 +498,7 @@ function operationalDocumentLine(
   return {
     sourceLineId: lineId,
     lineNumber: optionalNumber(input, "lineOrder") ?? lineIndex + 1,
+    ...(detailType === undefined ? {} : { detailType }),
     ...(description === undefined ? {} : { description }),
     amount: decimalFromNumber(amount ?? 0),
     ...(amount === undefined ? {} : { sourceAmount: decimalFromNumber(Math.abs(amount)) }),

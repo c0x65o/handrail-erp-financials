@@ -415,6 +415,9 @@ export type NormalizedQuickBooksLinkedTransaction = {
 export type NormalizedQuickBooksLedgerLine = {
   readonly sourceLineId?: string;
   readonly lineNumber: number;
+  /** QuickBooks Line.DetailType, retained so provider-only subtotal/group rows
+   * can be distinguished from commercial document detail. */
+  readonly detailType?: string;
   readonly description?: string;
   readonly amount?: DecimalString;
   /** Provider document-line amount before ledger polarity/offset derivation. */

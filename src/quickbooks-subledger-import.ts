@@ -94,7 +94,7 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
   let skippedTransactions = 0;
   let voidedDocuments = 0;
   let removedLedgerPostings = 0;
-  const skippedDocumentLines = 0;
+  let skippedDocumentLines = 0;
 
   for (const resource of operationalDocuments) {
     if (resource.syncAction === "voided" || resource.syncAction === "deleted") continue;
@@ -211,6 +211,10 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3 and "subledger
       continue;
     }
     for (const line of normalized.lines) {
+      if (isQuickBooksProviderOnlyNonPostingLine(line.detailType)) {
+        skippedDocumentLines += 1;
+        continue;
+      }
       const amount = positiveAmount(line.sourceAmount);
       const item = line.itemRef === undefined ? undefined : itemBySourceId.get(line.itemRef.sourceObjectId);
       const accountId = line.accountRef === undefined
@@ -667,6 +671,13 @@ function importsCommercialDocumentLines(documentType: ImportedDocumentType): boo
   // Payment lines describe allocations to other documents; they are persisted
   // as subledger applications below, not duplicated as commercial detail.
   return documentType !== "customer_payment" && documentType !== "bill_payment";
+}
+
+function isQuickBooksProviderOnlyNonPostingLine(detailType: string | undefined): boolean {
+  return detailType === "SubTotalLineDetail" ||
+    detailType === "DescriptionOnly" ||
+    detailType === "DescriptionOnlyLineDetail" ||
+    detailType === "GroupLineDetail";
 }
 
 function importedDocumentType(sourceType: string): ImportedDocumentType | undefined {
