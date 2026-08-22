@@ -166,11 +166,16 @@ describe("normalized QuickBooks contract smoke harness", () => {
         sourceFreshThrough: "2026-02-01T10:01:00.000Z",
         importedThrough: "2026-02-01T10:00:00.000Z",
         latestSourceUpdatedAt: "2026-02-01T10:01:00.000Z",
-        totalCount: 3,
+        totalCount: 8,
         totals: {
-          expenses: "6200.00",
-          income: "20000.00",
-          net_income: "13800.00"
+          gross_profit: "17000.00",
+          net_income: "13800.00",
+          net_operating_income: "13800.00",
+          total_cost_of_goods_sold: "3000.00",
+          total_expenses: "3200.00",
+          total_income: "20000.00",
+          total_other_expense: "0.00",
+          total_other_income: "0.00"
         }
       },
       {
@@ -182,11 +187,12 @@ describe("normalized QuickBooks contract smoke harness", () => {
         sourceFreshThrough: "2026-02-01T10:01:00.000Z",
         importedThrough: "2026-02-01T10:00:00.000Z",
         latestSourceUpdatedAt: "2026-02-01T10:01:00.000Z",
-        totalCount: 3,
+        totalCount: 4,
         totals: {
-          assets: "74000.00",
-          equity: "62800.00",
-          liabilities: "11200.00"
+          total_assets: "74000.00",
+          total_equity: "62800.00",
+          total_liabilities: "11200.00",
+          total_liabilities_and_equity: "74000.00"
         }
       },
       {
@@ -198,11 +204,10 @@ describe("normalized QuickBooks contract smoke harness", () => {
         sourceFreshThrough: "2026-02-01T10:01:00.000Z",
         importedThrough: "2026-02-01T10:00:00.000Z",
         latestSourceUpdatedAt: "2026-02-01T10:01:00.000Z",
-        totalCount: 3,
+        totalCount: 2,
         totals: {
-          credits: "81900.00",
-          debits: "81900.00",
-          net: "0.00"
+          total_credits: "81900.00",
+          total_debits: "81900.00"
         }
       },
       {
@@ -228,7 +233,7 @@ describe("normalized QuickBooks contract smoke harness", () => {
           "ERP Financials can build cash_flow from canonical facts, but QuickBooks provider cash-flow parity is intentionally unsupported in deterministic contract fixtures."
       }
     ]);
-    expect(harness.snapshotHash).toBe("926853afa0f26968546376b1b251db97e8b48084142cd1d24a2c54bee1f63f0a");
+    expect(harness.snapshotHash).toBe("d81a1ede70ed9a8d434f4e637261d930caeac63696e72c036ddc08ce63556dc6");
     expect(JSON.stringify(harness)).not.toMatch(/access[_-]?token|refresh[_-]?token|client[_-]?secret|clientSecret|rawPayload/i);
     assertNoCredentialKeys(harness.snapshot);
   });
@@ -271,9 +276,9 @@ describe("normalized QuickBooks contract smoke harness", () => {
       cash_flow: "supported"
     });
     expect(replay.providerParity.reports.map((report) => [report.reportName, report.status, report.evidenceTotalCount])).toEqual([
-      ["profit_and_loss", "mismatched", 3],
-      ["balance_sheet", "mismatched", 3],
-      ["trial_balance", "mismatched", 3],
+      ["profit_and_loss", "mismatched", 8],
+      ["balance_sheet", "mismatched", 4],
+      ["trial_balance", "mismatched", 2],
       ["cash_flow", "unsupported", 0]
     ]);
     expect(requestedProviderReports).toEqual(["profit_and_loss", "balance_sheet", "trial_balance"]);

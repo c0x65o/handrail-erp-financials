@@ -265,6 +265,7 @@ describe("buildQuickBooksCanonicalReportTotalsFromBuiltReport", () => {
   it("maps built report totals to canonical reconciliation totals", () => {
     const report = buildProfitAndLossReport({
       tenantId,
+      companyId: "company_parity",
       sourceId,
       accounts,
       postings,

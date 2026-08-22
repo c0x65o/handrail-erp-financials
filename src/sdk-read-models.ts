@@ -128,6 +128,22 @@ export type InvoiceDetail = InvoiceListItem & {
   readonly lines: readonly CommercialDocumentLineReadModel[];
 };
 
+export type OpenInvoiceReference = {
+  readonly invoiceId: string;
+  readonly documentNumber?: string;
+  readonly dueDate: IsoDate;
+  readonly openAmount: DecimalString;
+  readonly currencyCode: IsoCurrencyCode;
+  readonly version: number;
+};
+
+export type InvoiceDetailsByIdResult = {
+  /** Found invoice IDs in the same relative order as the caller's request. */
+  readonly orderedInvoiceIds: readonly string[];
+  /** Only found, scope-visible invoices; use orderedInvoiceIds to reconstruct caller order. */
+  readonly byInvoiceId: Readonly<Record<string, InvoiceDetail>>;
+};
+
 export type InvoiceDeliveryEvent = {
   readonly deliveryEventId: string;
   readonly invoiceId: string;
@@ -279,6 +295,48 @@ export type PaymentApplicationListItem = {
 };
 
 export type PaymentApplicationDetail = PaymentApplicationListItem;
+
+export type CustomerPaymentRegisterFilter = "all" | "automatic" | "manual" | "unapplied";
+export type CustomerPaymentRegisterSort = "payment" | "customer" | "date" | "method" | "appliedTo" | "match" | "amount";
+export type CustomerPaymentRegisterDirection = "asc" | "desc";
+export type CustomerPaymentRegisterBoundary = {
+  readonly sort: CustomerPaymentRegisterSort;
+  readonly direction: CustomerPaymentRegisterDirection;
+  readonly traversal: "forward" | "backward";
+  readonly value: string | null;
+  readonly paymentId: string;
+};
+export type CustomerPaymentRegisterApplication = PaymentApplicationListItem & {
+  readonly targetDocumentNumber?: string;
+  readonly targetDocumentVersion: number;
+};
+export type CustomerPaymentRegisterRow = PaymentListItem & {
+  readonly applications: readonly CustomerPaymentRegisterApplication[];
+  readonly sortValue: string | null;
+  readonly matchingMode: "automatic" | "manual" | "unmatched";
+  readonly match?: string;
+  readonly paymentMethod?: string;
+};
+export type CustomerPaymentRegisterProjection = {
+  readonly periodStart: IsoDate;
+  readonly periodEnd: IsoDate;
+  readonly currencyCode: IsoCurrencyCode;
+  readonly items: readonly CustomerPaymentRegisterRow[];
+  readonly totalCount: number;
+  readonly filteredAmount: DecimalString;
+  readonly totals: {
+    readonly receivedAmount: DecimalString;
+    readonly receivedPaymentCount: number;
+    readonly unappliedAmount: DecimalString;
+    readonly unappliedPaymentCount: number;
+    readonly automaticallyMatchedPaymentCount: number;
+    readonly matchedPaymentCount: number;
+  };
+  readonly hasPrevious: boolean;
+  readonly hasNext: boolean;
+  readonly previousBoundary?: CustomerPaymentRegisterBoundary;
+  readonly nextBoundary?: CustomerPaymentRegisterBoundary;
+};
 
 export type CustomerPaymentDetail = PaymentListItem & {
   readonly memo?: string;
@@ -454,6 +512,68 @@ export type AdjustmentDetail = AdjustmentListItem & {
     readonly refundMethod?: string;
     readonly lifecycleReference?: string;
   };
+};
+
+export type AdjustmentRegisterFilter = "all" | "credit" | "refund" | "open";
+export type AdjustmentRegisterSort =
+  | "document"
+  | "type"
+  | "customer"
+  | "date"
+  | "reason"
+  | "appliedTo"
+  | "amount"
+  | "status";
+export type AdjustmentRegisterDirection = "asc" | "desc";
+export type AdjustmentRegisterLifecycleStatus = "open" | "partially_applied" | "applied" | "voided" | "replaced";
+export type AdjustmentRegisterBoundary = {
+  readonly sort: AdjustmentRegisterSort;
+  readonly direction: AdjustmentRegisterDirection;
+  readonly traversal: "forward" | "backward";
+  readonly value: string | null;
+  readonly adjustmentId: string;
+};
+export type AdjustmentRegisterRow = {
+  readonly adjustmentId: string;
+  readonly sourceId: string;
+  readonly transactionId: string;
+  readonly adjustmentType: AdjustmentType;
+  readonly customerId: string;
+  readonly customerName?: string;
+  readonly documentNumber?: string;
+  readonly adjustmentDate: IsoDate;
+  readonly currencyCode: IsoCurrencyCode;
+  readonly amount: DecimalString;
+  readonly remainingAmount: DecimalString;
+  readonly status: AdjustmentRegisterLifecycleStatus;
+  readonly version: number;
+  readonly reversalTransactionId?: string;
+  readonly replacementAdjustmentId?: string;
+  readonly replacesAdjustmentId?: string;
+  readonly reason: string | null;
+  readonly appliedInvoiceDocumentNumbers: readonly string[];
+  readonly appliedTo: string | null;
+  readonly sortValue: string | null;
+};
+export type AdjustmentRegisterProjection = {
+  readonly quarterStart: IsoDate;
+  readonly asOfDate: IsoDate;
+  readonly currencyCode: IsoCurrencyCode;
+  readonly items: readonly AdjustmentRegisterRow[];
+  readonly totalCount: number;
+  readonly unfilteredCount: number;
+  readonly totals: {
+    readonly issuedAmount: DecimalString;
+    readonly issuedCount: number;
+    readonly unappliedAmount: DecimalString;
+    readonly unappliedCount: number;
+    readonly refundedAmount: DecimalString;
+    readonly refundedCount: number;
+  };
+  readonly hasPrevious: boolean;
+  readonly hasNext: boolean;
+  readonly previousBoundary?: AdjustmentRegisterBoundary;
+  readonly nextBoundary?: AdjustmentRegisterBoundary;
 };
 
 export type InvoiceSummary = {
@@ -826,7 +946,10 @@ export type FinancialReadModels = {
   getFiscalPeriod(sourceId: string, fiscalPeriodId: string): Promise<FiscalPeriodReadModel>;
   getPostingLock(sourceId: string): Promise<PostingLockReadModel>;
   listInvoices(input?: PageRequest & { readonly status?: InvoiceListStatus; readonly asOfDate?: IsoDate }): Promise<Page<InvoiceListItem>>;
+  latestInvoiceNumberSequence(): Promise<number | null>;
+  getOpenInvoicesByIds(invoiceIds: readonly string[]): Promise<readonly OpenInvoiceReference[]>;
   getInvoice(invoiceId: string, asOfDate?: IsoDate): Promise<InvoiceDetail>;
+  getInvoicesByIds(invoiceIds: readonly string[], asOfDate?: IsoDate): Promise<InvoiceDetailsByIdResult>;
   listInvoiceDeliveries(invoiceId: string, input?: PageRequest): Promise<Page<InvoiceDeliveryEvent>>;
   getInvoiceSummary(input?: { readonly asOfDate?: IsoDate }): Promise<InvoiceSummary>;
   listVendorBills(input?: PageRequest & { readonly status?: VendorBillStatus; readonly asOfDate?: IsoDate; readonly vendorId?: string }): Promise<Page<VendorBillListItem>>;
@@ -844,6 +967,16 @@ export type FinancialReadModels = {
     readonly periodEnd?: IsoDate;
     readonly status?: PaymentStatus;
   }): Promise<Page<PaymentListItem>>;
+  listCustomerPaymentRegister(input: {
+    readonly periodStart: IsoDate;
+    readonly periodEnd: IsoDate;
+    readonly sort: CustomerPaymentRegisterSort;
+    readonly direction: CustomerPaymentRegisterDirection;
+    readonly limit: number;
+    readonly filter?: CustomerPaymentRegisterFilter;
+    readonly boundary?: CustomerPaymentRegisterBoundary;
+  }): Promise<CustomerPaymentRegisterProjection>;
+  findCustomerPaymentHistoryPartyIds(partyIds: readonly string[]): Promise<readonly string[]>;
   listBillPayments(input?: PageRequest & {
     readonly vendorId?: string;
     readonly periodStart?: IsoDate;
@@ -869,6 +1002,14 @@ export type FinancialReadModels = {
   getPaymentApplication(applicationId: string): Promise<PaymentApplicationDetail>;
   getPaymentSummary(input: { readonly periodStart: IsoDate; readonly periodEnd: IsoDate }): Promise<PaymentSummary>;
   listAdjustments(input?: PageRequest & { readonly adjustmentType?: AdjustmentType; readonly status?: AdjustmentStatus }): Promise<Page<AdjustmentListItem>>;
+  listAdjustmentRegister(input: {
+    readonly asOfDate: IsoDate;
+    readonly filter: AdjustmentRegisterFilter;
+    readonly sort: AdjustmentRegisterSort;
+    readonly direction: AdjustmentRegisterDirection;
+    readonly limit: number;
+    readonly boundary?: AdjustmentRegisterBoundary;
+  }): Promise<AdjustmentRegisterProjection>;
   getAdjustment(adjustmentId: string): Promise<AdjustmentDetail>;
   listWriteOffs(input?: PageRequest & { readonly customerId?: string; readonly status?: WriteOffListItem["status"] }): Promise<Page<WriteOffListItem>>;
   getWriteOff(writeOffId: string): Promise<WriteOffDetail>;
@@ -908,13 +1049,18 @@ export function createFinancialReadModels(input: Scope): FinancialReadModels {
     getFiscalPeriod: (sourceId, fiscalPeriodId) => getFiscalPeriod(input, sourceId, fiscalPeriodId),
     getPostingLock: (sourceId) => getPostingLock(input, sourceId),
     listInvoices: (request = {}) => listInvoices(input, request),
+    latestInvoiceNumberSequence: () => latestInvoiceNumberSequence(input),
+    getOpenInvoicesByIds: (invoiceIds) => getOpenInvoicesByIds(input, invoiceIds),
     getInvoice: (invoiceId, asOfDate) => getInvoice(input, invoiceId, asOfDate),
+    getInvoicesByIds: (invoiceIds, asOfDate) => getInvoicesByIds(input, invoiceIds, asOfDate),
     listInvoiceDeliveries: (invoiceId, request = {}) => listInvoiceDeliveries(input, invoiceId, request),
     getInvoiceSummary: (request = {}) => getInvoiceSummary(input, request),
     listVendorBills: (request = {}) => listVendorBills(input, request),
     getVendorBill: (billId, asOfDate) => getVendorBill(input, billId, asOfDate),
     getVendorBillSummary: (request = {}) => getVendorBillSummary(input, request),
     listPayments: (request = {}) => listPayments(input, request),
+    listCustomerPaymentRegister: (request) => listCustomerPaymentRegister(input, request),
+    findCustomerPaymentHistoryPartyIds: (partyIds) => findCustomerPaymentHistoryPartyIds(input, partyIds),
     listBillPayments: (request = {}) => listBillPayments(input, request),
     getCustomerPayment: (paymentId) => getCustomerPayment(input, paymentId),
     getBillPayment: (paymentId) => getBillPayment(input, paymentId),
@@ -923,6 +1069,7 @@ export function createFinancialReadModels(input: Scope): FinancialReadModels {
     getPaymentApplication: (applicationId) => getPaymentApplication(input, applicationId),
     getPaymentSummary: (request) => getPaymentSummary(input, request),
     listAdjustments: (request = {}) => listAdjustments(input, request),
+    listAdjustmentRegister: (request) => listAdjustmentRegister(input, request),
     getAdjustment: (adjustmentId) => getAdjustment(input, adjustmentId),
     listWriteOffs: (request = {}) => listWriteOffs(input, request),
     getWriteOff: (writeOffId) => getWriteOff(input, writeOffId),
@@ -1428,6 +1575,152 @@ join lateral (
 ) latest on true`;
 }
 
+async function latestInvoiceNumberSequence(scope: Scope): Promise<number | null> {
+  return scope.database.transaction(async (client) => {
+    await resolveBook(client, scope);
+    const result = await client.query(
+      `with invoice_number_digits as (
+  select substring(draft."document_number" from 5) as "digits"
+  from "erp_financials"."invoice_drafts" draft
+  where draft."tenant_id" = $1 and draft."company_id" = $2 and draft."book_id" = $3
+    and draft."document_number" collate "C" ~* '^INV-[0-9]+$'
+  union all
+  select substring(document."document_number" from 5)
+  from "erp_financials"."subledger_documents" document
+  join "erp_financials"."reporting_book_sources" source
+    on source."tenant_id" = document."tenant_id" and source."company_id" = document."company_id"
+   and source."book_id" = $3 and source."source_id" = document."source_id"
+   and (source."effective_from" is null or source."effective_from" <= document."document_date")
+   and (source."effective_through" is null or source."effective_through" >= document."document_date")
+  where document."tenant_id" = $1 and document."company_id" = $2
+    and document."document_type" = 'invoice'
+    and document."document_number" collate "C" ~* '^INV-[0-9]+$'
+), normalized_invoice_numbers as (
+  select coalesce(nullif(ltrim("digits", '0'), ''), '0') as "digits"
+  from invoice_number_digits
+), longest_invoice_numbers as (
+  select "digits"
+  from normalized_invoice_numbers
+  where length("digits") = (select max(length("digits")) from normalized_invoice_numbers)
+)
+select max("digits" collate "C") as "latest_sequence"
+from longest_invoice_numbers`,
+      [scope.tenantId, scope.companyId, scope.bookId]
+    );
+    const value = result.rows[0]?.latest_sequence;
+    if (value === null || value === undefined) return null;
+    if (typeof value !== "string" || !/^[0-9]+$/u.test(value)) {
+      throw new ErpFinancialsError("invalid_input", "The latest invoice number sequence is invalid");
+    }
+    const sequence = BigInt(value);
+    if (sequence > 2147483647n) {
+      throw new ErpFinancialsError("invalid_input", "The invoice number sequence has exceeded its supported range", {
+        details: { maximumSequence: 2147483647 }
+      });
+    }
+    return Number(sequence);
+  });
+}
+
+const MAX_PAYMENT_REFERENCE_IDS = 1000;
+
+function paymentReferenceIds(values: readonly string[], field: string): readonly string[] {
+  const candidates: readonly unknown[] = values;
+  if (!Array.isArray(candidates)) throw new ErpFinancialsError("invalid_input", `${field} must be an array`);
+  if (candidates.length > MAX_PAYMENT_REFERENCE_IDS) {
+    throw new ErpFinancialsError("invalid_input", `${field} must not contain more than 1000 entries`, {
+      details: { maximumBatchSize: MAX_PAYMENT_REFERENCE_IDS }
+    });
+  }
+  const unique: string[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < candidates.length; index += 1) {
+    const value = values[index];
+    if (typeof value !== "string" || value.trim().length === 0) {
+      throw new ErpFinancialsError("invalid_input", `${field} must contain non-empty strings`, { details: { index } });
+    }
+    if (!seen.has(value)) {
+      seen.add(value);
+      unique.push(value);
+    }
+  }
+  return unique;
+}
+
+async function findCustomerPaymentHistoryPartyIds(
+  scope: Scope,
+  partyIds: readonly string[]
+): Promise<readonly string[]> {
+  const requested = paymentReferenceIds(partyIds, "partyIds");
+  if (requested.length === 0) return [];
+  return scope.database.transaction(async (client) => {
+    await resolveBook(client, scope);
+    const result = await client.query(
+      `select distinct document."party_id"
+from "erp_financials"."subledger_documents" document
+join "erp_financials"."reporting_book_sources" source
+  on source."tenant_id" = document."tenant_id" and source."company_id" = document."company_id"
+ and source."book_id" = $3 and source."source_id" = document."source_id"
+ and (source."effective_from" is null or source."effective_from" <= document."document_date")
+ and (source."effective_through" is null or source."effective_through" >= document."document_date")
+where document."tenant_id" = $1 and document."company_id" = $2
+  and document."document_type" = 'customer_payment'
+  and document."party_id" = any($4::text[])
+order by document."party_id"`,
+      [scope.tenantId, scope.companyId, scope.bookId, requested]
+    );
+    return result.rows.map((row) => string(row.party_id, "party_id"));
+  });
+}
+
+async function getOpenInvoicesByIds(
+  scope: Scope,
+  invoiceIds: readonly string[]
+): Promise<readonly OpenInvoiceReference[]> {
+  const requested = paymentReferenceIds(invoiceIds, "invoiceIds");
+  if (requested.length === 0) return [];
+  return scope.database.transaction(async (client) => {
+    await resolveBook(client, scope);
+    const result = await client.query(
+      `with requested as (
+  select requested."invoice_id", requested."requested_order"
+  from unnest($4::text[]) with ordinality requested("invoice_id", "requested_order")
+)
+select document."subledger_document_id" as "invoice_id", document."document_number",
+  document."due_date", document."open_amount", document."currency_code", document."version"
+from requested
+join "erp_financials"."subledger_documents" document
+  on document."tenant_id" = $1 and document."company_id" = $2
+ and document."subledger_document_id" = requested."invoice_id"
+ and document."document_type" = 'invoice'
+join "erp_financials"."reporting_book_sources" source
+  on source."tenant_id" = document."tenant_id" and source."company_id" = document."company_id"
+ and source."book_id" = $3 and source."source_id" = document."source_id"
+ and (source."effective_from" is null or source."effective_from" <= document."document_date")
+ and (source."effective_through" is null or source."effective_through" >= document."document_date")
+left join "erp_financials"."invoice_voids" void
+  on void."tenant_id" = document."tenant_id" and void."company_id" = document."company_id"
+ and void."book_id" = $3 and void."source_id" = document."source_id"
+ and void."invoice_document_id" = document."subledger_document_id"
+where document."open_amount" > 0 and document."status" <> 'settled'
+  and void."invoice_void_id" is null
+order by document."due_date", document."subledger_document_id" collate "C", requested."requested_order"`,
+      [scope.tenantId, scope.companyId, scope.bookId, requested]
+    );
+    return result.rows.map((row): OpenInvoiceReference => {
+      const documentNumber = optionalString(row.document_number);
+      return {
+        invoiceId: string(row.invoice_id, "invoice_id"),
+        ...(documentNumber === undefined ? {} : { documentNumber }),
+        dueDate: date(row.due_date, "due_date"),
+        openAmount: decimal(row.open_amount, "open_amount"),
+        currencyCode: string(row.currency_code, "currency_code"),
+        version: integer(row.version, "version")
+      };
+    });
+  });
+}
+
 async function listInvoices(
   scope: Scope,
   input: PageRequest & { readonly status?: InvoiceListStatus; readonly asOfDate?: IsoDate; readonly invoiceId?: string }
@@ -1502,6 +1795,153 @@ limit $10`,
       date: item.documentDate,
       id: item.invoiceId
     }));
+  });
+}
+
+const MAX_INVOICE_DETAIL_BATCH_SIZE = 100;
+
+async function getInvoicesByIds(
+  scope: Scope,
+  invoiceIds: readonly string[],
+  asOfDate = today()
+): Promise<InvoiceDetailsByIdResult> {
+  const candidates: readonly unknown[] = invoiceIds;
+  if (!Array.isArray(candidates)) throw new ErpFinancialsError("invalid_input", "invoiceIds must be an array");
+  if (candidates.length > MAX_INVOICE_DETAIL_BATCH_SIZE) {
+    throw new ErpFinancialsError("invalid_input", "Invoice detail batch size must not exceed 100", {
+      details: { maximumBatchSize: MAX_INVOICE_DETAIL_BATCH_SIZE }
+    });
+  }
+  const seen = new Set<string>();
+  const validatedInvoiceIds: string[] = [];
+  for (let index = 0; index < candidates.length; index += 1) {
+    const invoiceId = invoiceIds[index];
+    if (typeof invoiceId !== "string" || invoiceId.trim().length === 0) {
+      throw new ErpFinancialsError("invalid_input", "Invoice detail batch IDs must be non-empty strings", {
+        details: { index }
+      });
+    }
+    if (seen.has(invoiceId)) {
+      throw new ErpFinancialsError("invalid_input", "Invoice detail batch IDs must not contain duplicates", {
+        details: { invoiceId, index }
+      });
+    }
+    seen.add(invoiceId);
+    validatedInvoiceIds.push(invoiceId);
+  }
+  if (validatedInvoiceIds.length === 0) return { orderedInvoiceIds: [], byInvoiceId: {} };
+  assertDate(asOfDate, "asOfDate");
+  return scope.database.transaction(async (client) => {
+    const book = await resolveBook(client, scope);
+    const result = await client.query(
+      `with requested as (
+  select requested."invoice_id", requested."requested_order"
+  from unnest($6::text[]) with ordinality requested("invoice_id", "requested_order")
+), invoice_detail_rows as (
+  select requested."requested_order", draft."invoice_draft_id" as "invoice_id", draft."source_id",
+    'draft'::text as "provenance", draft."customer_id" as "party_id", party."display_name" as "party_name",
+    draft."document_number", draft."document_date", draft."due_date", draft."currency_code",
+    coalesce(amounts."original_amount", 0)::numeric as "original_amount",
+    coalesce(amounts."original_amount", 0)::numeric as "open_amount", draft."status", draft."version", draft."memo",
+    line."invoice_draft_line_id" as "line_id", line."line_number", line."account_id", line."item_id",
+    line."description", line."quantity", line."unit_amount", line."unit_cost", line."discount_amount",
+    line."tax_code", line."tax_amount", line."service_period_start", line."service_period_end",
+    line."dimension_refs", line."line_amount"
+  from requested
+  join "erp_financials"."invoice_drafts" draft
+    on draft."tenant_id" = $1 and draft."company_id" = $2 and draft."book_id" = $3
+   and draft."invoice_draft_id" = requested."invoice_id" and draft."status" <> 'issued'
+  join "erp_financials"."reporting_book_sources" source
+    on source."tenant_id" = draft."tenant_id" and source."company_id" = draft."company_id"
+   and source."book_id" = draft."book_id" and source."source_id" = draft."source_id"
+   and (source."effective_from" is null or source."effective_from" <= draft."document_date")
+   and (source."effective_through" is null or source."effective_through" >= draft."document_date")
+  left join "erp_financials"."parties" party
+    on party."tenant_id" = draft."tenant_id" and party."source_id" = draft."source_id"
+   and party."party_id" = draft."customer_id"
+  left join lateral (
+    select sum(amount_line."line_amount") as "original_amount"
+    from "erp_financials"."invoice_draft_lines" amount_line
+    where amount_line."tenant_id" = draft."tenant_id" and amount_line."company_id" = draft."company_id"
+      and amount_line."book_id" = draft."book_id" and amount_line."invoice_draft_id" = draft."invoice_draft_id"
+  ) amounts on true
+  left join "erp_financials"."invoice_draft_lines" line
+    on line."tenant_id" = draft."tenant_id" and line."company_id" = draft."company_id"
+   and line."book_id" = draft."book_id" and line."invoice_draft_id" = draft."invoice_draft_id"
+  where draft."currency_code" = $5
+  union all
+  select requested."requested_order", document."subledger_document_id", document."source_id", 'posted'::text,
+    document."party_id", party."display_name", document."document_number", document."document_date",
+    document."due_date", document."currency_code", document."original_amount", document."open_amount",
+    case
+      when void."invoice_void_id" is not null then 'voided'
+      when document."status" = 'settled' or document."open_amount" = 0 then 'paid'
+      when document."due_date" < $4::date then 'overdue'
+      when document."open_amount" < document."original_amount" then 'partial'
+      when delivery."delivery_status" in ('sent', 'delivered') then 'sent'
+      else 'open'
+    end, document."version", transaction."memo", line."subledger_document_line_id", line."line_number",
+    line."account_id", line."item_id", line."description", line."quantity", line."unit_amount", line."unit_cost",
+    line."discount_amount", line."tax_code", line."tax_amount", line."service_period_start",
+    line."service_period_end", line."dimension_refs", line."line_amount"
+  from requested
+  join "erp_financials"."subledger_documents" document
+    on document."tenant_id" = $1 and document."company_id" = $2
+   and document."subledger_document_id" = requested."invoice_id" and document."document_type" = 'invoice'
+  join "erp_financials"."reporting_book_sources" source
+    on source."tenant_id" = document."tenant_id" and source."company_id" = document."company_id"
+   and source."book_id" = $3 and source."source_id" = document."source_id"
+   and (source."effective_from" is null or source."effective_from" <= document."document_date")
+   and (source."effective_through" is null or source."effective_through" >= document."document_date")
+  join "erp_financials"."transactions" transaction
+    on transaction."tenant_id" = document."tenant_id" and transaction."source_id" = document."source_id"
+   and transaction."transaction_id" = document."transaction_id"
+  left join "erp_financials"."parties" party
+    on party."tenant_id" = document."tenant_id" and party."source_id" = document."source_id"
+   and party."party_id" = document."party_id"
+  left join "erp_financials"."invoice_voids" void
+    on void."tenant_id" = document."tenant_id" and void."company_id" = document."company_id"
+   and void."book_id" = $3 and void."source_id" = document."source_id"
+   and void."invoice_document_id" = document."subledger_document_id"
+  left join lateral (
+    select event."delivery_status"
+    from "erp_financials"."subledger_document_delivery_events" event
+    where event."tenant_id" = document."tenant_id" and event."company_id" = document."company_id"
+      and event."source_id" = document."source_id"
+      and event."subledger_document_id" = document."subledger_document_id"
+    order by event."occurred_at" desc, event."delivery_event_id" desc limit 1
+  ) delivery on true
+  left join "erp_financials"."subledger_document_lines" line
+    on line."tenant_id" = document."tenant_id" and line."company_id" = document."company_id"
+   and line."source_id" = document."source_id"
+   and line."subledger_document_id" = document."subledger_document_id"
+  where document."currency_code" = $5
+)
+select * from invoice_detail_rows
+order by "requested_order", "line_number" nulls last, "line_id" nulls last`,
+      [scope.tenantId, scope.companyId, scope.bookId, asOfDate, book.currencyCode, validatedInvoiceIds]
+    );
+    const details = new Map<string, InvoiceDetail & { lines: CommercialDocumentLineReadModel[] }>();
+    for (const row of result.rows) {
+      const invoiceId = string(row.invoice_id, "invoice_id");
+      let detail = details.get(invoiceId);
+      if (detail === undefined) {
+        const memo = optionalString(row.memo);
+        detail = {
+          ...invoiceFromRow(row),
+          ...(memo === undefined ? {} : { memo }),
+          lines: []
+        };
+        details.set(invoiceId, detail);
+      }
+      if (row.line_id !== null && row.line_id !== undefined) detail.lines.push(commercialLineFromRow(row));
+    }
+    const orderedInvoiceIds = validatedInvoiceIds.filter((invoiceId) => details.has(invoiceId));
+    const byInvoiceId = Object.fromEntries(orderedInvoiceIds.flatMap((invoiceId) => {
+      const detail = details.get(invoiceId);
+      return detail === undefined ? [] : [[invoiceId, detail]];
+    }));
+    return { orderedInvoiceIds, byInvoiceId };
   });
 }
 
@@ -1989,6 +2429,340 @@ from bills`,
       replacedVendorBillCount: integer(row.replaced_count, "replaced_count")
     };
   });
+}
+
+const CUSTOMER_PAYMENT_REGISTER_FILTERS: ReadonlySet<CustomerPaymentRegisterFilter> = new Set([
+  "all", "automatic", "manual", "unapplied"
+]);
+const CUSTOMER_PAYMENT_REGISTER_SORTS: ReadonlySet<CustomerPaymentRegisterSort> = new Set([
+  "payment", "customer", "date", "method", "appliedTo", "match", "amount"
+]);
+const CUSTOMER_PAYMENT_REGISTER_DIRECTIONS: ReadonlySet<CustomerPaymentRegisterDirection> = new Set(["asc", "desc"]);
+const CUSTOMER_PAYMENT_REGISTER_TRAVERSALS = new Set(["forward", "backward"]);
+
+type CustomerPaymentRegisterOrdering = {
+  readonly expression: string;
+  readonly cast: "text" | "date" | "numeric";
+  readonly direction: CustomerPaymentRegisterDirection;
+  readonly nulls: "first" | "last";
+};
+
+async function listCustomerPaymentRegister(
+  scope: Scope,
+  input: {
+    readonly periodStart: IsoDate;
+    readonly periodEnd: IsoDate;
+    readonly sort: CustomerPaymentRegisterSort;
+    readonly direction: CustomerPaymentRegisterDirection;
+    readonly limit: number;
+    readonly filter?: CustomerPaymentRegisterFilter;
+    readonly boundary?: CustomerPaymentRegisterBoundary;
+  }
+): Promise<CustomerPaymentRegisterProjection> {
+  assertWindow(input.periodStart, input.periodEnd);
+  const filter = input.filter ?? "all";
+  if (!CUSTOMER_PAYMENT_REGISTER_FILTERS.has(filter)) {
+    throw new ErpFinancialsError("invalid_input", "Unsupported customer payment register filter");
+  }
+  if (!CUSTOMER_PAYMENT_REGISTER_SORTS.has(input.sort)) {
+    throw new ErpFinancialsError("invalid_input", "Unsupported customer payment register sort");
+  }
+  if (!CUSTOMER_PAYMENT_REGISTER_DIRECTIONS.has(input.direction)) {
+    throw new ErpFinancialsError("invalid_input", "Unsupported customer payment register direction");
+  }
+  if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 200) {
+    throw new ErpFinancialsError("invalid_input", "Customer payment register limit must be an integer between 1 and 200");
+  }
+  const boundary = customerPaymentRegisterBoundary(input.boundary, input.sort, input.direction);
+  return scope.database.transaction(async (client) => {
+    const book = await resolveBook(client, scope);
+    const traversal = boundary?.traversal ?? "forward";
+    const ordering = customerPaymentRegisterOrdering(input.sort, input.direction, traversal);
+    const parameters: unknown[] = [
+      scope.tenantId, scope.companyId, scope.bookId, book.currencyCode, input.periodStart, input.periodEnd, filter
+    ];
+    let boundarySql = "";
+    if (boundary !== undefined) {
+      parameters.push(boundary.value, boundary.paymentId);
+      boundarySql = customerPaymentRegisterBoundarySql(ordering, boundary.value === null);
+    }
+    parameters.push(input.limit + 1);
+    const result = await client.query(
+      `with payment_rows as (
+  select document."subledger_document_id" as "payment_id", document."source_id", document."document_type",
+    document."transaction_id", document."party_id", party."display_name" as "party_name", document."document_number",
+    document."document_date", document."currency_code", document."original_amount", document."open_amount",
+    document."version", document."lifecycle_event_id", coalesce(apps."application_count", 0)::integer as "application_count",
+    coalesce(nullif(document."metadata"->>'paymentMethod', ''), nullif(document."metadata"->>'payment_method', ''), 'Imported') as "payment_method",
+    apps."applied_to",
+    case when coalesce(apps."automatic", false) then 'automatic'
+      when coalesce(apps."application_count", 0) > 0 then 'manual' else 'unmatched' end as "matching_mode",
+    case when coalesce(apps."automatic", false) then 'Automatically matched'
+      when coalesce(apps."application_count", 0) > 0 then 'Canonical application' else 'Awaiting bank review' end as "match_label",
+    case when document."status" = 'voided' then 'voided'
+      when document."open_amount" = 0 then 'applied'
+      when document."open_amount" = document."original_amount" then 'unapplied' else 'partial' end as "payment_status"
+  from "erp_financials"."subledger_documents" document
+  join "erp_financials"."reporting_book_sources" source
+    on source."tenant_id" = document."tenant_id" and source."company_id" = document."company_id"
+   and source."book_id" = $3 and source."source_id" = document."source_id"
+   and (source."effective_from" is null or source."effective_from" <= document."document_date")
+   and (source."effective_through" is null or source."effective_through" >= document."document_date")
+  left join "erp_financials"."parties" party
+    on party."tenant_id" = document."tenant_id" and party."source_id" = document."source_id"
+   and party."party_id" = document."party_id"
+  left join lateral (
+    select count(*)::integer as "application_count", bool_or(application."match_method" = 'automatic') as "automatic",
+      string_agg(coalesce(nullif(trim(invoice."document_number"), ''), 'Invoice'), ', '
+        order by invoice."document_number" collate "C", application."subledger_application_id" collate "C") as "applied_to"
+    from "erp_financials"."subledger_applications" application
+    join "erp_financials"."reporting_book_sources" application_source
+      on application_source."tenant_id" = application."tenant_id" and application_source."company_id" = application."company_id"
+     and application_source."book_id" = $3 and application_source."source_id" = application."source_id"
+     and (application_source."effective_from" is null or application_source."effective_from" <= application."application_date")
+     and (application_source."effective_through" is null or application_source."effective_through" >= application."application_date")
+    join "erp_financials"."subledger_documents" invoice
+      on invoice."tenant_id" = application."tenant_id" and invoice."company_id" = application."company_id"
+     and invoice."source_id" = application."source_id" and invoice."subledger_document_id" = application."target_document_id"
+     and invoice."document_type" = 'invoice' and invoice."currency_code" = $4
+    where application."tenant_id" = document."tenant_id" and application."company_id" = document."company_id"
+      and application."source_id" = document."source_id"
+      and application."source_document_id" = document."subledger_document_id"
+      and application."application_type" = 'customer_payment_to_invoice' and application."status" = 'applied'
+      and application."currency_code" = $4
+  ) apps on true
+  where document."tenant_id" = $1 and document."company_id" = $2
+    and document."document_type" = 'customer_payment' and document."currency_code" = $4
+    and document."document_date" between $5::date and $6::date
+), filtered_rows as (
+  select * from payment_rows where $7::text = 'all'
+    or ($7::text = 'automatic' and "matching_mode" = 'automatic')
+    or ($7::text = 'manual' and "matching_mode" = 'manual')
+    or ($7::text = 'unapplied' and "open_amount" > 0)
+)
+select payment.*, ${ordering.expression} as "sort_key"
+from filtered_rows payment
+where true
+${boundarySql}
+order by ${ordering.expression} ${ordering.direction} nulls ${ordering.nulls}, payment."payment_id" ${ordering.direction}
+limit $${String(parameters.length)}`,
+      parameters
+    );
+    const selectedRows = result.rows.slice(0, input.limit);
+    if (traversal === "backward") selectedRows.reverse();
+    const paymentIds = selectedRows.map((row) => string(row.payment_id, "payment_id"));
+    const applications = paymentIds.length === 0
+      ? []
+      : (await client.query(
+        `select application."subledger_application_id" as "application_id", application."source_id",
+  application."application_type", application."status", application."version", application."application_date",
+  application."source_document_id" as "source_payment_id", application."target_document_id",
+  application."applied_amount", application."currency_code", application."applied_event_id", application."ended_event_id",
+  application."match_candidate_id", application."match_decision_id", application."match_method", application."match_score",
+  application."match_evidence", invoice."document_number" as "target_document_number",
+  invoice."version" as "target_document_version"
+from "erp_financials"."subledger_applications" application
+join "erp_financials"."reporting_book_sources" source
+  on source."tenant_id" = application."tenant_id" and source."company_id" = application."company_id"
+ and source."book_id" = $3 and source."source_id" = application."source_id"
+ and (source."effective_from" is null or source."effective_from" <= application."application_date")
+ and (source."effective_through" is null or source."effective_through" >= application."application_date")
+join "erp_financials"."subledger_documents" invoice
+  on invoice."tenant_id" = application."tenant_id" and invoice."company_id" = application."company_id"
+ and invoice."source_id" = application."source_id" and invoice."subledger_document_id" = application."target_document_id"
+ and invoice."document_type" = 'invoice' and invoice."currency_code" = $4
+where application."tenant_id" = $1 and application."company_id" = $2
+  and application."application_type" = 'customer_payment_to_invoice' and application."status" = 'applied'
+  and application."currency_code" = $4 and application."source_document_id" = any($5::text[])
+order by application."source_document_id" collate "C", application."application_date",
+  application."subledger_application_id" collate "C"`,
+        [scope.tenantId, scope.companyId, scope.bookId, book.currencyCode, paymentIds]
+      )).rows;
+    const applicationsByPayment = new Map<string, CustomerPaymentRegisterApplication[]>();
+    for (const row of applications) {
+      const application = customerPaymentRegisterApplicationFromRow(row);
+      const list = applicationsByPayment.get(application.sourcePaymentId) ?? [];
+      list.push(application);
+      applicationsByPayment.set(application.sourcePaymentId, list);
+    }
+    const items = selectedRows.map((row) => {
+      const paymentId = string(row.payment_id, "payment_id");
+      return customerPaymentRegisterRowFromRow(row, applicationsByPayment.get(paymentId) ?? [], input.sort);
+    });
+    const totals = await client.query(
+      `with payment_rows as (
+  select document."original_amount", document."open_amount",
+    case when bool_or(application."match_method" = 'automatic') then 'automatic'
+      when count(application."subledger_application_id") > 0 then 'manual' else 'unmatched' end as "matching_mode"
+  from "erp_financials"."subledger_documents" document
+  join "erp_financials"."reporting_book_sources" source
+    on source."tenant_id" = document."tenant_id" and source."company_id" = document."company_id"
+   and source."book_id" = $3 and source."source_id" = document."source_id"
+   and (source."effective_from" is null or source."effective_from" <= document."document_date")
+   and (source."effective_through" is null or source."effective_through" >= document."document_date")
+  left join "erp_financials"."subledger_applications" application
+    on application."tenant_id" = document."tenant_id" and application."company_id" = document."company_id"
+   and application."source_id" = document."source_id" and application."source_document_id" = document."subledger_document_id"
+   and application."application_type" = 'customer_payment_to_invoice' and application."status" = 'applied'
+   and application."currency_code" = $4
+  where document."tenant_id" = $1 and document."company_id" = $2
+    and document."document_type" = 'customer_payment' and document."currency_code" = $4
+    and document."document_date" between $5::date and $6::date
+  group by document."subledger_document_id"
+)
+select coalesce(sum("original_amount"), 0.0000::numeric) as "received_amount", count(*)::integer as "received_count",
+  coalesce(sum("open_amount") filter (where "open_amount" > 0), 0.0000::numeric) as "unapplied_amount",
+  count(*) filter (where "open_amount" > 0)::integer as "unapplied_count",
+  count(*) filter (where "matching_mode" = 'automatic')::integer as "automatic_count",
+  count(*) filter (where "matching_mode" <> 'unmatched')::integer as "matched_count",
+  coalesce(sum("original_amount") filter (where $7::text = 'all'
+    or ($7::text = 'automatic' and "matching_mode" = 'automatic')
+    or ($7::text = 'manual' and "matching_mode" = 'manual')
+    or ($7::text = 'unapplied' and "open_amount" > 0)), 0.0000::numeric) as "filtered_amount",
+  count(*) filter (where $7::text = 'all'
+    or ($7::text = 'automatic' and "matching_mode" = 'automatic')
+    or ($7::text = 'manual' and "matching_mode" = 'manual')
+    or ($7::text = 'unapplied' and "open_amount" > 0))::integer as "filtered_count"
+from payment_rows`,
+      [scope.tenantId, scope.companyId, scope.bookId, book.currencyCode, input.periodStart, input.periodEnd, filter]
+    );
+    const totalRow = requiredRow(totals.rows[0], "customer payment register totals");
+    const hasMore = result.rows.length > input.limit;
+    const hasPrevious = items.length > 0 && (traversal === "backward" ? hasMore : boundary !== undefined);
+    const hasNext = items.length > 0 && (traversal === "forward" ? hasMore : boundary !== undefined);
+    const first = items[0];
+    const last = items.at(-1);
+    return {
+      periodStart: input.periodStart,
+      periodEnd: input.periodEnd,
+      currencyCode: book.currencyCode,
+      items,
+      totalCount: integer(totalRow.filtered_count, "filtered_count"),
+      filteredAmount: decimal(totalRow.filtered_amount, "filtered_amount"),
+      totals: {
+        receivedAmount: decimal(totalRow.received_amount, "received_amount"),
+        receivedPaymentCount: integer(totalRow.received_count, "received_count"),
+        unappliedAmount: decimal(totalRow.unapplied_amount, "unapplied_amount"),
+        unappliedPaymentCount: integer(totalRow.unapplied_count, "unapplied_count"),
+        automaticallyMatchedPaymentCount: integer(totalRow.automatic_count, "automatic_count"),
+        matchedPaymentCount: integer(totalRow.matched_count, "matched_count")
+      },
+      hasPrevious,
+      hasNext,
+      ...(hasPrevious && first !== undefined
+        ? { previousBoundary: customerPaymentRegisterBoundaryFor(first, input.sort, input.direction, "backward") }
+        : {}),
+      ...(hasNext && last !== undefined
+        ? { nextBoundary: customerPaymentRegisterBoundaryFor(last, input.sort, input.direction, "forward") }
+        : {})
+    };
+  });
+}
+
+function customerPaymentRegisterBoundary(
+  value: CustomerPaymentRegisterBoundary | undefined,
+  sort: CustomerPaymentRegisterSort,
+  direction: CustomerPaymentRegisterDirection
+): CustomerPaymentRegisterBoundary | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value) || value.sort !== sort || value.direction !== direction ||
+      !CUSTOMER_PAYMENT_REGISTER_TRAVERSALS.has(value.traversal) ||
+      typeof value.paymentId !== "string" || value.paymentId.trim().length === 0 ||
+      (value.value !== null && typeof value.value !== "string")) {
+    throw new ErpFinancialsError("invalid_input", "Customer payment register boundary does not match sort and direction");
+  }
+  if ((sort === "date" || sort === "amount" || sort === "method" || sort === "match") && value.value === null) {
+    throw new ErpFinancialsError("invalid_input", "Customer payment register boundary value is invalid for sort");
+  }
+  if (sort === "date" && value.value !== null) assertDate(value.value, "boundary.value");
+  if (sort === "amount" && !/^-?\d+(?:\.\d+)?$/u.test(value.value ?? "")) {
+    throw new ErpFinancialsError("invalid_input", "boundary.value must be a decimal");
+  }
+  if (value.value !== null && value.value.length === 0) {
+    throw new ErpFinancialsError("invalid_input", "Customer payment register boundary text must not be empty");
+  }
+  return value;
+}
+
+function customerPaymentRegisterOrdering(
+  sort: CustomerPaymentRegisterSort,
+  direction: CustomerPaymentRegisterDirection,
+  traversal: "forward" | "backward"
+): CustomerPaymentRegisterOrdering {
+  const expressions: Record<CustomerPaymentRegisterSort, { expression: string; cast: "text" | "date" | "numeric" }> = {
+    payment: { expression: 'payment."document_number" collate "C"', cast: "text" },
+    customer: { expression: 'payment."party_name" collate "C"', cast: "text" },
+    date: { expression: 'payment."document_date"', cast: "date" },
+    method: { expression: 'payment."payment_method" collate "C"', cast: "text" },
+    appliedTo: { expression: 'payment."applied_to" collate "C"', cast: "text" },
+    match: { expression: 'payment."match_label" collate "C"', cast: "text" },
+    amount: { expression: 'payment."original_amount"', cast: "numeric" }
+  };
+  const reversed = traversal === "backward";
+  return {
+    ...expressions[sort],
+    direction: reversed ? (direction === "asc" ? "desc" : "asc") : direction,
+    nulls: reversed ? "first" : "last"
+  };
+}
+
+function customerPaymentRegisterBoundarySql(ordering: CustomerPaymentRegisterOrdering, boundaryIsNull: boolean): string {
+  const comparison = ordering.direction === "asc" ? ">" : "<";
+  const idComparison = `payment."payment_id" ${comparison} $9::text`;
+  if (boundaryIsNull) {
+    return ordering.nulls === "first"
+      ? `  and $8::text is null and (${ordering.expression} is not null or (${ordering.expression} is null and ${idComparison}))`
+      : `  and $8::text is null and ${ordering.expression} is null and ${idComparison}`;
+  }
+  const parameter = ordering.cast === "text" ? '($8::text collate "C")' : `$8::${ordering.cast}`;
+  const comparisonSql = `${ordering.expression} ${comparison} ${parameter} or (${ordering.expression} = ${parameter} and ${idComparison})`;
+  return ordering.nulls === "last"
+    ? `  and ((${ordering.expression} is not null and (${comparisonSql})) or ${ordering.expression} is null)`
+    : `  and ${ordering.expression} is not null and (${comparisonSql})`;
+}
+
+function customerPaymentRegisterApplicationFromRow(
+  row: Record<string, unknown>
+): CustomerPaymentRegisterApplication {
+  const targetDocumentNumber = optionalString(row.target_document_number);
+  return {
+    ...paymentApplicationFromRow(row),
+    ...(targetDocumentNumber === undefined ? {} : { targetDocumentNumber }),
+    targetDocumentVersion: integer(row.target_document_version, "target_document_version")
+  };
+}
+
+function customerPaymentRegisterRowFromRow(
+  row: Record<string, unknown>,
+  applications: readonly CustomerPaymentRegisterApplication[],
+  sort: CustomerPaymentRegisterSort
+): CustomerPaymentRegisterRow {
+  const match = optionalString(row.match_label);
+  const paymentMethod = optionalString(row.payment_method);
+  return {
+    ...paymentFromRow(row),
+    applications,
+    sortValue: customerPaymentRegisterSortValue(row, sort),
+    matchingMode: string(row.matching_mode, "matching_mode") as CustomerPaymentRegisterRow["matchingMode"],
+    ...(match === undefined ? {} : { match }),
+    ...(paymentMethod === undefined ? {} : { paymentMethod })
+  };
+}
+
+function customerPaymentRegisterSortValue(row: Record<string, unknown>, sort: CustomerPaymentRegisterSort): string | null {
+  if (row.sort_key === null || row.sort_key === undefined) return null;
+  if (sort === "date") return date(row.sort_key, "sort_key");
+  if (sort === "amount") return decimal(row.sort_key, "sort_key");
+  return string(row.sort_key, "sort_key");
+}
+
+function customerPaymentRegisterBoundaryFor(
+  item: CustomerPaymentRegisterRow,
+  sort: CustomerPaymentRegisterSort,
+  direction: CustomerPaymentRegisterDirection,
+  traversal: "forward" | "backward"
+): CustomerPaymentRegisterBoundary {
+  return { sort, direction, traversal, value: item.sortValue, paymentId: item.paymentId };
 }
 
 async function listPayments(
@@ -2541,6 +3315,382 @@ limit $11`,
   return result.rows.map(paymentApplicationFromRow);
 }
 
+const ADJUSTMENT_REGISTER_FILTERS: ReadonlySet<AdjustmentRegisterFilter> = new Set(["all", "credit", "refund", "open"]);
+const ADJUSTMENT_REGISTER_SORTS: ReadonlySet<AdjustmentRegisterSort> = new Set([
+  "document", "type", "customer", "date", "reason", "appliedTo", "amount", "status"
+]);
+const ADJUSTMENT_REGISTER_DIRECTIONS: ReadonlySet<AdjustmentRegisterDirection> = new Set(["asc", "desc"]);
+const ADJUSTMENT_REGISTER_TRAVERSALS = new Set(["forward", "backward"]);
+const ADJUSTMENT_REGISTER_LIFECYCLES: ReadonlySet<AdjustmentRegisterLifecycleStatus> = new Set([
+  "open", "partially_applied", "applied", "voided", "replaced"
+]);
+
+type AdjustmentRegisterOrdering = {
+  readonly expression: string;
+  readonly cast: "text" | "date" | "numeric";
+  readonly nullable: boolean;
+  readonly direction: AdjustmentRegisterDirection;
+  readonly nulls: "first" | "last";
+};
+
+async function listAdjustmentRegister(
+  scope: Scope,
+  input: {
+    readonly asOfDate: IsoDate;
+    readonly filter: AdjustmentRegisterFilter;
+    readonly sort: AdjustmentRegisterSort;
+    readonly direction: AdjustmentRegisterDirection;
+    readonly limit: number;
+    readonly boundary?: AdjustmentRegisterBoundary;
+  }
+): Promise<AdjustmentRegisterProjection> {
+  assertDate(input.asOfDate, "asOfDate");
+  if (!ADJUSTMENT_REGISTER_FILTERS.has(input.filter)) {
+    throw new ErpFinancialsError("invalid_input", "Unsupported adjustment register filter");
+  }
+  if (!ADJUSTMENT_REGISTER_SORTS.has(input.sort)) {
+    throw new ErpFinancialsError("invalid_input", "Unsupported adjustment register sort");
+  }
+  if (!ADJUSTMENT_REGISTER_DIRECTIONS.has(input.direction)) {
+    throw new ErpFinancialsError("invalid_input", "Unsupported adjustment register direction");
+  }
+  if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 200) {
+    throw new ErpFinancialsError("invalid_input", "Adjustment register limit must be an integer between 1 and 200");
+  }
+  const boundary = adjustmentRegisterBoundary(input.boundary, input.sort, input.direction);
+  const quarterStart = adjustmentRegisterQuarterStart(input.asOfDate);
+  return scope.database.transaction(async (client) => {
+    const book = await resolveBook(client, scope);
+    const traversal = boundary?.traversal ?? "forward";
+    const ordering = adjustmentRegisterOrdering(input.sort, input.direction, traversal);
+    const parameters: unknown[] = [scope.tenantId, scope.companyId, scope.bookId, book.currencyCode, input.filter];
+    let boundarySql = "";
+    if (boundary !== undefined) {
+      parameters.push(boundary.value, boundary.adjustmentId);
+      boundarySql = adjustmentRegisterBoundarySql(ordering, boundary.value === null);
+    }
+    parameters.push(input.limit + 1);
+    const pageResult = await client.query(
+      `with active_application_labels as (
+  select application."source_document_id" as "adjustment_id",
+    array_agg(invoice."document_number" order by invoice."document_number" collate "C", invoice."subledger_document_id")
+      filter (where invoice."document_number" is not null) as "invoice_numbers",
+    string_agg(invoice."document_number", ', ' order by invoice."document_number" collate "C", invoice."subledger_document_id")
+      filter (where invoice."document_number" is not null) as "applied_to"
+  from "erp_financials"."subledger_applications" application
+  join "erp_financials"."reporting_book_sources" application_source
+    on application_source."tenant_id" = application."tenant_id" and application_source."company_id" = application."company_id"
+   and application_source."book_id" = $3 and application_source."source_id" = application."source_id"
+   and (application_source."effective_from" is null or application_source."effective_from" <= application."application_date")
+   and (application_source."effective_through" is null or application_source."effective_through" >= application."application_date")
+  join "erp_financials"."subledger_documents" invoice
+    on invoice."tenant_id" = application."tenant_id" and invoice."company_id" = application."company_id"
+   and invoice."source_id" = application."source_id" and invoice."subledger_document_id" = application."target_document_id"
+   and invoice."document_type" = 'invoice' and invoice."currency_code" = $4
+  join "erp_financials"."reporting_book_sources" invoice_source
+    on invoice_source."tenant_id" = invoice."tenant_id" and invoice_source."company_id" = invoice."company_id"
+   and invoice_source."book_id" = $3 and invoice_source."source_id" = invoice."source_id"
+   and (invoice_source."effective_from" is null or invoice_source."effective_from" <= invoice."document_date")
+   and (invoice_source."effective_through" is null or invoice_source."effective_through" >= invoice."document_date")
+  where application."tenant_id" = $1 and application."company_id" = $2
+    and application."application_type" = 'credit_to_invoice' and application."status" = 'applied'
+    and application."currency_code" = $4
+  group by application."source_document_id"
+), adjustment_rows as (
+  select document."subledger_document_id" as "adjustment_id", document."source_id", document."transaction_id",
+    case when document."document_type" = 'credit_memo' then 'credit' else 'refund' end as "adjustment_type",
+    document."party_id", party."display_name" as "party_name", document."document_number", document."document_date",
+    document."currency_code", document."original_amount", document."open_amount", document."version",
+    transaction."memo" as "reason", void_link."related_transaction_id" as "reversal_transaction_id",
+    replacement."subledger_document_id" as "replacement_adjustment_id",
+    replaced_original."subledger_document_id" as "replaces_adjustment_id",
+    labels."invoice_numbers", labels."applied_to",
+    case
+      when replacement."subledger_document_id" is not null or document."status" = 'replaced' then 'replaced'
+      when void_link."related_transaction_id" is not null or document."status" = 'voided' then 'voided'
+      when document."document_type" = 'refund' or document."open_amount" <= 0 then 'applied'
+      when document."open_amount" < document."original_amount" then 'partially_applied'
+      else 'open'
+    end as "lifecycle_status"
+  from "erp_financials"."subledger_documents" document
+  join "erp_financials"."reporting_book_sources" source
+    on source."tenant_id" = document."tenant_id" and source."company_id" = document."company_id"
+   and source."book_id" = $3 and source."source_id" = document."source_id"
+   and (source."effective_from" is null or source."effective_from" <= document."document_date")
+   and (source."effective_through" is null or source."effective_through" >= document."document_date")
+  left join "erp_financials"."parties" party
+    on party."tenant_id" = document."tenant_id" and party."source_id" = document."source_id"
+   and party."party_id" = document."party_id"
+  join "erp_financials"."transactions" transaction
+    on transaction."tenant_id" = document."tenant_id" and transaction."source_id" = document."source_id"
+   and transaction."transaction_id" = document."transaction_id"
+  left join active_application_labels labels on labels."adjustment_id" = document."subledger_document_id"
+  left join lateral (
+    select link."related_transaction_id" from "erp_financials"."journal_entry_links" link
+    where link."tenant_id" = document."tenant_id" and link."company_id" = document."company_id"
+      and link."source_id" = document."source_id" and link."original_transaction_id" = document."transaction_id"
+      and link."link_type" in ('reversal', 'void') limit 1
+  ) void_link on true
+  left join lateral (
+    select link."related_transaction_id" from "erp_financials"."journal_entry_links" link
+    where link."tenant_id" = document."tenant_id" and link."company_id" = document."company_id"
+      and link."source_id" = document."source_id" and link."original_transaction_id" = document."transaction_id"
+      and link."link_type" = 'replacement' limit 1
+  ) replacement_link on true
+  left join "erp_financials"."subledger_documents" replacement
+    on replacement."tenant_id" = document."tenant_id" and replacement."company_id" = document."company_id"
+   and replacement."source_id" = document."source_id" and replacement."transaction_id" = replacement_link."related_transaction_id"
+   and replacement."document_type" = document."document_type"
+  left join lateral (
+    select link."original_transaction_id" from "erp_financials"."journal_entry_links" link
+    where link."tenant_id" = document."tenant_id" and link."company_id" = document."company_id"
+      and link."source_id" = document."source_id" and link."related_transaction_id" = document."transaction_id"
+      and link."link_type" = 'replacement' limit 1
+  ) replaced_link on true
+  left join "erp_financials"."subledger_documents" replaced_original
+    on replaced_original."tenant_id" = document."tenant_id" and replaced_original."company_id" = document."company_id"
+   and replaced_original."source_id" = document."source_id" and replaced_original."transaction_id" = replaced_link."original_transaction_id"
+   and replaced_original."document_type" = document."document_type"
+  where document."tenant_id" = $1 and document."company_id" = $2
+    and document."document_type" in ('credit_memo', 'refund') and document."currency_code" = $4
+), filtered_rows as (
+  select *, case when "lifecycle_status" in ('voided', 'replaced') then 0.0000::numeric else -abs("original_amount") end as "signed_amount",
+    -abs("open_amount") as "signed_remaining_amount"
+  from adjustment_rows
+  where $5::text = 'all' or "adjustment_type" = $5
+    or ($5::text = 'open' and "adjustment_type" = 'credit' and "lifecycle_status" in ('open', 'partially_applied'))
+)
+select adjustment.*, ${ordering.expression} as "sort_key"
+from filtered_rows adjustment
+where true
+${boundarySql}
+order by ${ordering.expression} ${ordering.direction} nulls ${ordering.nulls},
+  adjustment."adjustment_id" ${ordering.direction}
+limit $${String(parameters.length)}`,
+      parameters
+    );
+    const selectedRows = pageResult.rows.slice(0, input.limit);
+    if (traversal === "backward") selectedRows.reverse();
+    const items = selectedRows.map((row) => adjustmentRegisterRowFromRow(row, input.sort));
+    const totalsResult = await client.query(
+      `with adjustment_rows as (
+  select case when document."document_type" = 'credit_memo' then 'credit' else 'refund' end as "adjustment_type",
+    document."document_date", document."original_amount", document."open_amount",
+    case
+      when replacement."subledger_document_id" is not null or document."status" = 'replaced' then 'replaced'
+      when void_link."related_transaction_id" is not null or document."status" = 'voided' then 'voided'
+      when document."document_type" = 'refund' or document."open_amount" <= 0 then 'applied'
+      when document."open_amount" < document."original_amount" then 'partially_applied'
+      else 'open'
+    end as "lifecycle_status"
+  from "erp_financials"."subledger_documents" document
+  join "erp_financials"."reporting_book_sources" source
+    on source."tenant_id" = document."tenant_id" and source."company_id" = document."company_id"
+   and source."book_id" = $3 and source."source_id" = document."source_id"
+   and (source."effective_from" is null or source."effective_from" <= document."document_date")
+   and (source."effective_through" is null or source."effective_through" >= document."document_date")
+  left join lateral (
+    select link."related_transaction_id" from "erp_financials"."journal_entry_links" link
+    where link."tenant_id" = document."tenant_id" and link."company_id" = document."company_id"
+      and link."source_id" = document."source_id" and link."original_transaction_id" = document."transaction_id"
+      and link."link_type" in ('reversal', 'void') limit 1
+  ) void_link on true
+  left join lateral (
+    select link."related_transaction_id" from "erp_financials"."journal_entry_links" link
+    where link."tenant_id" = document."tenant_id" and link."company_id" = document."company_id"
+      and link."source_id" = document."source_id" and link."original_transaction_id" = document."transaction_id"
+      and link."link_type" = 'replacement' limit 1
+  ) replacement_link on true
+  left join "erp_financials"."subledger_documents" replacement
+    on replacement."tenant_id" = document."tenant_id" and replacement."company_id" = document."company_id"
+   and replacement."source_id" = document."source_id" and replacement."transaction_id" = replacement_link."related_transaction_id"
+   and replacement."document_type" = document."document_type"
+  where document."tenant_id" = $1 and document."company_id" = $2
+    and document."document_type" in ('credit_memo', 'refund') and document."currency_code" = $4
+)
+select count(*)::integer as "unfiltered_count",
+  count(*) filter (where $5::text = 'all' or "adjustment_type" = $5
+    or ($5::text = 'open' and "adjustment_type" = 'credit' and "lifecycle_status" in ('open', 'partially_applied')))::integer as "filtered_count",
+  coalesce(sum(-abs("original_amount")) filter (where "lifecycle_status" not in ('voided', 'replaced')
+    and "document_date" between $6::date and $7::date), 0.0000::numeric) as "issued_amount",
+  count(*) filter (where "lifecycle_status" not in ('voided', 'replaced')
+    and "document_date" between $6::date and $7::date)::integer as "issued_count",
+  coalesce(sum(-abs("open_amount")) filter (where "adjustment_type" = 'credit'
+    and "lifecycle_status" in ('open', 'partially_applied')), 0.0000::numeric) as "unapplied_amount",
+  count(*) filter (where "adjustment_type" = 'credit'
+    and "lifecycle_status" in ('open', 'partially_applied'))::integer as "unapplied_count",
+  coalesce(sum(case when "lifecycle_status" = 'replaced' then 0.0000::numeric else -abs("original_amount") end)
+    filter (where "adjustment_type" = 'refund' and "lifecycle_status" <> 'voided'), 0.0000::numeric) as "refunded_amount",
+  count(*) filter (where "adjustment_type" = 'refund' and "lifecycle_status" <> 'voided')::integer as "refunded_count"
+from adjustment_rows`,
+      [scope.tenantId, scope.companyId, scope.bookId, book.currencyCode, input.filter, quarterStart, input.asOfDate]
+    );
+    const totalsRow = requiredRow(totalsResult.rows[0], "adjustment register totals");
+    const hasMore = pageResult.rows.length > input.limit;
+    const hasPrevious = items.length > 0 && (traversal === "backward" ? hasMore : boundary !== undefined);
+    const hasNext = items.length > 0 && (traversal === "forward" ? hasMore : boundary !== undefined);
+    const first = items[0];
+    const last = items.at(-1);
+    return {
+      quarterStart,
+      asOfDate: input.asOfDate,
+      currencyCode: book.currencyCode,
+      items,
+      totalCount: integer(totalsRow.filtered_count, "filtered_count"),
+      unfilteredCount: integer(totalsRow.unfiltered_count, "unfiltered_count"),
+      totals: {
+        issuedAmount: decimal(totalsRow.issued_amount, "issued_amount"),
+        issuedCount: integer(totalsRow.issued_count, "issued_count"),
+        unappliedAmount: decimal(totalsRow.unapplied_amount, "unapplied_amount"),
+        unappliedCount: integer(totalsRow.unapplied_count, "unapplied_count"),
+        refundedAmount: decimal(totalsRow.refunded_amount, "refunded_amount"),
+        refundedCount: integer(totalsRow.refunded_count, "refunded_count")
+      },
+      hasPrevious,
+      hasNext,
+      ...(hasPrevious && first !== undefined
+        ? { previousBoundary: adjustmentRegisterBoundaryFor(first, input.sort, input.direction, "backward") }
+        : {}),
+      ...(hasNext && last !== undefined
+        ? { nextBoundary: adjustmentRegisterBoundaryFor(last, input.sort, input.direction, "forward") }
+        : {})
+    };
+  });
+}
+
+function adjustmentRegisterQuarterStart(asOfDate: IsoDate): IsoDate {
+  const year = asOfDate.slice(0, 4);
+  const month = Number(asOfDate.slice(5, 7));
+  const quarterMonth = String(Math.floor((month - 1) / 3) * 3 + 1).padStart(2, "0");
+  return `${year}-${quarterMonth}-01`;
+}
+
+function adjustmentRegisterBoundary(
+  value: AdjustmentRegisterBoundary | undefined,
+  sort: AdjustmentRegisterSort,
+  direction: AdjustmentRegisterDirection
+): AdjustmentRegisterBoundary | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value) || value.sort !== sort || value.direction !== direction ||
+      !ADJUSTMENT_REGISTER_TRAVERSALS.has(value.traversal) ||
+      typeof value.adjustmentId !== "string" || value.adjustmentId.trim().length === 0 ||
+      (value.value !== null && typeof value.value !== "string")) {
+    throw new ErpFinancialsError("invalid_input", "Adjustment register boundary does not match sort and direction");
+  }
+  if ((sort === "date" || sort === "amount" || sort === "type" || sort === "status") && value.value === null) {
+    throw new ErpFinancialsError("invalid_input", "Adjustment register boundary value is invalid for sort");
+  }
+  if (sort === "date" && value.value !== null) assertDate(value.value, "boundary.value");
+  if (sort === "amount" && !/^-?\d+(?:\.\d+)?$/u.test(value.value ?? "")) {
+    throw new ErpFinancialsError("invalid_input", "boundary.value must be a decimal");
+  }
+  if (sort === "type" && value.value !== "credit" && value.value !== "refund") {
+    throw new ErpFinancialsError("invalid_input", "Adjustment register type boundary is invalid");
+  }
+  if (sort === "status" && !ADJUSTMENT_REGISTER_LIFECYCLES.has(value.value as AdjustmentRegisterLifecycleStatus)) {
+    throw new ErpFinancialsError("invalid_input", "Adjustment register status boundary is invalid");
+  }
+  if ((sort === "document" || sort === "customer" || sort === "reason" || sort === "appliedTo") &&
+      value.value !== null && value.value.length === 0) {
+    throw new ErpFinancialsError("invalid_input", "Adjustment register boundary text must not be empty");
+  }
+  return value;
+}
+
+function adjustmentRegisterOrdering(
+  sort: AdjustmentRegisterSort,
+  direction: AdjustmentRegisterDirection,
+  traversal: "forward" | "backward"
+): AdjustmentRegisterOrdering {
+  const definitions: Record<AdjustmentRegisterSort, Omit<AdjustmentRegisterOrdering, "direction" | "nulls">> = {
+    document: { expression: 'adjustment."document_number" collate "C"', cast: "text", nullable: true },
+    type: { expression: 'adjustment."adjustment_type" collate "C"', cast: "text", nullable: false },
+    customer: { expression: 'adjustment."party_name" collate "C"', cast: "text", nullable: true },
+    date: { expression: 'adjustment."document_date"', cast: "date", nullable: false },
+    reason: { expression: 'adjustment."reason" collate "C"', cast: "text", nullable: true },
+    appliedTo: { expression: 'adjustment."applied_to" collate "C"', cast: "text", nullable: true },
+    amount: { expression: 'adjustment."signed_amount"', cast: "numeric", nullable: false },
+    status: { expression: 'adjustment."lifecycle_status" collate "C"', cast: "text", nullable: false }
+  };
+  const reversed = traversal === "backward";
+  return {
+    ...definitions[sort],
+    direction: reversed ? (direction === "asc" ? "desc" : "asc") : direction,
+    nulls: reversed ? "first" : "last"
+  };
+}
+
+function adjustmentRegisterBoundarySql(ordering: AdjustmentRegisterOrdering, boundaryIsNull: boolean): string {
+  const comparison = ordering.direction === "asc" ? ">" : "<";
+  const idComparison = `adjustment."adjustment_id" ${comparison} $7::text`;
+  if (boundaryIsNull) {
+    return ordering.nulls === "first"
+      ? `  and $6::text is null and (${ordering.expression} is not null or (${ordering.expression} is null and ${idComparison}))`
+      : `  and $6::text is null and ${ordering.expression} is null and ${idComparison}`;
+  }
+  const parameter = ordering.cast === "text" ? '($6::text collate "C")' : `$6::${ordering.cast}`;
+  const comparisonSql = `${ordering.expression} ${comparison} ${parameter} or (${ordering.expression} = ${parameter} and ${idComparison})`;
+  return ordering.nulls === "last"
+    ? `  and ((${ordering.expression} is not null and (${comparisonSql})) or ${ordering.expression} is null)`
+    : `  and ${ordering.expression} is not null and (${comparisonSql})`;
+}
+
+function adjustmentRegisterRowFromRow(
+  row: Record<string, unknown>,
+  sort: AdjustmentRegisterSort
+): AdjustmentRegisterRow {
+  const customerName = optionalString(row.party_name);
+  const documentNumber = optionalString(row.document_number);
+  const reversalTransactionId = optionalString(row.reversal_transaction_id);
+  const replacementAdjustmentId = optionalString(row.replacement_adjustment_id);
+  const replacesAdjustmentId = optionalString(row.replaces_adjustment_id);
+  const reason = optionalString(row.reason);
+  const appliedTo = optionalString(row.applied_to);
+  const invoiceNumbers = row.invoice_numbers;
+  if (invoiceNumbers !== null && invoiceNumbers !== undefined &&
+      (!Array.isArray(invoiceNumbers) || invoiceNumbers.some((value) => typeof value !== "string"))) {
+    throw new ErpFinancialsError("invalid_input", "Adjustment register invoice labels are invalid");
+  }
+  return {
+    adjustmentId: string(row.adjustment_id, "adjustment_id"),
+    sourceId: string(row.source_id, "source_id"),
+    transactionId: string(row.transaction_id, "transaction_id"),
+    adjustmentType: string(row.adjustment_type, "adjustment_type") as AdjustmentType,
+    customerId: string(row.party_id, "party_id"),
+    ...(customerName === undefined ? {} : { customerName }),
+    ...(documentNumber === undefined ? {} : { documentNumber }),
+    adjustmentDate: date(row.document_date, "document_date"),
+    currencyCode: string(row.currency_code, "currency_code"),
+    amount: decimal(row.signed_amount, "signed_amount"),
+    remainingAmount: decimal(row.signed_remaining_amount, "signed_remaining_amount"),
+    status: string(row.lifecycle_status, "lifecycle_status") as AdjustmentRegisterLifecycleStatus,
+    version: integer(row.version, "version"),
+    ...(reversalTransactionId === undefined ? {} : { reversalTransactionId }),
+    ...(replacementAdjustmentId === undefined ? {} : { replacementAdjustmentId }),
+    ...(replacesAdjustmentId === undefined ? {} : { replacesAdjustmentId }),
+    reason: reason ?? null,
+    appliedInvoiceDocumentNumbers: (invoiceNumbers ?? []) as string[],
+    appliedTo: appliedTo ?? null,
+    sortValue: adjustmentRegisterSortValue(row, sort)
+  };
+}
+
+function adjustmentRegisterSortValue(row: Record<string, unknown>, sort: AdjustmentRegisterSort): string | null {
+  if (row.sort_key === null || row.sort_key === undefined) return null;
+  if (sort === "date") return date(row.sort_key, "sort_key");
+  if (sort === "amount") return decimal(row.sort_key, "sort_key");
+  return string(row.sort_key, "sort_key");
+}
+
+function adjustmentRegisterBoundaryFor(
+  item: AdjustmentRegisterRow,
+  sort: AdjustmentRegisterSort,
+  direction: AdjustmentRegisterDirection,
+  traversal: "forward" | "backward"
+): AdjustmentRegisterBoundary {
+  return { sort, direction, traversal, value: item.sortValue, adjustmentId: item.adjustmentId };
+}
+
 async function listAdjustments(
   scope: Scope,
   input: PageRequest & {
@@ -2668,7 +3818,7 @@ order by "line_number"`,
       [scope.tenantId, scope.companyId, adjustment.sourceId, adjustment.adjustmentId]
     );
     const postings = await client.query(
-      `select posting."posting_id", posting."account_id", posting."item_id", posting."description",
+      `select posting."posting_id", posting."account_id", posting."item_id", line."description",
   posting."debit_amount", posting."credit_amount", posting."currency_code", posting."dimension_refs",
   coalesce(mapping."book_account_key", posting."source_id" || ':' || posting."account_id") as "book_account_key",
   coalesce(book_account."name", account."name") as "account_name"
@@ -2676,9 +3826,12 @@ from "erp_financials"."ledger_postings" posting
 join "erp_financials"."accounts" account
   on account."tenant_id" = posting."tenant_id" and account."source_id" = posting."source_id"
  and account."account_id" = posting."account_id"
+left join "erp_financials"."transaction_lines" line
+  on line."tenant_id" = posting."tenant_id" and line."source_id" = posting."source_id"
+ and line."transaction_line_id" = posting."transaction_line_id"
 left join "erp_financials"."reporting_book_account_mappings" mapping
   on mapping."tenant_id" = $1 and mapping."company_id" = $2 and mapping."book_id" = $3
- and mapping."source_id" = posting."source_id" and mapping."source_account_id" = posting."account_id"
+ and mapping."source_id" = posting."source_id" and mapping."account_id" = posting."account_id"
 left join "erp_financials"."reporting_book_accounts" book_account
   on book_account."tenant_id" = $1 and book_account."company_id" = $2 and book_account."book_id" = $3
  and book_account."book_account_key" = mapping."book_account_key"
@@ -3344,14 +4497,13 @@ async function getAging(
   return scope.database.transaction(async (client) => {
     const book = await resolveBook(client, scope);
     const documentType = input.kind === "receivables" ? "invoice" : "vendor_bill";
+    const offsetDocumentTypes = input.kind === "receivables" ? ["customer_payment", "credit_memo"] : [];
     const result = await client.query(
-      `select document."party_id", party."display_name" as "party_name",
-  coalesce(sum(document."open_amount") filter (where document."due_date" >= $6::date), 0) as "current_amount",
-  coalesce(sum(document."open_amount") filter (where $6::date - document."due_date" between 1 and 30), 0) as "days_1_30",
-  coalesce(sum(document."open_amount") filter (where $6::date - document."due_date" between 31 and 60), 0) as "days_31_60",
-  coalesce(sum(document."open_amount") filter (where $6::date - document."due_date" between 61 and 90), 0) as "days_61_90",
-  coalesce(sum(document."open_amount") filter (where $6::date - document."due_date" > 90), 0) as "days_over_90",
-  sum(document."open_amount") as "total_amount"
+      `with aging_documents as (
+select document."party_id", party."display_name" as "party_name",
+  case when document."document_type" = $4 then document."due_date" else document."document_date" end as "aging_date",
+  case when document."document_type" = $4 then document."open_amount"
+    else -document."open_amount" end as "signed_open_amount"
 from "erp_financials"."subledger_documents" document
 join "erp_financials"."reporting_book_sources" source
   on source."tenant_id" = document."tenant_id" and source."company_id" = document."company_id"
@@ -3360,11 +4512,22 @@ join "erp_financials"."reporting_book_sources" source
  and (source."effective_through" is null or source."effective_through" >= document."document_date")
 left join "erp_financials"."parties" party
   on party."tenant_id" = document."tenant_id" and party."source_id" = document."source_id" and party."party_id" = document."party_id"
-where document."tenant_id" = $1 and document."company_id" = $2 and document."document_type" = $4
+where document."tenant_id" = $1 and document."company_id" = $2
+  and (document."document_type" = $4 or document."document_type" = any($7::text[]))
   and document."currency_code" = $5 and document."open_amount" > 0 and document."document_date" <= $6::date
-group by document."party_id", party."display_name"
-order by "total_amount" desc, document."party_id"`,
-      [scope.tenantId, scope.companyId, scope.bookId, documentType, book.currencyCode, input.asOfDate]
+)
+select "party_id", "party_name",
+  coalesce(sum("signed_open_amount") filter (where "aging_date" >= $6::date), 0) as "current_amount",
+  coalesce(sum("signed_open_amount") filter (where $6::date - "aging_date" between 1 and 30), 0) as "days_1_30",
+  coalesce(sum("signed_open_amount") filter (where $6::date - "aging_date" between 31 and 60), 0) as "days_31_60",
+  coalesce(sum("signed_open_amount") filter (where $6::date - "aging_date" between 61 and 90), 0) as "days_61_90",
+  coalesce(sum("signed_open_amount") filter (where $6::date - "aging_date" > 90), 0) as "days_over_90",
+  sum("signed_open_amount") as "total_amount"
+from aging_documents
+group by "party_id", "party_name"
+having sum("signed_open_amount") <> 0
+order by "total_amount" desc, "party_id"`,
+      [scope.tenantId, scope.companyId, scope.bookId, documentType, book.currencyCode, input.asOfDate, offsetDocumentTypes]
     );
     const rows = result.rows.map(agingRowFromRow);
     return {

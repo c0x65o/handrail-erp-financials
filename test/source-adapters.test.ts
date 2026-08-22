@@ -159,7 +159,7 @@ describe("source adapter contracts", () => {
     expect(cashPosting.sourcePayloadRef?.sourceObjectType).toBe("JournalEntryLine");
     expect(cashPosting.sourcePayloadRef?.sourceObjectId).toBe("100:1");
     expect(cashPosting.sourcePayloadRef?.storageRef).toBe(
-      "quickbooks-sdk://sandbox/realm/123145999999999/JournalEntryLine/100:1"
+      "quickbooks://sandbox/realm/123145999999999/JournalEntryLine/100:1"
     );
     expect(JSON.stringify(facts)).not.toMatch(/access[_-]?token|refresh[_-]?token|client_secret/i);
   });
@@ -1169,6 +1169,8 @@ function qboJournalLine(
 function reportInput(facts: CanonicalAccountingFactSet): ReportBuilderInput {
   return {
     tenantId: facts.company.tenantId,
+    companyId: facts.company.companyId,
+    sourceId: facts.source.sourceId,
     accounts: facts.accounts,
     postings: facts.postings,
     accountingBasis: "accrual",

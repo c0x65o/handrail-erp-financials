@@ -1130,18 +1130,33 @@ export const ERP_FINANCIALS_NORMALIZED_QUICKBOOKS_SYNC_FIXTURES: NormalizedQuick
   },
   reconciliationDifferences: {
     matchedProfitAndLoss: normalizedQboReconciliationEvidence(normalizedQuickBooksProviderReportResponses.profitAndLoss, [
-      normalizedQboCanonicalTotal("income", "20000.00"),
-      normalizedQboCanonicalTotal("expenses", "6200.00"),
+      normalizedQboCanonicalTotal("total_income", "20000.00"),
+      normalizedQboCanonicalTotal("total_cost_of_goods_sold", "3000.00"),
+      normalizedQboCanonicalTotal("gross_profit", "17000.00"),
+      normalizedQboCanonicalTotal("total_expenses", "3200.00"),
+      normalizedQboCanonicalTotal("net_operating_income", "13800.00"),
+      normalizedQboCanonicalTotal("total_other_income", "0.00"),
+      normalizedQboCanonicalTotal("total_other_expense", "0.00"),
       normalizedQboCanonicalTotal("net_income", "13800.00")
     ]),
     outOfBalanceProfitAndLoss: normalizedQboReconciliationEvidence(normalizedQuickBooksProviderReportResponses.profitAndLoss, [
-      normalizedQboCanonicalTotal("income", "20000.00"),
-      normalizedQboCanonicalTotal("expenses", "6200.00"),
+      normalizedQboCanonicalTotal("total_income", "20000.00"),
+      normalizedQboCanonicalTotal("total_cost_of_goods_sold", "3000.00"),
+      normalizedQboCanonicalTotal("gross_profit", "17000.00"),
+      normalizedQboCanonicalTotal("total_expenses", "3200.00"),
+      normalizedQboCanonicalTotal("net_operating_income", "13800.00"),
+      normalizedQboCanonicalTotal("total_other_income", "0.00"),
+      normalizedQboCanonicalTotal("total_other_expense", "0.00"),
       normalizedQboCanonicalTotal("net_income", "13799.97")
     ]),
     missingProviderTotal: normalizedQboReconciliationEvidence(normalizedQuickBooksProviderReportResponses.profitAndLoss, [
-      normalizedQboCanonicalTotal("income", "20000.00"),
-      normalizedQboCanonicalTotal("expenses", "6200.00"),
+      normalizedQboCanonicalTotal("total_income", "20000.00"),
+      normalizedQboCanonicalTotal("total_cost_of_goods_sold", "3000.00"),
+      normalizedQboCanonicalTotal("gross_profit", "17000.00"),
+      normalizedQboCanonicalTotal("total_expenses", "3200.00"),
+      normalizedQboCanonicalTotal("net_operating_income", "13800.00"),
+      normalizedQboCanonicalTotal("total_other_income", "0.00"),
+      normalizedQboCanonicalTotal("total_other_expense", "0.00"),
       normalizedQboCanonicalTotal("net_income", "13800.00"),
       normalizedQboCanonicalTotal("other_income", "25.00")
     ])

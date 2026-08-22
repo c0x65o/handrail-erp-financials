@@ -21,7 +21,7 @@ describe("normalized QuickBooks sync fixtures", () => {
     expect(reparsed).toBe(serialized);
     expect(findUndefinedPaths(ERP_FINANCIALS_NORMALIZED_QUICKBOOKS_SYNC_FIXTURES)).toEqual([]);
     expect(createHash("sha256").update(serialized).digest("hex")).toBe(
-      "a7590dcb8a368dda4318f3c9d17dc41a5f5491e3ccd7b272595ca3436412ac30"
+      "f5cfbfc33d402f80f2562ff7899378af7acf7c9ee235049a94eac6f720c23f0b"
     );
   });
 
@@ -85,7 +85,7 @@ describe("normalized QuickBooks sync fixtures", () => {
     });
     expect(fixtures.providerReports.profitAndLoss.response.requestedAt).toBe(fixtures.providerReports.profitAndLoss.request.requestedAt);
     expect(fixtures.providerReports.balanceSheet.response.asOfDate).toBe("2026-01-31");
-    expect(fixtures.providerReports.trialBalance.response.totals).toHaveLength(3);
+    expect(fixtures.providerReports.trialBalance.response.totals).toHaveLength(2);
     expect(fixtures.providerReports.cashFlow.response).toMatchObject({
       reportName: "cash_flow",
       supportStatus: "unsupported",
