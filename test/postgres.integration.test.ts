@@ -209,6 +209,105 @@ where document.tenant_id = 'tenant_qbo' and document.source_id = 'source_qbo'
     expect(replay).toMatchObject({ documents: 0, applications: 0, skippedApplications: 0 });
   });
 
+  it("persists and idempotently replays a zero-cash BillPayment as a vendor-credit application", async () => {
+    await migratePostgresSchema(runner, { appliedByRef: "integration:quickbooks-credit-only-bill-payment" });
+    await seedQuickBooksAllDocumentScope(pool);
+    const baseFacts = quickBooksAllDocumentFacts();
+    const baseResources = quickBooksAllDocumentResources();
+    const resources: HandrailQuickBooksSdkResourceSet = {
+      ...baseResources,
+      operationalDocuments: baseResources.operationalDocuments?.map((resource) => {
+        if (resource.resource.sourceTransactionId === "vendor_credit_all") {
+          return {
+            ...resource,
+            resource: {
+              ...resource.resource,
+              lines: resource.resource.lines.map((line) => ({ ...line, linkedTransactions: [] }))
+            }
+          };
+        }
+        if (resource.resource.sourceTransactionId !== "bill_payment_all") return resource;
+        const line = resource.resource.lines[0];
+        if (line === undefined) throw new Error("BillPayment integration fixture requires a line.");
+        return {
+          ...resource,
+          resource: {
+            ...resource.resource,
+            totalAmount: "0.00",
+            openAmount: "0.00",
+            unappliedAmount: "0.00",
+            lines: [
+              {
+                ...line,
+                sourceLineId: "bill-payment-credit-line",
+                lineNumber: 1,
+                sourceAmount: "10.00",
+                linkedTransactions: [{
+                  sourceTransactionId: "vendor_credit_all",
+                  sourceTransactionType: "VendorCredit"
+                }],
+                postings: []
+              },
+              {
+                ...line,
+                sourceLineId: "bill-payment-bill-line",
+                lineNumber: 2,
+                sourceAmount: "10.00",
+                linkedTransactions: [{ sourceTransactionId: "bill_all", sourceTransactionType: "Bill" }],
+                postings: []
+              }
+            ]
+          }
+        };
+      })
+    };
+    const facts: CanonicalAccountingFactSet = {
+      ...baseFacts,
+      transactions: baseFacts.transactions.filter((transaction) =>
+        transaction.sourceTransactionId !== "bill_payment_all"
+      )
+    };
+    const persist = (importedAt: string) => runner.transaction((client) =>
+      persistQuickBooksSubledgerResources({ client, companyId: "company_qbo", importedAt, facts, resources })
+    );
+
+    await expect(persist("2026-08-10T10:01:00.000Z")).resolves.toMatchObject({
+      documents: 10,
+      applications: 3,
+      skippedApplications: 0
+    });
+    const application = await pool.query<{
+      application_type: string;
+      source_type: string;
+      target_type: string;
+      applied_amount: string;
+    }>(`
+select application.application_type,
+  source.metadata ->> 'sourceTransactionType' as source_type,
+  target.metadata ->> 'sourceTransactionType' as target_type,
+  application.applied_amount::text
+from erp_financials.subledger_applications application
+join erp_financials.subledger_documents source
+  on source.subledger_document_id = application.source_document_id
+join erp_financials.subledger_documents target
+  on target.subledger_document_id = application.target_document_id
+join erp_financials.financial_lifecycle_events event
+  on event.event_id = application.applied_event_id
+where event.payload ->> 'sourceTransactionId' = 'bill_payment_all'
+`);
+    expect(application.rows).toEqual([{
+      application_type: "vendor_credit_to_bill",
+      source_type: "VendorCredit",
+      target_type: "Bill",
+      applied_amount: "10.00"
+    }]);
+    await expect(persist("2026-08-10T10:02:00.000Z")).resolves.toMatchObject({
+      documents: 0,
+      applications: 0,
+      skippedApplications: 0
+    });
+  });
+
   it("retires deleted delta documents and documents missing from an authoritative full snapshot", async () => {
     await migratePostgresSchema(runner, { appliedByRef: "integration:quickbooks-retirement" });
     await seedQuickBooksImportScope(pool);

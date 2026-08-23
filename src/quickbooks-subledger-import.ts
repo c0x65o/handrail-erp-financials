@@ -56,8 +56,23 @@ export type QuickBooksSubledgerProjectionDiagnostic = {
   readonly sourceTransactionId: string;
   readonly missingBalancedJournal: boolean;
   readonly totalAmountState: "missing" | "invalid" | "zero" | "positive";
+  readonly totalAmount?: string;
+  readonly openAmount?: string;
+  readonly unappliedAmount?: string;
+  readonly projectionKind: "canonical_document" | "vendor_credit_application" | "unclassified_zero_total";
+  readonly rejectionReasons: readonly string[];
+  readonly lineCount: number;
   readonly linkedTransactionCount: number;
+  readonly linkedTransactionTypes: readonly { readonly type: string; readonly count: number }[];
   readonly nonZeroLineCount: number;
+  readonly unlinkedNonZeroLineCount: number;
+  readonly multiLinkedLineCount: number;
+  readonly missingLinkedAmountCount: number;
+  readonly billLinkedAmountTotal: string;
+  readonly vendorCreditLinkedAmountTotal: string;
+  readonly otherLinkedAmountTotal: string;
+  readonly missingLinkedTransactionIds: readonly string[];
+  readonly memoIndicatesVoid: boolean;
 };
 
 export class QuickBooksSubledgerProjectionError extends Error {
@@ -65,12 +80,11 @@ export class QuickBooksSubledgerProjectionError extends Error {
   readonly diagnostic: QuickBooksSubledgerProjectionDiagnostic;
 
   constructor(diagnostic: QuickBooksSubledgerProjectionDiagnostic) {
-    const missing = [
-      ...(diagnostic.missingBalancedJournal ? ["balanced journal"] : []),
-      ...(diagnostic.totalAmountState !== "positive" ? ["positive total"] : [])
-    ].join(" and ");
+    const reasons = diagnostic.rejectionReasons.length === 0
+      ? "the provider evidence is not projectable"
+      : diagnostic.rejectionReasons.join(", ");
     super(
-      `QuickBooks ${diagnostic.sourceTransactionType} ${diagnostic.sourceTransactionId} cannot become a canonical subledger document because it is missing ${missing}`
+      `QuickBooks ${diagnostic.sourceTransactionType} ${diagnostic.sourceTransactionId} cannot be projected into the canonical subledger: ${reasons}`
     );
     this.name = "QuickBooksSubledgerProjectionError";
     this.diagnostic = diagnostic;
@@ -103,8 +117,9 @@ export async function persistQuickBooksSubledgerResources(
   const existingDocuments = await input.client.query<{
     source_transaction_id: string;
     subledger_document_id: string;
+    status: string;
   }>(
-    `select "metadata" ->> 'sourceTransactionId' as "source_transaction_id", "subledger_document_id"
+    `select "metadata" ->> 'sourceTransactionId' as "source_transaction_id", "subledger_document_id", "status"
 from "erp_financials"."subledger_documents"
 where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
   and "metadata" ->> 'provider' = 'quickbooks'`,
@@ -115,12 +130,30 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
       documentIdBySourceId.set(row.source_transaction_id, row.subledger_document_id);
     }
   }
+  const projectableDocumentSourceIds = new Set(
+    existingDocuments.rows
+      .filter((row) => row.status !== "voided")
+      .map((row) => row.source_transaction_id)
+      .filter((value) => value !== "")
+  );
+  for (const resource of operationalDocuments) {
+    if (resource.syncAction === "voided" || resource.syncAction === "deleted" || resource.syncAction === "skipped") continue;
+    const normalized = resource.resource;
+    if (
+      importedDocumentType(normalized.sourceTransactionType) !== undefined &&
+      positiveAmount(normalized.totalAmount) !== undefined &&
+      transactionBySourceId.has(normalized.sourceTransactionId)
+    ) {
+      projectableDocumentSourceIds.add(normalized.sourceTransactionId);
+    }
+  }
   let documents = 0;
   let documentLines = 0;
   let skippedTransactions = 0;
   let voidedDocuments = 0;
   let removedLedgerPostings = 0;
   let skippedDocumentLines = 0;
+  const applicationOnlyBillPayments = new Map<string, VendorCreditApplicationProjection>();
 
   for (const resource of operationalDocuments) {
     if (resource.syncAction === "voided" || resource.syncAction === "deleted" || resource.syncAction === "skipped") continue;
@@ -130,8 +163,20 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
     const transaction = transactionBySourceId.get(normalized.sourceTransactionId);
     const originalAmount = positiveAmount(normalized.totalAmount);
     if (transaction === undefined || originalAmount === undefined) {
+      const applicationOnly = quickBooksZeroTotalBillPaymentProjection(
+        normalized,
+        transaction === undefined,
+        projectableDocumentSourceIds
+      );
+      if (applicationOnly?.eligible === true) {
+        applicationOnlyBillPayments.set(normalized.sourceTransactionId, applicationOnly);
+        continue;
+      }
       throw new QuickBooksSubledgerProjectionError(
-        quickBooksSubledgerProjectionDiagnostic(normalized, transaction === undefined)
+        applicationOnly?.diagnostic ?? quickBooksSubledgerProjectionDiagnostic(
+          normalized,
+          transaction === undefined
+        )
       );
     }
     const documentId = documentIdBySourceId.get(normalized.sourceTransactionId);
@@ -309,6 +354,7 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
   for (const resource of operationalDocuments) {
     if (resource.syncAction === "voided" || resource.syncAction === "deleted" || resource.syncAction === "skipped") continue;
     const source = resource.resource;
+    if (applicationOnlyBillPayments.has(source.sourceTransactionId)) continue;
     if (importedApplicationType(source.sourceTransactionType) === undefined) continue;
     const sourceDocumentId = documentIdBySourceId.get(source.sourceTransactionId);
     if (sourceDocumentId === undefined) continue;
@@ -373,6 +419,7 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
   for (const resource of operationalDocuments) {
     if (resource.syncAction === "voided" || resource.syncAction === "deleted" || resource.syncAction === "skipped") continue;
     const source = resource.resource;
+    if (applicationOnlyBillPayments.has(source.sourceTransactionId)) continue;
     const applicationType = importedApplicationType(source.sourceTransactionType);
     if (applicationType === undefined) continue;
     const sourceDocumentId = documentIdBySourceId.get(source.sourceTransactionId);
@@ -450,6 +497,137 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
         );
         applications += result.rowCount ?? 0;
       }
+    }
+  }
+
+  for (const [sourceTransactionId, projection] of applicationOnlyBillPayments) {
+    const incomingApplicationIds = new Set(projection.allocations.map((allocation, index) =>
+      stableId(
+        "qbo_application",
+        input.facts.source.sourceId,
+        sourceTransactionId,
+        allocation.vendorCreditSourceTransactionId,
+        allocation.billSourceTransactionId,
+        String(index + 1)
+      )
+    ));
+    const existingApplications = await input.client.query<{
+      subledger_application_id: string;
+      version: number;
+    }>(
+      `select application."subledger_application_id", application."version"
+from "erp_financials"."subledger_applications" application
+join "erp_financials"."financial_lifecycle_events" event
+  on event."tenant_id" = application."tenant_id" and event."company_id" = application."company_id"
+  and event."source_id" = application."source_id" and event."event_id" = application."applied_event_id"
+where application."tenant_id" = $1 and application."company_id" = $2 and application."source_id" = $3
+  and application."application_type" = 'vendor_credit_to_bill' and application."status" = 'applied'
+  and event."payload" ->> 'sourceTransactionId' = $4`,
+      [input.facts.company.tenantId, input.companyId, input.facts.source.sourceId, sourceTransactionId]
+    );
+    for (const existing of existingApplications.rows) {
+      if (incomingApplicationIds.has(existing.subledger_application_id)) continue;
+      const endedEventId = stableId(
+        "qbo_event",
+        existing.subledger_application_id,
+        "unapplied",
+        projection.sourceUpdatedAt ?? input.facts.importBatch.importBatchId
+      );
+      await insertLifecycleEvent(input.client, {
+        eventId: endedEventId,
+        tenantId: input.facts.company.tenantId,
+        companyId: input.companyId,
+        sourceId: input.facts.source.sourceId,
+        aggregateId: existing.subledger_application_id,
+        eventType: "quickbooks_application_removed",
+        occurredAt: projection.sourceUpdatedAt ?? input.importedAt,
+        recordedAt: input.importedAt,
+        idempotencyKey: `quickbooks:application-removed:${existing.subledger_application_id}:${projection.sourceUpdatedAt ?? input.facts.importBatch.importBatchId}`,
+        payload: {
+          provider: "quickbooks",
+          sourceTransactionId,
+          importBatchId: input.facts.importBatch.importBatchId,
+          projectionKind: "vendor_credit_application"
+        }
+      });
+      await input.client.query(
+        `update "erp_financials"."subledger_applications"
+set "status" = 'voided', "version" = "version" + 1, "ended_event_id" = $5, "updated_at" = $6
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
+  and "subledger_application_id" = $4 and "status" = 'applied'`,
+        [input.facts.company.tenantId, input.companyId, input.facts.source.sourceId,
+          existing.subledger_application_id, endedEventId, input.importedAt]
+      );
+    }
+
+    for (const [index, allocation] of projection.allocations.entries()) {
+      const sourceDocumentId = documentIdBySourceId.get(allocation.vendorCreditSourceTransactionId);
+      const targetDocumentId = documentIdBySourceId.get(allocation.billSourceTransactionId);
+      if (sourceDocumentId === undefined || targetDocumentId === undefined) {
+        throw new QuickBooksSubledgerProjectionError(projection.diagnostic);
+      }
+      const applicationId = stableId(
+        "qbo_application",
+        input.facts.source.sourceId,
+        sourceTransactionId,
+        allocation.vendorCreditSourceTransactionId,
+        allocation.billSourceTransactionId,
+        String(index + 1)
+      );
+      const eventId = stableId("qbo_event", applicationId, "applied");
+      const idempotencyKey = `quickbooks:vendor-credit-application:${input.facts.source.sourceId}:${sourceTransactionId}:${allocation.vendorCreditSourceTransactionId}:${allocation.billSourceTransactionId}:${String(index + 1)}`;
+      const payload: JsonValue = {
+        provider: "quickbooks",
+        sourceTransactionId,
+        sourceTransactionType: "BillPayment",
+        vendorCreditSourceTransactionId: allocation.vendorCreditSourceTransactionId,
+        billSourceTransactionId: allocation.billSourceTransactionId,
+        projectionKind: "vendor_credit_application",
+        importBatchId: input.facts.importBatch.importBatchId
+      };
+      await insertLifecycleEvent(input.client, {
+        eventId,
+        tenantId: input.facts.company.tenantId,
+        companyId: input.companyId,
+        sourceId: input.facts.source.sourceId,
+        aggregateId: applicationId,
+        eventType: "quickbooks_vendor_credit_application_imported",
+        occurredAt: projection.sourceUpdatedAt ?? input.importedAt,
+        recordedAt: input.importedAt,
+        idempotencyKey: `${idempotencyKey}:event`,
+        payload
+      });
+      const result = await input.client.query(
+        `insert into "erp_financials"."subledger_applications" (
+          "subledger_application_id", "tenant_id", "company_id", "source_id", "application_type",
+          "source_document_id", "target_document_id", "applied_amount", "currency_code",
+          "application_date", "status", "version", "idempotency_key", "applied_event_id",
+          "created_at", "updated_at"
+        ) values ($1,$2,$3,$4,'vendor_credit_to_bill',$5,$6,$7,$8,$9,'applied',1,$10,$11,$12,$12)
+        on conflict ("tenant_id", "company_id", "source_id", "idempotency_key") do update
+        set "applied_amount" = excluded."applied_amount",
+          "application_date" = excluded."application_date",
+          "status" = 'applied', "version" = "subledger_applications"."version" + 1,
+          "ended_event_id" = null, "updated_at" = excluded."updated_at"
+        where "subledger_applications"."applied_amount" is distinct from excluded."applied_amount"
+          or "subledger_applications"."application_date" is distinct from excluded."application_date"
+          or "subledger_applications"."status" <> 'applied'`,
+        [
+          applicationId,
+          input.facts.company.tenantId,
+          input.companyId,
+          input.facts.source.sourceId,
+          sourceDocumentId,
+          targetDocumentId,
+          allocation.amount,
+          projection.currencyCode ?? input.facts.company.baseCurrencyCode,
+          projection.transactionDate,
+          idempotencyKey,
+          eventId,
+          input.importedAt
+        ]
+      );
+      applications += result.rowCount ?? 0;
     }
   }
 
@@ -739,6 +917,175 @@ function positiveAmount(value: string | undefined): string | undefined {
   return Number.isFinite(amount) && amount > 0 ? amount.toFixed(2) : undefined;
 }
 
+type VendorCreditApplicationAllocation = {
+  readonly vendorCreditSourceTransactionId: string;
+  readonly billSourceTransactionId: string;
+  readonly amount: string;
+};
+
+type VendorCreditApplicationProjection = {
+  readonly eligible: true;
+  readonly allocations: readonly VendorCreditApplicationAllocation[];
+  readonly currencyCode?: string;
+  readonly transactionDate: string;
+  readonly sourceUpdatedAt?: string;
+  readonly diagnostic: QuickBooksSubledgerProjectionDiagnostic;
+};
+
+type RejectedZeroTotalBillPaymentProjection = {
+  readonly eligible: false;
+  readonly allocations: readonly [];
+  readonly diagnostic: QuickBooksSubledgerProjectionDiagnostic;
+};
+
+function quickBooksZeroTotalBillPaymentProjection(
+  transaction: NormalizedQuickBooksLedgerTransaction,
+  missingBalancedJournal: boolean,
+  projectableDocumentSourceIds: ReadonlySet<string>
+): VendorCreditApplicationProjection | RejectedZeroTotalBillPaymentProjection | undefined {
+  if (
+    transaction.sourceTransactionType !== "BillPayment" ||
+    transaction.totalAmount === undefined ||
+    Number(transaction.totalAmount) !== 0 ||
+    !missingBalancedJournal
+  ) {
+    return undefined;
+  }
+
+  type LinkedAmount = {
+    readonly sourceTransactionId: string;
+    readonly amount: number;
+    readonly lineNumber: number;
+  };
+  const bills: LinkedAmount[] = [];
+  const vendorCredits: LinkedAmount[] = [];
+  const typeCounts = new Map<string, number>();
+  let otherLinkedAmount = 0;
+  let linkedTransactionCount = 0;
+  let nonZeroLineCount = 0;
+  let unlinkedNonZeroLineCount = 0;
+  let multiLinkedLineCount = 0;
+  let missingLinkedAmountCount = 0;
+
+  for (const line of transaction.lines) {
+    const linked = line.linkedTransactions ?? [];
+    const amount = line.sourceAmount === undefined ? undefined : Math.abs(Number(line.sourceAmount));
+    const hasPositiveAmount = amount !== undefined && Number.isFinite(amount) && amount > 0;
+    if (hasPositiveAmount) nonZeroLineCount += 1;
+    if (linked.length === 0 && hasPositiveAmount) unlinkedNonZeroLineCount += 1;
+    if (linked.length > 1) multiLinkedLineCount += 1;
+
+    for (const reference of linked) {
+      linkedTransactionCount += 1;
+      const type = reference.sourceTransactionType ?? "Unknown";
+      typeCounts.set(type, (typeCounts.get(type) ?? 0) + 1);
+      if (!hasPositiveAmount || linked.length !== 1) {
+        missingLinkedAmountCount += 1;
+        continue;
+      }
+      const evidence = {
+        sourceTransactionId: reference.sourceTransactionId,
+        amount,
+        lineNumber: line.lineNumber
+      };
+      if (type === "Bill") bills.push(evidence);
+      else if (type === "VendorCredit") vendorCredits.push(evidence);
+      else otherLinkedAmount += amount;
+    }
+  }
+
+  bills.sort(compareLinkedAmount);
+  vendorCredits.sort(compareLinkedAmount);
+  const billTotal = bills.reduce((sum, value) => sum + value.amount, 0);
+  const vendorCreditTotal = vendorCredits.reduce((sum, value) => sum + value.amount, 0);
+  const missingLinkedTransactionIds = [...bills, ...vendorCredits]
+    .filter((value) => !projectableDocumentSourceIds.has(value.sourceTransactionId))
+    .map((value) => value.sourceTransactionId)
+    .filter((value, index, values) => values.indexOf(value) === index)
+    .slice(0, 20);
+  const rejectionReasons = [
+    ...(linkedTransactionCount === 0 ? ["no_linked_transactions"] : []),
+    ...(bills.length === 0 ? ["no_bill_link"] : []),
+    ...(vendorCredits.length === 0 ? ["no_vendor_credit_link"] : []),
+    ...(otherLinkedAmount !== 0 || [...typeCounts.keys()].some((type) => type !== "Bill" && type !== "VendorCredit")
+      ? ["unsupported_linked_transaction_type"]
+      : []),
+    ...(unlinkedNonZeroLineCount > 0 ? ["unlinked_nonzero_line"] : []),
+    ...(multiLinkedLineCount > 0 ? ["multi_link_amount_ambiguous"] : []),
+    ...(missingLinkedAmountCount > 0 ? ["missing_per_link_amount"] : []),
+    ...(Math.abs(billTotal - vendorCreditTotal) > 0.005 ? ["bill_credit_totals_mismatch"] : []),
+    ...(missingLinkedTransactionIds.length > 0 ? ["missing_linked_document"] : [])
+  ];
+
+  const diagnostic: QuickBooksSubledgerProjectionDiagnostic = {
+    sourceTransactionType: transaction.sourceTransactionType,
+    sourceTransactionId: transaction.sourceTransactionId,
+    missingBalancedJournal,
+    totalAmountState: "zero",
+    totalAmount: transaction.totalAmount,
+    ...(transaction.openAmount === undefined ? {} : { openAmount: transaction.openAmount }),
+    ...(transaction.unappliedAmount === undefined ? {} : { unappliedAmount: transaction.unappliedAmount }),
+    projectionKind: rejectionReasons.length === 0
+      ? "vendor_credit_application"
+      : "unclassified_zero_total",
+    rejectionReasons,
+    lineCount: transaction.lines.length,
+    linkedTransactionCount,
+    linkedTransactionTypes: [...typeCounts.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([type, count]) => ({ type, count })),
+    nonZeroLineCount,
+    unlinkedNonZeroLineCount,
+    multiLinkedLineCount,
+    missingLinkedAmountCount,
+    billLinkedAmountTotal: billTotal.toFixed(2),
+    vendorCreditLinkedAmountTotal: vendorCreditTotal.toFixed(2),
+    otherLinkedAmountTotal: otherLinkedAmount.toFixed(2),
+    missingLinkedTransactionIds,
+    memoIndicatesVoid: transaction.memo !== undefined && /\bvoid(?:ed)?\b/i.test(transaction.memo)
+  };
+  if (rejectionReasons.length > 0) {
+    return { eligible: false, allocations: [], diagnostic };
+  }
+
+  const allocations: VendorCreditApplicationAllocation[] = [];
+  const remainingBills = bills.map((value) => ({ ...value }));
+  const remainingCredits = vendorCredits.map((value) => ({ ...value }));
+  let billIndex = 0;
+  let creditIndex = 0;
+  while (billIndex < remainingBills.length && creditIndex < remainingCredits.length) {
+    const bill = remainingBills[billIndex];
+    const credit = remainingCredits[creditIndex];
+    if (bill === undefined || credit === undefined) break;
+    const amount = Math.min(bill.amount, credit.amount);
+    if (amount <= 0) break;
+    allocations.push({
+      vendorCreditSourceTransactionId: credit.sourceTransactionId,
+      billSourceTransactionId: bill.sourceTransactionId,
+      amount: amount.toFixed(2)
+    });
+    bill.amount -= amount;
+    credit.amount -= amount;
+    if (bill.amount <= 0.005) billIndex += 1;
+    if (credit.amount <= 0.005) creditIndex += 1;
+  }
+  return {
+    eligible: true,
+    allocations,
+    ...(transaction.currencyCode === undefined ? {} : { currencyCode: transaction.currencyCode }),
+    transactionDate: transaction.transactionDate,
+    ...(transaction.sourceUpdatedAt === undefined ? {} : { sourceUpdatedAt: transaction.sourceUpdatedAt }),
+    diagnostic
+  };
+}
+
+function compareLinkedAmount(
+  left: { readonly sourceTransactionId: string; readonly lineNumber: number },
+  right: { readonly sourceTransactionId: string; readonly lineNumber: number }
+): number {
+  return left.lineNumber - right.lineNumber || left.sourceTransactionId.localeCompare(right.sourceTransactionId);
+}
+
 function quickBooksSubledgerProjectionDiagnostic(
   transaction: NormalizedQuickBooksLedgerTransaction,
   missingBalancedJournal: boolean
@@ -756,16 +1103,67 @@ function quickBooksSubledgerProjectionDiagnostic(
     sourceTransactionId: transaction.sourceTransactionId,
     missingBalancedJournal,
     totalAmountState,
+    ...(transaction.totalAmount === undefined ? {} : { totalAmount: transaction.totalAmount }),
+    ...(transaction.openAmount === undefined ? {} : { openAmount: transaction.openAmount }),
+    ...(transaction.unappliedAmount === undefined ? {} : { unappliedAmount: transaction.unappliedAmount }),
+    projectionKind: "canonical_document",
+    rejectionReasons: [
+      ...(missingBalancedJournal ? ["missing_balanced_journal"] : []),
+      ...(totalAmountState !== "positive" ? ["non_positive_total"] : [])
+    ],
+    lineCount: transaction.lines.length,
     linkedTransactionCount: transaction.lines.reduce(
       (count, line) => count + (line.linkedTransactions?.length ?? 0),
       0
     ),
+    linkedTransactionTypes: [...transaction.lines.reduce((counts, line) => {
+      for (const linked of line.linkedTransactions ?? []) {
+        const type = linked.sourceTransactionType ?? "Unknown";
+        counts.set(type, (counts.get(type) ?? 0) + 1);
+      }
+      return counts;
+    }, new Map<string, number>()).entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([type, count]) => ({ type, count })),
     nonZeroLineCount: transaction.lines.filter((line) => {
       if (line.sourceAmount === undefined) return false;
       const lineAmount = Number(line.sourceAmount);
       return Number.isFinite(lineAmount) && lineAmount !== 0;
-    }).length
+    }).length,
+    unlinkedNonZeroLineCount: transaction.lines.filter((line) => {
+      const amount = line.sourceAmount === undefined ? undefined : Number(line.sourceAmount);
+      return (line.linkedTransactions?.length ?? 0) === 0 &&
+        amount !== undefined && Number.isFinite(amount) && amount !== 0;
+    }).length,
+    multiLinkedLineCount: transaction.lines.filter((line) => (line.linkedTransactions?.length ?? 0) > 1).length,
+    missingLinkedAmountCount: transaction.lines.reduce(
+      (count, line) => count + (line.linkedTransactions ?? []).filter(() => positiveAmount(line.sourceAmount) === undefined).length,
+      0
+    ),
+    billLinkedAmountTotal: linkedAmountTotal(transaction, "Bill"),
+    vendorCreditLinkedAmountTotal: linkedAmountTotal(transaction, "VendorCredit"),
+    otherLinkedAmountTotal: linkedAmountTotal(transaction, "other"),
+    missingLinkedTransactionIds: [],
+    memoIndicatesVoid: transaction.memo !== undefined && /\bvoid(?:ed)?\b/i.test(transaction.memo)
   };
+}
+
+function linkedAmountTotal(
+  transaction: NormalizedQuickBooksLedgerTransaction,
+  requestedType: "Bill" | "VendorCredit" | "other"
+): string {
+  const total = transaction.lines.reduce((sum, line) => {
+    const linked = line.linkedTransactions ?? [];
+    if (linked.length !== 1 || line.sourceAmount === undefined) return sum;
+    const amount = Math.abs(Number(line.sourceAmount));
+    if (!Number.isFinite(amount)) return sum;
+    const type = linked[0]?.sourceTransactionType ?? "Unknown";
+    const matches = requestedType === "other"
+      ? type !== "Bill" && type !== "VendorCredit"
+      : type === requestedType;
+    return matches ? sum + amount : sum;
+  }, 0);
+  return total.toFixed(2);
 }
 
 function reportedQuickBooksOpenAmount(

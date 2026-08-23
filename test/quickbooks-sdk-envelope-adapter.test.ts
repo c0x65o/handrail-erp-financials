@@ -169,6 +169,125 @@ describe("QuickBooks SDK envelope adapter", () => {
     expect(result.applications).toBe(0);
   });
 
+  it("projects a zero-cash BillPayment with complete bill and vendor-credit evidence as a direct application", async () => {
+    const adapted = adaptHandrailQuickBooksSdkFullSyncEnvelope(fullSyncEnvelope(), adapterOptions());
+    const mapped = mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(adapted, {
+      companyId: "company_spartan",
+      accountingBasis: "accrual",
+      currencyCode: "USD"
+    });
+    const resourceTemplate = adapted.resources.operationalDocuments?.[0];
+    const transactionTemplate = mapped.facts.transactions[0];
+    if (resourceTemplate === undefined || transactionTemplate === undefined) {
+      throw new Error("QuickBooks application-only projection fixture requires a document and transaction template.");
+    }
+    const bill = {
+      ...resourceTemplate,
+      resourceId: "bill_1822",
+      resource: {
+        ...resourceTemplate.resource,
+        sourceTransactionId: "bill_1822",
+        sourceTransactionType: "Bill",
+        totalAmount: "125.00",
+        openAmount: "0.00",
+        unappliedAmount: "0.00",
+        lines: []
+      }
+    };
+    const vendorCredit = {
+      ...resourceTemplate,
+      resourceId: "vendor_credit_1822",
+      resource: {
+        ...resourceTemplate.resource,
+        sourceTransactionId: "vendor_credit_1822",
+        sourceTransactionType: "VendorCredit",
+        totalAmount: "125.00",
+        openAmount: "0.00",
+        unappliedAmount: "0.00",
+        lines: []
+      }
+    };
+    const applicationOnlyBillPayment = {
+      ...resourceTemplate,
+      resourceId: "1822",
+      resource: {
+        ...resourceTemplate.resource,
+        sourceTransactionId: "1822",
+        sourceTransactionType: "BillPayment",
+        totalAmount: "0.00",
+        openAmount: "0.00",
+        unappliedAmount: "0.00",
+        lines: [
+          {
+            ...resourceTemplate.resource.lines[0],
+            sourceLineId: "credit-line",
+            lineNumber: 1,
+            sourceAmount: "125.00",
+            linkedTransactions: [{
+              sourceTransactionId: "vendor_credit_1822",
+              sourceTransactionType: "VendorCredit"
+            }],
+            postings: []
+          },
+          {
+            ...resourceTemplate.resource.lines[0],
+            sourceLineId: "bill-line",
+            lineNumber: 2,
+            sourceAmount: "125.00",
+            linkedTransactions: [{ sourceTransactionId: "bill_1822", sourceTransactionType: "Bill" }],
+            postings: []
+          }
+        ]
+      }
+    };
+    const calls: Array<{ sql: string; params: readonly unknown[] }> = [];
+    const result = await persistQuickBooksSubledgerResources({
+      client: {
+        query(sql, params = []) {
+          calls.push({ sql, params });
+          return Promise.resolve({ rows: [], rowCount: 1 });
+        }
+      },
+      companyId: "company_spartan",
+      importedAt: "2026-08-13T12:46:00.000Z",
+      facts: {
+        ...mapped.facts,
+        transactions: [
+          {
+            ...transactionTemplate,
+            transactionId: "transaction_bill_1822",
+            sourceTransactionId: "bill_1822",
+            sourceTransactionType: "Bill"
+          },
+          {
+            ...transactionTemplate,
+            transactionId: "transaction_vendor_credit_1822",
+            sourceTransactionId: "vendor_credit_1822",
+            sourceTransactionType: "VendorCredit"
+          }
+        ]
+      },
+      resources: {
+        ...adapted.resources,
+        operationalDocuments: [bill, vendorCredit, applicationOnlyBillPayment]
+      }
+    });
+
+    expect(result.documents).toBe(2);
+    expect(result.applications).toBe(1);
+    const applicationInsert = calls.find((call) =>
+      call.sql.includes("'vendor_credit_to_bill'") &&
+      call.sql.includes('insert into "erp_financials"."subledger_applications"')
+    );
+    expect(applicationInsert?.params.slice(4, 9)).toEqual([
+      expect.stringMatching(/^qbo_document_/),
+      expect.stringMatching(/^qbo_document_/),
+      "125.00",
+      "USD",
+      "2026-08-13"
+    ]);
+  });
+
   it("fails an ambiguous zero-total BillPayment with structured safe diagnostics", async () => {
     const envelope = fullSyncEnvelope();
     const resources = envelope.normalizedResources;
@@ -211,8 +330,24 @@ describe("QuickBooks SDK envelope adapter", () => {
         sourceTransactionId: "payment_700",
         missingBalancedJournal: true,
         totalAmountState: "zero",
+        projectionKind: "unclassified_zero_total",
+        rejectionReasons: [
+          "no_bill_link",
+          "no_vendor_credit_link",
+          "unsupported_linked_transaction_type"
+        ],
+        lineCount: 1,
         linkedTransactionCount: 1,
-        nonZeroLineCount: 1
+        linkedTransactionTypes: [{ type: "Invoice", count: 1 }],
+        nonZeroLineCount: 1,
+        unlinkedNonZeroLineCount: 0,
+        multiLinkedLineCount: 0,
+        missingLinkedAmountCount: 0,
+        billLinkedAmountTotal: "0.00",
+        vendorCreditLinkedAmountTotal: "0.00",
+        otherLinkedAmountTotal: "1250.00",
+        missingLinkedTransactionIds: [],
+        memoIndicatesVoid: false
       }
     });
   });
