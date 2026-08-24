@@ -17,6 +17,9 @@ same canonical model.
 
 ## Documents
 
+- [blu-adapter-contract.md](blu-adapter-contract.md): Supported BLU-to-SDK
+  scope, identity, cents/decimal, command, read, ownership, QuickBooks, and
+  pre-v1 adoption boundary, traced to the public BLU consumer harness.
 - [sdk-v1-contract.md](sdk-v1-contract.md): Preferred pre-v1 host integration,
   reporting-book/source identity, book chart, invoice lifecycle, matching,
   currency, read models, errors, outbox runtime, and compatibility contract.

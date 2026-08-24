@@ -5,7 +5,8 @@
     "moduleResolution": "NodeNext",
     "baseUrl": ".",
     "paths": {
-      "@handrail/erp-financials": ["./src/index.ts"]
+      "@handrail/erp-financials": ["./src/index.ts"],
+      "@handrail/erp-financials/sdk": ["./src/sdk.ts"]
     },
     "lib": ["ES2022"],
     "strict": true,

@@ -5,6 +5,7 @@ import {
   createQuickBooksFullSyncWorker,
   createQuickBooksIncrementalSyncWorker
 } from "@handrail/erp-financials";
+import type { CustomerStatement as SdkCustomerStatement } from "@handrail/erp-financials/sdk";
 
 import type {
   BuildCoreErpPersistenceEvidenceInput,
@@ -35,6 +36,12 @@ import type {
   CustomerPaymentDetail,
   CustomerPaymentProvenance,
   CustomerPaymentRegisterProjection,
+  CustomerStatement,
+  CustomerStatementApplicationEvidence,
+  CustomerStatementRequest,
+  CustomerStatementRow,
+  CustomerStatementSourceIdentity,
+  CustomerStatementTotals,
   AdjustmentRegisterProjection,
   InvoiceDetailsByIdResult,
   OpenInvoiceReference,
@@ -151,6 +158,13 @@ export type CoreErpPersistenceEvidenceImports = {
   readonly customerPayment: CustomerPaymentDetail;
   readonly customerPaymentProvenance: CustomerPaymentProvenance;
   readonly customerPaymentRegister: CustomerPaymentRegisterProjection;
+  readonly customerStatement: CustomerStatement;
+  readonly sdkCustomerStatement: SdkCustomerStatement;
+  readonly customerStatementRequest: CustomerStatementRequest;
+  readonly customerStatementRow: CustomerStatementRow;
+  readonly customerStatementApplication: CustomerStatementApplicationEvidence;
+  readonly customerStatementSourceIdentity: CustomerStatementSourceIdentity;
+  readonly customerStatementTotals: CustomerStatementTotals;
   readonly adjustmentRegister: AdjustmentRegisterProjection;
   readonly invoiceDetailsById: InvoiceDetailsByIdResult;
   readonly openInvoice: OpenInvoiceReference;

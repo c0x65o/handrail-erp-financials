@@ -15,7 +15,9 @@ dependencies.
 
 ## Setup order
 
-1. Run `migratePostgresSchema(...)` through schema version 18.
+1. Run `migratePostgresSchema(...)` through the target version declared by the
+   current `POSTGRES_CANONICAL_SCHEMA_MANIFEST` and validate the installed
+   manifest before creating application data.
 2. Create the canonical company, sources, and company/source bindings.
 3. Define one reporting book and its base currency/accounting basis.
 4. Bind every provenance source to the book with effective dates.
@@ -243,9 +245,9 @@ and apply the same lock policy before lifecycle, outbox, or balance changes.
 Identical completed retries remain no-op replays even if that date is later
 locked.
 
-`payment_applications` remains in schema v15 only for compatibility with the
-older canonical contract. New native writes use `subledger_applications`; hosts
-must not write both representations.
+`payment_applications` remains only for compatibility with the older canonical
+contract. New native writes use `subledger_applications`; hosts must not write
+both representations.
 
 ## Currency contract
 
@@ -285,9 +287,11 @@ does not claim that a cron or queue has been deployed.
 
 ## Compatibility and readiness boundary
 
-Schema v15 is the pre-v1 foundation. Before publishing 1.0, prove this exact SDK
-surface in the first ERP application and treat feedback as contract feedback,
-not a reason to add host-local SQL. Breaking changes remain possible before 1.0.
+The schema version and migration target in the current
+`POSTGRES_CANONICAL_SCHEMA_MANIFEST` are the pre-v1 database foundation. Before
+publishing 1.0, prove this exact SDK surface in the first ERP application and
+treat feedback as contract feedback, not a reason to add host-local SQL.
+Breaking changes remain possible before 1.0.
 
 Repository-owned behavior is ready for that first adoption. Production use still
 requires owner-approved database migration, runtime registration, deployment,

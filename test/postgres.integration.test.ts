@@ -881,6 +881,92 @@ insert into erp_financials.journal_entry_links values
     ).rejects.toThrow("cannot be deleted");
   });
 
+  it("reads bounded historical customer statements with scoped lifecycle evidence", async () => {
+    await migratePostgresSchema(runner, { appliedByRef: "integration:customer-statement" });
+    await seedAccountingScope(pool);
+    await seedCustomerStatementScenario(pool);
+    const sdk = createErpFinancialsSdk({
+      database: runner,
+      tenantId: "tenant_1",
+      companyId: "company_1",
+      bookId: "book_1",
+      writeSourceId: "source_1",
+      currencyCode: "USD",
+      postingPolicy: "legacy_unrestricted"
+    });
+
+    const first = await sdk.queries.getCustomerStatement({
+      customerId: "customer_1",
+      asOfDate: "2026-08-31",
+      limit: 1
+    });
+    expect(first.totals).toEqual({
+      invoiceCount: 2,
+      invoicedAmount: "130.00",
+      appliedAmount: "90.00",
+      outstandingAmount: "40.00"
+    });
+    expect(first.pageTotals).toEqual({
+      invoiceCount: 1,
+      invoicedAmount: "100.00",
+      appliedAmount: "60.00",
+      outstandingAmount: "40.00"
+    });
+    expect(first.items).toEqual([expect.objectContaining({
+      invoiceId: "invoice_1",
+      appliedAmount: "60.00",
+      openBalance: "40.00",
+      applications: [expect.objectContaining({
+        applicationId: "application_1",
+        status: "applied",
+        endedLifecycleEventId: "event_statement_unapply"
+      })]
+    })]);
+    if (first.nextCursor === undefined) throw new Error("Expected a customer statement cursor");
+
+    const second = await sdk.queries.getCustomerStatement({
+      customerId: "customer_1",
+      asOfDate: "2026-08-31",
+      limit: 1,
+      cursor: first.nextCursor
+    });
+    expect(second.items).toEqual([expect.objectContaining({
+      invoiceId: "invoice_full",
+      appliedAmount: "30.00",
+      openBalance: "0.00"
+    })]);
+    expect(second.nextCursor).toBeUndefined();
+
+    await expect(sdk.queries.getCustomerStatement({
+      customerId: "customer_2",
+      asOfDate: "2026-08-31",
+      limit: 10
+    })).resolves.toMatchObject({
+      items: [expect.objectContaining({ invoiceId: "invoice_other", customerId: "customer_2" })],
+      totals: { invoiceCount: 1, invoicedAmount: "80.00", outstandingAmount: "80.00" }
+    });
+
+    const otherBook = createErpFinancialsSdk({
+      database: runner,
+      tenantId: "tenant_1",
+      companyId: "company_1",
+      bookId: "book_2",
+      writeSourceId: "source_1",
+      currencyCode: "USD",
+      postingPolicy: "legacy_unrestricted"
+    });
+    await expect(otherBook.queries.getCustomerStatement({
+      customerId: "customer_1",
+      asOfDate: "2026-08-31",
+      limit: 10
+    })).resolves.toMatchObject({ items: [], totals: { invoiceCount: 0 } });
+
+    const mutableBalance = await pool.query<{ open_amount: string }>(
+      "select open_amount::text from erp_financials.subledger_documents where subledger_document_id = 'invoice_1'"
+    );
+    expect(mutableBalance.rows[0]?.open_amount).toBe("60");
+  });
+
   it("atomically settles invoice write-offs and rejects locked application transitions", async () => {
     await migratePostgresSchema(runner, { appliedByRef: "integration:write-off-settlement" });
     await seedAccountingScope(pool);
@@ -1992,6 +2078,99 @@ insert into erp_financials.subledger_documents (
   ('payment_1', 'tenant_1', 'company_1', 'source_1', 'customer_payment', 'txn_payment', 'customer_1', '2026-08-05', 'USD', 60, 60, 'open', 1, 'payment_1', 'event_payment', '{}'::jsonb, now(), now()),
   ('payment_other_party', 'tenant_1', 'company_1', 'source_1', 'customer_payment', 'txn_payment_other', 'customer_2', '2026-08-05', 'USD', 10, 10, 'open', 1, 'payment_other_party', 'event_payment_other', '{}'::jsonb, now(), now()),
   ('payment_eur', 'tenant_1', 'company_1', 'source_1', 'customer_payment', 'txn_payment_eur', 'customer_1', '2026-08-05', 'EUR', 10, 10, 'open', 1, 'payment_eur', 'event_payment_eur', '{}'::jsonb, now(), now());
+`);
+}
+
+async function seedCustomerStatementScenario(pool: Pool): Promise<void> {
+  await seedSubledgerDocuments(pool);
+  await pool.query(`
+insert into erp_financials.reporting_books (
+  tenant_id, company_id, book_id, name, base_currency_code, accounting_basis, status, created_at, updated_at
+) values
+  ('tenant_1', 'company_1', 'book_1', 'Primary', 'USD', 'accrual', 'active', now(), now()),
+  ('tenant_1', 'company_1', 'book_2', 'Isolated', 'USD', 'accrual', 'active', now(), now());
+insert into erp_financials.reporting_book_sources (
+  book_source_id, tenant_id, company_id, book_id, source_id, source_role, created_at
+) values ('book_source_statement', 'tenant_1', 'company_1', 'book_1', 'source_1', 'active', now());
+insert into erp_financials.transactions (
+  transaction_id, tenant_id, source_id, source_transaction_id, source_transaction_type, transaction_number,
+  transaction_date, posted_at, updated_at, party_id, currency_code, status, source_payload_ref
+) values
+  ('txn_invoice_full', 'tenant_1', 'source_1', 'invoice:full', 'Subledger:invoice', 'INV-FULL',
+    '2026-08-02', '2026-08-02T12:00:00Z', '2026-08-02T12:00:00Z', 'customer_1', 'USD', 'posted', '{}'::jsonb),
+  ('txn_payment_full', 'tenant_1', 'source_1', 'payment:full', 'Subledger:customer_payment', 'PAY-FULL',
+    '2026-08-10', '2026-08-10T12:00:00Z', '2026-08-10T12:00:00Z', 'customer_1', 'USD', 'posted', '{}'::jsonb),
+  ('txn_invoice_future', 'tenant_1', 'source_1', 'invoice:future', 'Subledger:invoice', 'INV-FUTURE',
+    '2026-09-01', '2026-09-01T12:00:00Z', '2026-09-01T12:00:00Z', 'customer_1', 'USD', 'posted', '{}'::jsonb),
+  ('txn_payment_future', 'tenant_1', 'source_1', 'payment:future', 'Subledger:customer_payment', 'PAY-FUTURE',
+    '2026-09-03', '2026-09-03T12:00:00Z', '2026-09-03T12:00:00Z', 'customer_1', 'USD', 'posted', '{}'::jsonb),
+  ('txn_invoice_other', 'tenant_1', 'source_1', 'invoice:other', 'Subledger:invoice', 'INV-OTHER',
+    '2026-08-03', '2026-08-03T12:00:00Z', '2026-08-03T12:00:00Z', 'customer_2', 'USD', 'posted', '{}'::jsonb);
+insert into erp_financials.financial_lifecycle_events values
+  ('event_invoice_full', 'tenant_1', 'company_1', 'source_1', 'subledger_document', 'invoice_full', 'posted',
+    'user:1', null, 'request:invoice-full', 'correlation:statement', 'test', null,
+    '2026-08-02T12:00:00Z', '2026-08-02T12:00:00Z', 'event_invoice_full', repeat('a',64), '{}'::jsonb, null),
+  ('event_payment_full', 'tenant_1', 'company_1', 'source_1', 'subledger_document', 'payment_full', 'posted',
+    'user:1', null, 'request:payment-full', 'correlation:statement', 'test', null,
+    '2026-08-10T12:00:00Z', '2026-08-10T12:00:00Z', 'event_payment_full', repeat('a',64), '{}'::jsonb, null),
+  ('event_apply_full', 'tenant_1', 'company_1', 'source_1', 'subledger_application', 'application_full', 'applied',
+    'user:1', null, 'request:apply-full', 'correlation:statement', 'test', null,
+    '2026-08-10T12:00:00Z', '2026-08-10T12:00:00Z', 'event_apply_full', repeat('a',64), '{}'::jsonb, null),
+  ('event_invoice_future', 'tenant_1', 'company_1', 'source_1', 'subledger_document', 'invoice_future', 'posted',
+    'user:1', null, 'request:invoice-future', 'correlation:statement', 'test', null,
+    '2026-09-01T12:00:00Z', '2026-09-01T12:00:00Z', 'event_invoice_future', repeat('a',64), '{}'::jsonb, null),
+  ('event_payment_future', 'tenant_1', 'company_1', 'source_1', 'subledger_document', 'payment_future', 'posted',
+    'user:1', null, 'request:payment-future', 'correlation:statement', 'test', null,
+    '2026-09-03T12:00:00Z', '2026-09-03T12:00:00Z', 'event_payment_future', repeat('a',64), '{}'::jsonb, null),
+  ('event_apply_future', 'tenant_1', 'company_1', 'source_1', 'subledger_application', 'application_future', 'applied',
+    'user:1', null, 'request:apply-future', 'correlation:statement', 'test', null,
+    '2026-09-03T12:00:00Z', '2026-09-03T12:00:00Z', 'event_apply_future', repeat('a',64), '{}'::jsonb, null),
+  ('event_invoice_other', 'tenant_1', 'company_1', 'source_1', 'subledger_document', 'invoice_other', 'posted',
+    'user:1', null, 'request:invoice-other', 'correlation:statement', 'test', null,
+    '2026-08-03T12:00:00Z', '2026-08-03T12:00:00Z', 'event_invoice_other', repeat('a',64), '{}'::jsonb, null),
+  ('event_statement_unapply', 'tenant_1', 'company_1', 'source_1', 'subledger_application', 'application_1', 'unapplied',
+    'user:1', 'user:2', 'request:statement-unapply', 'correlation:statement', 'test', null,
+    '2026-09-05T12:00:00Z', '2026-09-05T12:00:00Z', 'event_statement_unapply', repeat('a',64), '{}'::jsonb, 'event_apply');
+insert into erp_financials.subledger_documents (
+  subledger_document_id, tenant_id, company_id, source_id, document_type, transaction_id, party_id,
+  document_number, document_date, due_date, currency_code, original_amount, open_amount, status, version,
+  idempotency_key, lifecycle_event_id, metadata, created_at, updated_at
+) values
+  ('invoice_full', 'tenant_1', 'company_1', 'source_1', 'invoice', 'txn_invoice_full', 'customer_1',
+    'INV-FULL', '2026-08-02', '2026-08-31', 'USD', 30, 30, 'open', 1,
+    'invoice_full', 'event_invoice_full', '{}'::jsonb, '2026-08-02T12:00:00Z', '2026-08-02T12:00:00Z'),
+  ('payment_full', 'tenant_1', 'company_1', 'source_1', 'customer_payment', 'txn_payment_full', 'customer_1',
+    'PAY-FULL', '2026-08-10', null, 'USD', 30, 30, 'open', 1,
+    'payment_full', 'event_payment_full', '{}'::jsonb, '2026-08-10T12:00:00Z', '2026-08-10T12:00:00Z'),
+  ('invoice_future', 'tenant_1', 'company_1', 'source_1', 'invoice', 'txn_invoice_future', 'customer_1',
+    'INV-FUTURE', '2026-09-01', '2026-09-30', 'USD', 70, 70, 'open', 1,
+    'invoice_future', 'event_invoice_future', '{}'::jsonb, '2026-09-01T12:00:00Z', '2026-09-01T12:00:00Z'),
+  ('payment_future', 'tenant_1', 'company_1', 'source_1', 'customer_payment', 'txn_payment_future', 'customer_1',
+    'PAY-FUTURE', '2026-09-03', null, 'USD', 40, 40, 'open', 1,
+    'payment_future', 'event_payment_future', '{}'::jsonb, '2026-09-03T12:00:00Z', '2026-09-03T12:00:00Z'),
+  ('invoice_other', 'tenant_1', 'company_1', 'source_1', 'invoice', 'txn_invoice_other', 'customer_2',
+    'INV-OTHER', '2026-08-03', '2026-08-31', 'USD', 80, 80, 'open', 1,
+    'invoice_other', 'event_invoice_other', '{}'::jsonb, '2026-08-03T12:00:00Z', '2026-08-03T12:00:00Z');
+insert into erp_financials.subledger_applications (
+  subledger_application_id, tenant_id, company_id, source_id, application_type, source_document_id,
+  target_document_id, applied_amount, currency_code, application_date, status, version, idempotency_key,
+  applied_event_id, created_at, updated_at
+) values
+  ('application_1', 'tenant_1', 'company_1', 'source_1', 'customer_payment_to_invoice', 'payment_1',
+    'invoice_1', 60, 'USD', '2026-08-05', 'applied', 1, 'statement_apply_1', 'event_apply', now(), now()),
+  ('application_full', 'tenant_1', 'company_1', 'source_1', 'customer_payment_to_invoice', 'payment_full',
+    'invoice_full', 30, 'USD', '2026-08-10', 'applied', 1, 'statement_apply_full', 'event_apply_full',
+    '2026-08-10T12:00:00Z', '2026-08-10T12:00:00Z');
+update erp_financials.subledger_applications
+set status = 'unapplied', version = 2, ended_event_id = 'event_statement_unapply', updated_at = '2026-09-05T12:00:00Z'
+where subledger_application_id = 'application_1';
+insert into erp_financials.subledger_applications (
+  subledger_application_id, tenant_id, company_id, source_id, application_type, source_document_id,
+  target_document_id, applied_amount, currency_code, application_date, status, version, idempotency_key,
+  applied_event_id, created_at, updated_at
+) values ('application_future', 'tenant_1', 'company_1', 'source_1', 'customer_payment_to_invoice', 'payment_future',
+  'invoice_1', 40, 'USD', '2026-09-03', 'applied', 1, 'statement_apply_future', 'event_apply_future',
+  '2026-09-03T12:00:00Z', '2026-09-03T12:00:00Z');
 `);
 }
 

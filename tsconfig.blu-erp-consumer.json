@@ -3,10 +3,9 @@
   "compilerOptions": {
     "baseUrl": ".",
     "paths": {
-      "@handrail/erp-financials": ["./src/index.ts"],
       "@handrail/erp-financials/sdk": ["./src/sdk.ts"]
     },
     "types": ["node"]
   },
-  "include": ["test/core-erp-consumer-type-imports.ts"]
+  "include": ["test/blu-erp-consumer-type-imports.ts"]
 }

@@ -99,6 +99,27 @@ describe("package boundary", () => {
     });
   });
 
+  it("keeps the BLU consumer contract on declared public package exports", () => {
+    const packageManifest = readPackageManifest();
+    const consumerTypes = readFileSync(new URL("./blu-erp-consumer-type-imports.ts", import.meta.url), "utf8");
+    const consumerTsconfig = readJsonObject(new URL("../tsconfig.blu-erp-consumer.json", import.meta.url));
+    const packageExports = recordProperty(packageManifest, "exports");
+    const compilerOptions = recordProperty(consumerTsconfig, "compilerOptions");
+    const paths = recordProperty(compilerOptions, "paths");
+    const publicSpecifiers = Object.keys(packageExports).map((subpath) =>
+      subpath === "." ? packageManifest.name : `${packageManifest.name}${subpath.slice(1)}`
+    );
+    const importedSpecifiers = [...consumerTypes.matchAll(/from\s+["']([^"']+)["']/gu)].map(
+      (match) => match[1]
+    );
+
+    expect([...new Set(importedSpecifiers)]).toEqual(["@handrail/erp-financials/sdk"]);
+    expect(importedSpecifiers.every((specifier) => specifier !== undefined && publicSpecifiers.includes(specifier))).toBe(true);
+    expect(Object.keys(paths)).toEqual(["@handrail/erp-financials/sdk"]);
+    expect(Object.keys(paths).every((specifier) => publicSpecifiers.includes(specifier))).toBe(true);
+    expect(consumerTypes).not.toMatch(/(?:^|["'])\.{0,2}\/(?:src|dist)\//mu);
+  });
+
   it("keeps the documented adoption allowlist available from the root barrel", () => {
     const supportedRuntimeExports = [
       POSTGRES_CANONICAL_SCHEMA_MANIFEST,
@@ -180,6 +201,25 @@ function readPackageManifest(): PackageManifest {
   }
 
   return parsed;
+}
+
+function readJsonObject(url: URL): Readonly<Record<string, unknown>> {
+  const parsed: unknown = JSON.parse(readFileSync(url, "utf8"));
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`${url.pathname} must contain a JSON object`);
+  }
+  return parsed as Readonly<Record<string, unknown>>;
+}
+
+function recordProperty(
+  value: Readonly<Record<string, unknown>>,
+  property: string
+): Readonly<Record<string, unknown>> {
+  const candidate = value[property];
+  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+    throw new Error(`${property} must be an object`);
+  }
+  return candidate as Readonly<Record<string, unknown>>;
 }
 
 function isPackageManifest(value: unknown): value is PackageManifest {

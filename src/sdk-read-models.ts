@@ -128,6 +128,74 @@ export type InvoiceDetail = InvoiceListItem & {
   readonly lines: readonly CommercialDocumentLineReadModel[];
 };
 
+/** Canonical source identity for a customer-statement document. */
+export type CustomerStatementSourceIdentity = {
+  readonly sourceId: string;
+  readonly sourceSystem: string;
+  readonly providerEnvironment: string;
+  readonly transactionId: string;
+  readonly sourceTransactionId: string;
+  readonly sourceTransactionType: string;
+};
+
+/** One application that reduces an invoice balance at the requested cutoff. */
+export type CustomerStatementApplicationEvidence = {
+  readonly applicationId: string;
+  readonly applicationType: "customer_payment_to_invoice" | "credit_to_invoice" | "write_off_to_invoice";
+  readonly status: "applied";
+  readonly applicationDate: IsoDate;
+  readonly amount: DecimalString;
+  readonly currencyCode: IsoCurrencyCode;
+  readonly sourceDocumentId: string;
+  readonly sourceDocumentType: "customer_payment" | "credit_memo" | "write_off";
+  readonly sourceDocumentNumber?: string;
+  readonly sourceDocumentDate: IsoDate;
+  readonly sourceIdentity: CustomerStatementSourceIdentity;
+  readonly appliedLifecycleEventId: string;
+  /** Present when the application was ended after this statement's cutoff. */
+  readonly endedLifecycleEventId?: string;
+};
+
+/** One posted invoice and the complete canonical application evidence active at the cutoff. */
+export type CustomerStatementRow = {
+  readonly invoiceId: string;
+  readonly customerId: string;
+  readonly customerName?: string;
+  readonly documentNumber?: string;
+  readonly documentDate: IsoDate;
+  readonly dueDate?: IsoDate;
+  readonly currencyCode: IsoCurrencyCode;
+  readonly originalAmount: DecimalString;
+  readonly appliedAmount: DecimalString;
+  readonly openBalance: DecimalString;
+  readonly sourceIdentity: CustomerStatementSourceIdentity;
+  readonly applications: readonly CustomerStatementApplicationEvidence[];
+};
+
+export type CustomerStatementTotals = {
+  readonly invoiceCount: number;
+  readonly invoicedAmount: DecimalString;
+  readonly appliedAmount: DecimalString;
+  readonly outstandingAmount: DecimalString;
+};
+
+export type CustomerStatementRequest = PageRequest & {
+  readonly customerId: string;
+  readonly asOfDate: IsoDate;
+};
+
+export type CustomerStatement = {
+  readonly customerId: string;
+  readonly asOfDate: IsoDate;
+  readonly currencyCode: IsoCurrencyCode;
+  readonly items: readonly CustomerStatementRow[];
+  readonly nextCursor?: string;
+  /** Authoritative totals for every matching invoice, independent of the current page. */
+  readonly totals: CustomerStatementTotals;
+  /** Totals that reconcile exactly to items on this page. */
+  readonly pageTotals: CustomerStatementTotals;
+};
+
 export type OpenInvoiceReference = {
   readonly invoiceId: string;
   readonly documentNumber?: string;
@@ -952,6 +1020,7 @@ export type FinancialReadModels = {
   getInvoicesByIds(invoiceIds: readonly string[], asOfDate?: IsoDate): Promise<InvoiceDetailsByIdResult>;
   listInvoiceDeliveries(invoiceId: string, input?: PageRequest): Promise<Page<InvoiceDeliveryEvent>>;
   getInvoiceSummary(input?: { readonly asOfDate?: IsoDate }): Promise<InvoiceSummary>;
+  getCustomerStatement(input: CustomerStatementRequest): Promise<CustomerStatement>;
   listVendorBills(input?: PageRequest & { readonly status?: VendorBillStatus; readonly asOfDate?: IsoDate; readonly vendorId?: string }): Promise<Page<VendorBillListItem>>;
   getVendorBill(billId: string, asOfDate?: IsoDate): Promise<VendorBillDetail>;
   getVendorBillSummary(input?: {
@@ -1055,6 +1124,7 @@ export function createFinancialReadModels(input: Scope): FinancialReadModels {
     getInvoicesByIds: (invoiceIds, asOfDate) => getInvoicesByIds(input, invoiceIds, asOfDate),
     listInvoiceDeliveries: (invoiceId, request = {}) => listInvoiceDeliveries(input, invoiceId, request),
     getInvoiceSummary: (request = {}) => getInvoiceSummary(input, request),
+    getCustomerStatement: (request) => getCustomerStatement(input, request),
     listVendorBills: (request = {}) => listVendorBills(input, request),
     getVendorBill: (billId, asOfDate) => getVendorBill(input, billId, asOfDate),
     getVendorBillSummary: (request = {}) => getVendorBillSummary(input, request),
@@ -2087,6 +2157,157 @@ from posted`,
       unsentDraftCount: integer(row.draft_count, "draft_count"),
       collectedAmount: money(row.collected_amount, "collected_amount"),
       settledInvoiceCount: integer(row.settled_count, "settled_count")
+    };
+  });
+}
+
+async function getCustomerStatement(
+  scope: Scope,
+  input: CustomerStatementRequest
+): Promise<CustomerStatement> {
+  assertNonEmpty(input.customerId, "customerId");
+  assertDate(input.asOfDate, "asOfDate");
+  const cursorKind = `customer-statement:${createHash("sha256")
+    .update(`${input.customerId}\u0000${input.asOfDate}`)
+    .digest("hex")
+    .slice(0, 20)}`;
+  const page = pageInput(input, cursorKind, scope.bookId);
+  return scope.database.transaction(async (client) => {
+    const book = await resolveBook(client, scope);
+    const result = await client.query(
+      `with scoped_invoices as (
+  select document."subledger_document_id" as "invoice_id", document."source_id", document."transaction_id",
+    document."party_id" as "customer_id", party."display_name" as "customer_name", document."document_number",
+    document."document_date", document."due_date", document."currency_code", document."original_amount",
+    source_definition."source_system", source_definition."provider_environment",
+    transaction."source_transaction_id", transaction."source_transaction_type"
+  from "erp_financials"."subledger_documents" document
+  join "erp_financials"."reporting_book_sources" book_source
+    on book_source."tenant_id" = document."tenant_id" and book_source."company_id" = document."company_id"
+   and book_source."book_id" = $3 and book_source."source_id" = document."source_id"
+   and (book_source."effective_from" is null or book_source."effective_from" <= document."document_date")
+   and (book_source."effective_through" is null or book_source."effective_through" >= document."document_date")
+  join "erp_financials"."accounting_sources" source_definition
+    on source_definition."tenant_id" = document."tenant_id" and source_definition."source_id" = document."source_id"
+  join "erp_financials"."transactions" transaction
+    on transaction."tenant_id" = document."tenant_id" and transaction."source_id" = document."source_id"
+   and transaction."transaction_id" = document."transaction_id"
+  left join "erp_financials"."parties" party
+    on party."tenant_id" = document."tenant_id" and party."source_id" = document."source_id"
+   and party."party_id" = document."party_id" and party."party_type" = 'customer'
+  left join "erp_financials"."invoice_voids" invoice_void
+    on invoice_void."tenant_id" = document."tenant_id" and invoice_void."company_id" = document."company_id"
+   and invoice_void."book_id" = $3 and invoice_void."source_id" = document."source_id"
+   and invoice_void."invoice_document_id" = document."subledger_document_id"
+  left join "erp_financials"."financial_lifecycle_events" void_event
+    on void_event."tenant_id" = invoice_void."tenant_id" and void_event."company_id" = invoice_void."company_id"
+   and void_event."source_id" = invoice_void."source_id" and void_event."event_id" = invoice_void."lifecycle_event_id"
+  where document."tenant_id" = $1 and document."company_id" = $2 and document."document_type" = 'invoice'
+    and document."party_id" = $4 and document."currency_code" = $5 and document."document_date" <= $6::date
+    and (invoice_void."invoice_void_id" is null or void_event."occurred_at" >= ($6::date + interval '1 day'))
+), active_applications as (
+  select application."target_document_id" as "invoice_id", application."subledger_application_id" as "application_id",
+    application."application_type", application."application_date", application."applied_amount",
+    application."currency_code", application."source_document_id", source_document."document_type" as "source_document_type",
+    source_document."document_number" as "source_document_number", source_document."document_date" as "source_document_date",
+    source_document."transaction_id" as "source_transaction_id", source_transaction."source_transaction_id" as "source_external_transaction_id",
+    source_transaction."source_transaction_type", application_source."source_system",
+    application_source."provider_environment", application."applied_event_id", application."ended_event_id"
+  from "erp_financials"."subledger_applications" application
+  join scoped_invoices invoice
+    on invoice."source_id" = application."source_id" and invoice."invoice_id" = application."target_document_id"
+  join "erp_financials"."financial_lifecycle_events" applied_event
+    on applied_event."tenant_id" = application."tenant_id" and applied_event."company_id" = application."company_id"
+   and applied_event."source_id" = application."source_id" and applied_event."event_id" = application."applied_event_id"
+  left join "erp_financials"."financial_lifecycle_events" ended_event
+    on ended_event."tenant_id" = application."tenant_id" and ended_event."company_id" = application."company_id"
+   and ended_event."source_id" = application."source_id" and ended_event."event_id" = application."ended_event_id"
+  join "erp_financials"."subledger_documents" source_document
+    on source_document."tenant_id" = application."tenant_id" and source_document."company_id" = application."company_id"
+   and source_document."source_id" = application."source_id"
+   and source_document."subledger_document_id" = application."source_document_id"
+  join "erp_financials"."transactions" source_transaction
+    on source_transaction."tenant_id" = source_document."tenant_id" and source_transaction."source_id" = source_document."source_id"
+   and source_transaction."transaction_id" = source_document."transaction_id"
+  join "erp_financials"."accounting_sources" application_source
+    on application_source."tenant_id" = application."tenant_id" and application_source."source_id" = application."source_id"
+  join "erp_financials"."reporting_book_sources" application_book_source
+    on application_book_source."tenant_id" = application."tenant_id"
+   and application_book_source."company_id" = application."company_id"
+   and application_book_source."book_id" = $3 and application_book_source."source_id" = application."source_id"
+   and (application_book_source."effective_from" is null
+     or (application_book_source."effective_from" <= source_document."document_date"
+       and application_book_source."effective_from" <= application."application_date"))
+   and (application_book_source."effective_through" is null
+     or (application_book_source."effective_through" >= source_document."document_date"
+       and application_book_source."effective_through" >= application."application_date"))
+  where application."tenant_id" = $1 and application."company_id" = $2
+    and application."application_type" in ('customer_payment_to_invoice', 'credit_to_invoice', 'write_off_to_invoice')
+    and application."currency_code" = $5 and application."application_date" <= $6::date
+    and applied_event."occurred_at" < ($6::date + interval '1 day')
+    and (ended_event."event_id" is null or ended_event."occurred_at" >= ($6::date + interval '1 day'))
+), application_amounts as (
+  select "invoice_id", sum("applied_amount") as "applied_amount"
+  from active_applications
+  group by "invoice_id"
+), invoice_balances as (
+  select invoice.*, coalesce(amounts."applied_amount", 0)::numeric as "applied_amount",
+    greatest(invoice."original_amount" - coalesce(amounts."applied_amount", 0), 0)::numeric as "open_balance"
+  from scoped_invoices invoice
+  left join application_amounts amounts on amounts."invoice_id" = invoice."invoice_id"
+), statement_totals as (
+  select count(*)::integer as "total_invoice_count", coalesce(sum("original_amount"), 0) as "total_invoiced_amount",
+    coalesce(sum("applied_amount"), 0) as "total_applied_amount", coalesce(sum("open_balance"), 0) as "total_outstanding_amount"
+  from invoice_balances
+), page_rows as (
+  select * from invoice_balances
+  where ($7::date is null or ("document_date", "invoice_id") > ($7::date, $8::text))
+  order by "document_date", "invoice_id"
+  limit $9
+), application_evidence as (
+  select application."invoice_id",
+    jsonb_agg(jsonb_build_object(
+      'applicationId', application."application_id", 'applicationType', application."application_type",
+      'applicationDate', application."application_date", 'amount', application."applied_amount"::text,
+      'currencyCode', application."currency_code", 'sourceDocumentId', application."source_document_id",
+      'sourceDocumentType', application."source_document_type", 'sourceDocumentNumber', application."source_document_number",
+      'sourceDocumentDate', application."source_document_date", 'sourceId', invoice."source_id",
+      'sourceSystem', application."source_system", 'providerEnvironment', application."provider_environment",
+      'transactionId', application."source_transaction_id",
+      'sourceTransactionId', application."source_external_transaction_id",
+      'sourceTransactionType', application."source_transaction_type",
+      'appliedLifecycleEventId', application."applied_event_id",
+      'endedLifecycleEventId', application."ended_event_id"
+    ) order by application."application_date", application."application_id") as "applications"
+  from active_applications application
+  join page_rows invoice on invoice."invoice_id" = application."invoice_id"
+  group by application."invoice_id"
+)
+select page_rows.*, coalesce(application_evidence."applications", '[]'::jsonb) as "applications", statement_totals.*
+from statement_totals
+left join page_rows on true
+left join application_evidence on application_evidence."invoice_id" = page_rows."invoice_id"
+order by page_rows."document_date", page_rows."invoice_id"`,
+      [scope.tenantId, scope.companyId, scope.bookId, input.customerId, book.currencyCode, input.asOfDate,
+        page.date, page.id, page.limit + 1]
+    );
+    const totalsRow = requiredRow(result.rows[0], "customer statement totals");
+    const totals = customerStatementTotalsFromRow(totalsRow, "total_");
+    const values = result.rows
+      .filter((row) => row.invoice_id !== null && row.invoice_id !== undefined)
+      .map(customerStatementRowFromRow);
+    const paged = toPage(values, page.limit, cursorKind, scope.bookId, (item) => ({
+      date: item.documentDate,
+      id: item.invoiceId
+    }));
+    return {
+      customerId: input.customerId,
+      asOfDate: input.asOfDate,
+      currencyCode: book.currencyCode,
+      items: paged.items,
+      ...(paged.nextCursor === undefined ? {} : { nextCursor: paged.nextCursor }),
+      totals,
+      pageTotals: customerStatementPageTotals(paged.items)
     };
   });
 }
@@ -4871,6 +5092,100 @@ function invoiceFromRow(row: Readonly<Record<string, unknown>>): InvoiceListItem
     status: status as InvoiceListStatus,
     version: integer(row.version, "version")
   };
+}
+
+function customerStatementRowFromRow(row: Readonly<Record<string, unknown>>): CustomerStatementRow {
+  const customerName = optionalString(row.customer_name);
+  const documentNumber = optionalString(row.document_number);
+  const dueDate = optionalDate(row.due_date, "due_date");
+  return {
+    invoiceId: string(row.invoice_id, "invoice_id"),
+    customerId: string(row.customer_id, "customer_id"),
+    ...(customerName === undefined ? {} : { customerName }),
+    ...(documentNumber === undefined ? {} : { documentNumber }),
+    documentDate: date(row.document_date, "document_date"),
+    ...(dueDate === undefined ? {} : { dueDate }),
+    currencyCode: string(row.currency_code, "currency_code"),
+    originalAmount: money(row.original_amount, "original_amount"),
+    appliedAmount: money(row.applied_amount, "applied_amount"),
+    openBalance: money(row.open_balance, "open_balance"),
+    sourceIdentity: {
+      sourceId: string(row.source_id, "source_id"),
+      sourceSystem: string(row.source_system, "source_system"),
+      providerEnvironment: string(row.provider_environment, "provider_environment"),
+      transactionId: string(row.transaction_id, "transaction_id"),
+      sourceTransactionId: string(row.source_transaction_id, "source_transaction_id"),
+      sourceTransactionType: string(row.source_transaction_type, "source_transaction_type")
+    },
+    applications: customerStatementApplications(row.applications)
+  };
+}
+
+function customerStatementApplications(value: unknown): readonly CustomerStatementApplicationEvidence[] {
+  const parsed = typeof value === "string" ? JSON.parse(value) as unknown : value;
+  if (!Array.isArray(parsed)) throw new Error("Stored customer statement applications must be an array");
+  return parsed.map((candidate) => {
+    if (!isRecord(candidate)) throw new Error("Stored customer statement application must be an object");
+    const applicationType = string(candidate.applicationType, "applicationType");
+    if (!new Set<string>(["customer_payment_to_invoice", "credit_to_invoice", "write_off_to_invoice"])
+      .has(applicationType)) {
+      throw new Error("Stored customer statement application type is invalid");
+    }
+    const sourceDocumentType = string(candidate.sourceDocumentType, "sourceDocumentType");
+    if (!new Set<string>(["customer_payment", "credit_memo", "write_off"]).has(sourceDocumentType)) {
+      throw new Error("Stored customer statement source document type is invalid");
+    }
+    const sourceDocumentNumber = optionalString(candidate.sourceDocumentNumber);
+    const endedLifecycleEventId = optionalString(candidate.endedLifecycleEventId);
+    return {
+      applicationId: string(candidate.applicationId, "applicationId"),
+      applicationType: applicationType as CustomerStatementApplicationEvidence["applicationType"],
+      status: "applied",
+      applicationDate: date(candidate.applicationDate, "applicationDate"),
+      amount: money(candidate.amount, "amount"),
+      currencyCode: string(candidate.currencyCode, "currencyCode"),
+      sourceDocumentId: string(candidate.sourceDocumentId, "sourceDocumentId"),
+      sourceDocumentType: sourceDocumentType as CustomerStatementApplicationEvidence["sourceDocumentType"],
+      ...(sourceDocumentNumber === undefined ? {} : { sourceDocumentNumber }),
+      sourceDocumentDate: date(candidate.sourceDocumentDate, "sourceDocumentDate"),
+      sourceIdentity: {
+        sourceId: string(candidate.sourceId, "sourceId"),
+        sourceSystem: string(candidate.sourceSystem, "sourceSystem"),
+        providerEnvironment: string(candidate.providerEnvironment, "providerEnvironment"),
+        transactionId: string(candidate.transactionId, "transactionId"),
+        sourceTransactionId: string(candidate.sourceTransactionId, "sourceTransactionId"),
+        sourceTransactionType: string(candidate.sourceTransactionType, "sourceTransactionType")
+      },
+      appliedLifecycleEventId: string(candidate.appliedLifecycleEventId, "appliedLifecycleEventId"),
+      ...(endedLifecycleEventId === undefined ? {} : { endedLifecycleEventId })
+    };
+  });
+}
+
+function customerStatementTotalsFromRow(
+  row: Readonly<Record<string, unknown>>,
+  prefix = ""
+): CustomerStatementTotals {
+  return {
+    invoiceCount: integer(row[`${prefix}invoice_count`], `${prefix}invoice_count`),
+    invoicedAmount: money(row[`${prefix}invoiced_amount`], `${prefix}invoiced_amount`),
+    appliedAmount: money(row[`${prefix}applied_amount`], `${prefix}applied_amount`),
+    outstandingAmount: money(row[`${prefix}outstanding_amount`], `${prefix}outstanding_amount`)
+  };
+}
+
+function customerStatementPageTotals(items: readonly CustomerStatementRow[]): CustomerStatementTotals {
+  return items.reduce<CustomerStatementTotals>((totals, item) => ({
+    invoiceCount: totals.invoiceCount + 1,
+    invoicedAmount: addMoney(totals.invoicedAmount, item.originalAmount),
+    appliedAmount: addMoney(totals.appliedAmount, item.appliedAmount),
+    outstandingAmount: addMoney(totals.outstandingAmount, item.openBalance)
+  }), {
+    invoiceCount: 0,
+    invoicedAmount: "0.00",
+    appliedAmount: "0.00",
+    outstandingAmount: "0.00"
+  });
 }
 
 function invoiceDeliveryFromRow(row: Readonly<Record<string, unknown>>): InvoiceDeliveryEvent {
