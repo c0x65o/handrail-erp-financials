@@ -151,6 +151,10 @@ const migrationFiles = {
   subledgerLineCustomersV20: new URL(
     "../migrations/future-erp/20260821010000_add_subledger_line_customers.sql",
     import.meta.url
+  ),
+  sourceImportResetV21: new URL(
+    "../migrations/future-erp/20260823010000_add_source_import_reset_guard.sql",
+    import.meta.url
   )
 } as const;
 
@@ -277,6 +281,13 @@ export const POSTGRES_MIGRATIONS: readonly PostgresMigrationDefinition[] = [
     19,
     20,
     migrationFiles.subledgerLineCustomersV20
+  ),
+  migration(
+    "20260823010000_add_source_import_reset_guard",
+    "Add transaction-scoped external source import reset guard",
+    20,
+    21,
+    migrationFiles.sourceImportResetV21
   )
 ] as const;
 

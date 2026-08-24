@@ -80,6 +80,11 @@ import type {
   StandardReportPresentationReportColumn,
   StandardReportPresentationReportSet
 } from "./report-controls.js";
+import { resetSourceImportState } from "./source-import-reset.js";
+import type {
+  ResetSourceImportStateInput,
+  SanitizedSourceResetCounts
+} from "./source-import-reset.js";
 
 export type PostgresQueryResult<Row extends Record<string, unknown> = Record<string, unknown>> = {
   readonly rows: readonly Row[];
@@ -297,6 +302,7 @@ export type PostgresStorageAdapter = StandardReportPresentationReadModelStorage 
   deleteLedgerFactsOutsideImportBatch(
     input: DeleteLedgerFactsOutsideImportBatchInput
   ): Promise<DeleteLedgerFactsOutsideImportBatchResult>;
+  resetSourceImportState(input: ResetSourceImportStateInput): Promise<SanitizedSourceResetCounts>;
   loadStatementFixture(fixture: StatementFixtureSet): Promise<FixtureLoadResult>;
   writeReportSnapshot(report: BuiltReport): Promise<number>;
   writeRollupBuckets(buckets: readonly RollupBucket[]): Promise<number>;
@@ -552,6 +558,9 @@ export function createPostgresStorageAdapter(
     },
     async deleteLedgerFactsOutsideImportBatch(input) {
       return deleteLedgerFactsOutsideImportBatch(client, manifest, input);
+    },
+    async resetSourceImportState(input) {
+      return resetSourceImportState(client, input);
     },
     async loadStatementFixture(fixture) {
       return loadStatementFixture(client, manifest, fixture);

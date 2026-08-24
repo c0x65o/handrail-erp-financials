@@ -131,8 +131,10 @@ function asTransactionRunner(database: ErpFinancialsDatabase): ErpFinancialsTran
 export { ErpFinancialsError, erpFinancialsError, isErpFinancialsError } from "./sdk-errors.js";
 export { normalizeCommercialDocumentLine } from "./commercial-lines.js";
 export { ERP_FINANCIALS_SDK_ACCEPTANCE_FIXTURE } from "./sdk-fixtures.js";
+export { SOURCE_RESET_COUNT_LIMIT, resetSourceImportState } from "./source-import-reset.js";
 
 export type { ErpFinancialsErrorCode, ErpFinancialsErrorDetails } from "./sdk-errors.js";
+export type { ResetSourceImportStateInput, SanitizedSourceResetCounts } from "./source-import-reset.js";
 export type { CommercialDocumentLineInput, NormalizedCommercialDocumentLine } from "./commercial-lines.js";
 export type {
   AgingReport,

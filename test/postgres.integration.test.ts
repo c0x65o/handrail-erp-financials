@@ -8,6 +8,7 @@ import {
   createFiscalCloseEvidenceChecksum,
   migratePostgresSchema,
   persistQuickBooksSubledgerResources,
+  resetSourceImportState,
   validatePostgresMigrationHistory,
   validatePostgresSchema
 } from "../src/index.js";
@@ -48,7 +49,7 @@ describeIntegration("ERP Financials real PostgreSQL", () => {
     expect(result.targetVersion).toBe(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion);
     expect(result.applied.at(-1)?.toVersion).toBe(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion);
     expect(schema).toMatchObject({ compatible: true, fixtureSupport: true, issues: [] });
-    expect(history).toMatchObject({ compatible: true, currentVersion: 20, issues: [] });
+    expect(history).toMatchObject({ compatible: true, currentVersion: 21, issues: [] });
     await expect(
       pool.query("update erp_financials.schema_migrations set name = 'tampered' where to_version = 20")
     ).rejects.toThrow("schema migration history is append-only");
@@ -105,6 +106,75 @@ describeIntegration("ERP Financials real PostgreSQL", () => {
       { source_id: "invoice_600", original_amount: "100.00", open_amount: "100.00", status: "open" },
       { source_id: "payment_700", original_amount: "50.00", open_amount: "50.00", status: "open" }
     ]);
+  });
+
+  it("completely resets one imported source while preserving identities, configuration, native facts, and another import source", async () => {
+    await migratePostgresSchema(runner, { appliedByRef: "integration:source-import-reset" });
+    await seedSourceImportResetScenario(pool, runner);
+
+    const counts = await runner.transaction((client) => resetSourceImportState(client, {
+      tenantId: "tenant_qbo",
+      companyId: "company_qbo",
+      sourceId: "source_qbo"
+    }));
+
+    expect(counts).toMatchObject({
+      reportSnapshotLinesDeleted: 1,
+      reportSnapshotTotalsDeleted: 1,
+      reportSnapshotsDeleted: 1,
+      freshnessRowsDeleted: 1,
+      rollupBucketsDeleted: 1,
+      subledgerApplicationsDeleted: 1,
+      subledgerDocumentLinesDeleted: 1,
+      subledgerDocumentsDeleted: 2,
+      ledgerPostingsDeleted: 2,
+      transactionLinesDeleted: 2,
+      transactionsDeleted: 2,
+      importBatchesDeleted: 1,
+      syncCheckpointsDeleted: 1,
+      lifecycleEventsDeleted: 3,
+      accountsRetired: 2,
+      partiesRetired: 1,
+      itemsRetired: 1,
+      dimensionsRetired: 1,
+      sourceSyncStateCleared: 1,
+      countsCapped: false
+    });
+    const state = await sourceResetState(pool);
+    expect(state).toMatchObject({
+      selectedRuntimeRows: "0",
+      selectedActiveMasterRows: "0",
+      selectedIdentityRows: "3",
+      reportingConfigurationRows: "4",
+      otherSourceRows: "4",
+      nativeSourceRows: "4",
+      selectedStatus: "pending"
+    });
+
+    const replay = await runner.transaction((client) => resetSourceImportState(client, {
+      tenantId: "tenant_qbo",
+      companyId: "company_qbo",
+      sourceId: "source_qbo"
+    }));
+    expect(Object.entries(replay).filter(([key]) => key !== "countsCapped").every(([, value]) => value === 0)).toBe(true);
+    expect(replay.countsCapped).toBe(false);
+  });
+
+  it("rolls back every source reset mutation when the surrounding transaction fails", async () => {
+    await migratePostgresSchema(runner, { appliedByRef: "integration:source-import-reset-rollback" });
+    await seedSourceImportResetScenario(pool, runner);
+    const before = await sourceResetState(pool);
+
+    await expect(runner.transaction(async (client) => {
+      await resetSourceImportState(client, {
+        tenantId: "tenant_qbo",
+        companyId: "company_qbo",
+        sourceId: "source_qbo"
+      });
+      throw new Error("injected host failure");
+    })).rejects.toThrow("injected host failure");
+
+    await expect(sourceResetState(pool)).resolves.toEqual(before);
   });
 
   it("preserves every QuickBooks operational document family and application relationship", async () => {
@@ -1479,6 +1549,150 @@ insert into erp_financials.transactions (
   ('transaction_payment_qbo', 'tenant_qbo', 'source_qbo', 'payment_700', 'Payment', 'PMT-700',
     '2026-08-10', '2026-08-10T12:00:00Z', '2026-08-10T10:00:00Z', 'customer_qbo', 'USD', 'posted', '{}'::jsonb);
 `);
+}
+
+async function seedSourceImportResetScenario(pool: Pool, runner: PgTransactionRunner): Promise<void> {
+  await seedQuickBooksImportScope(pool);
+  await pool.query(`
+insert into erp_financials.items (
+  item_id, tenant_id, source_id, source_item_id, item_type, name, active
+) values ('item_qbo', 'tenant_qbo', 'source_qbo', 'item:1', 'service', 'Consulting', true);
+insert into erp_financials.accounting_dimensions (
+  dimension_id, tenant_id, source_id, dimension_kind, source_dimension_id, name, active
+) values ('dimension_qbo', 'tenant_qbo', 'source_qbo', 'class', 'class:1', 'Services', true);
+insert into erp_financials.transaction_lines (
+  transaction_line_id, tenant_id, source_id, transaction_id, line_number, account_id, party_id,
+  amount, dimension_refs
+) values
+  ('line_invoice_qbo', 'tenant_qbo', 'source_qbo', 'transaction_invoice_qbo', 1,
+    'account_revenue_qbo', 'customer_qbo', 100, '[]'::jsonb),
+  ('line_payment_qbo', 'tenant_qbo', 'source_qbo', 'transaction_payment_qbo', 1,
+    'account_cash_qbo', 'customer_qbo', 40, '[]'::jsonb);
+insert into erp_financials.ledger_postings (
+  posting_id, tenant_id, source_id, source_posting_id, transaction_id, transaction_line_id,
+  account_id, party_id, posting_date, accounting_basis, debit_amount, credit_amount, net_amount,
+  currency_code, dimension_hash, dimension_refs, source_payload_ref, import_batch_id, checkpoint_id
+) values
+  ('posting_invoice_qbo', 'tenant_qbo', 'source_qbo', 'posting:invoice', 'transaction_invoice_qbo',
+    'line_invoice_qbo', 'account_revenue_qbo', 'customer_qbo', '2026-08-01', 'accrual', 0, 100, -100,
+    'USD', repeat('a', 64), '[]'::jsonb, '{}'::jsonb, 'batch_qbo', 'checkpoint_qbo'),
+  ('posting_payment_qbo', 'tenant_qbo', 'source_qbo', 'posting:payment', 'transaction_payment_qbo',
+    'line_payment_qbo', 'account_cash_qbo', 'customer_qbo', '2026-08-10', 'accrual', 40, 0, 40,
+    'USD', repeat('a', 64), '[]'::jsonb, '{}'::jsonb, 'batch_qbo', 'checkpoint_qbo');
+insert into erp_financials.rollup_buckets (
+  rollup_bucket_id, tenant_id, company_id, source_id, account_id, accounting_basis,
+  bucket_grain, bucket_start, bucket_end, currency_code, dimension_hash, party_id, party_type,
+  item_id, debit_amount, credit_amount, net_amount, posting_count,
+  source_posting_max_updated_at, import_batch_id, generated_at
+) values ('rollup_qbo', 'tenant_qbo', 'company_qbo', 'source_qbo', 'account_cash_qbo', 'accrual',
+  'month', '2026-08-01', '2026-08-31', 'USD', repeat('a', 64), '', '', '', 40, 0, 40, 1,
+  '2026-08-10T10:00:00Z', 'batch_qbo', '2026-08-10T10:01:00Z');
+insert into erp_financials.report_freshness (
+  freshness_id, tenant_id, company_id, source_id, report_name, accounting_basis,
+  period_start, period_end, currency_code, status, fresh_through, import_batch_id, checkpoint_id, updated_at
+) values ('freshness_qbo', 'tenant_qbo', 'company_qbo', 'source_qbo', 'profit_and_loss', 'accrual',
+  '2026-08-01', '2026-08-31', 'USD', 'fresh', '2026-08-10T10:00:00Z', 'batch_qbo',
+  'checkpoint_qbo', '2026-08-10T10:01:00Z');
+insert into erp_financials.report_snapshots (
+  report_snapshot_id, tenant_id, company_id, source_id, report_name, snapshot_source,
+  accounting_basis, period_start, period_end, as_of_date, currency_code, generated_at,
+  freshness, reconciliation_status, reconciliation_difference
+) values ('snapshot_qbo', 'tenant_qbo', 'company_qbo', 'source_qbo', 'profit_and_loss', 'rollup',
+  'accrual', '2026-08-01', '2026-08-31', '2026-08-31', 'USD', '2026-08-10T10:01:00Z',
+  '{"status":"fresh","sourceId":"source_qbo"}'::jsonb, 'reconciled', 0);
+insert into erp_financials.report_snapshot_lines (
+  report_line_id, tenant_id, company_id, source_id, report_snapshot_id, section, label,
+  account_id, amount, sort_order, drilldown_ref
+) values ('snapshot_line_qbo', 'tenant_qbo', 'company_qbo', 'source_qbo', 'snapshot_qbo',
+  'income', 'Revenue', 'account_revenue_qbo', 100, 1, '{}'::jsonb);
+insert into erp_financials.report_snapshot_totals (
+  report_total_id, tenant_id, company_id, source_id, report_snapshot_id, total_key, label,
+  amount, drilldown_ref
+) values ('snapshot_total_qbo', 'tenant_qbo', 'company_qbo', 'source_qbo', 'snapshot_qbo',
+  'net_income', 'Net income', 100, '{}'::jsonb);
+
+insert into erp_financials.accounting_sources (
+  source_id, tenant_id, source_system, provider_environment, connection_ref, status
+) values
+  ('source_qbo_other', 'tenant_qbo', 'quickbooks', 'sandbox', 'connection:qbo:other', 'active'),
+  ('source_native', 'tenant_qbo', 'native_erp', 'native', 'native:spartan', 'active');
+insert into erp_financials.company_sources values
+  ('company_source_qbo_other', 'tenant_qbo', 'company_qbo', 'source_qbo_other', now()),
+  ('company_source_native', 'tenant_qbo', 'company_qbo', 'source_native', now());
+insert into erp_financials.accounts (
+  account_id, tenant_id, source_id, source_account_id, name, type, classification, active
+) values
+  ('account_qbo_other', 'tenant_qbo', 'source_qbo_other', 'cash', 'Other cash', 'Bank', 'asset', true),
+  ('account_native', 'tenant_qbo', 'source_native', 'cash', 'Native cash', 'Bank', 'asset', true);
+insert into erp_financials.transactions (
+  transaction_id, tenant_id, source_id, source_transaction_id, source_transaction_type,
+  transaction_date, currency_code, status, source_payload_ref
+) values
+  ('transaction_qbo_other', 'tenant_qbo', 'source_qbo_other', 'other:1', 'Deposit',
+    '2026-08-01', 'USD', 'posted', '{}'::jsonb),
+  ('transaction_native', 'tenant_qbo', 'source_native', 'native:1', 'JournalEntry',
+    '2026-09-01', 'USD', 'posted', '{}'::jsonb);
+
+insert into erp_financials.reporting_books (
+  tenant_id, company_id, book_id, name, base_currency_code, accounting_basis, status, created_at, updated_at
+) values ('tenant_qbo', 'company_qbo', 'book_qbo', 'Spartan reporting', 'USD', 'accrual', 'active', now(), now());
+insert into erp_financials.reporting_book_sources (
+  book_source_id, tenant_id, company_id, book_id, source_id, source_role, effective_through, created_at
+) values ('book_source_qbo', 'tenant_qbo', 'company_qbo', 'book_qbo', 'source_qbo', 'historical', '2026-08-31', now());
+insert into erp_financials.reporting_book_accounts (
+  book_account_id, tenant_id, company_id, book_id, book_account_key, account_number, name,
+  classification, account_type, account_role, currency_code, active, version,
+  last_operation_request_id, last_operation_checksum, created_at, updated_at
+) values ('book_account_cash', 'tenant_qbo', 'company_qbo', 'book_qbo', 'cash', '1000', 'Cash',
+  'asset', 'Bank', 'posting', 'USD', true, 1, 'seed:reset', repeat('a', 64), now(), now());
+insert into erp_financials.reporting_book_account_mappings (
+  book_account_mapping_id, tenant_id, company_id, book_id, source_id, account_id,
+  book_account_key, created_at, updated_at
+) values ('mapping_qbo_cash', 'tenant_qbo', 'company_qbo', 'book_qbo', 'source_qbo',
+  'account_cash_qbo', 'cash', now(), now());
+`);
+
+  await runner.transaction((client) => persistQuickBooksSubledgerResources({
+    client,
+    companyId: "company_qbo",
+    importedAt: "2026-08-10T10:01:00.000Z",
+    facts: quickBooksSubledgerFacts(),
+    resources: quickBooksSubledgerResources("40.00", true, "2026-08-10T10:00:00.000Z")
+  }));
+}
+
+async function sourceResetState(pool: Pool): Promise<Record<string, string>> {
+  const result = await pool.query<Record<string, string>>(`
+select
+  ((select count(*) from erp_financials.transactions where tenant_id = 'tenant_qbo' and source_id = 'source_qbo')
+    + (select count(*) from erp_financials.subledger_documents where tenant_id = 'tenant_qbo' and source_id = 'source_qbo')
+    + (select count(*) from erp_financials.ledger_postings where tenant_id = 'tenant_qbo' and source_id = 'source_qbo')
+    + (select count(*) from erp_financials.report_snapshots where tenant_id = 'tenant_qbo' and source_id = 'source_qbo')
+    + (select count(*) from erp_financials.import_batches where tenant_id = 'tenant_qbo' and source_id = 'source_qbo'))::text as "selectedRuntimeRows",
+  ((select count(*) from erp_financials.accounts where tenant_id = 'tenant_qbo' and source_id = 'source_qbo' and active)
+    + (select count(*) from erp_financials.parties where tenant_id = 'tenant_qbo' and source_id = 'source_qbo' and active)
+    + (select count(*) from erp_financials.items where tenant_id = 'tenant_qbo' and source_id = 'source_qbo' and active)
+    + (select count(*) from erp_financials.accounting_dimensions where tenant_id = 'tenant_qbo' and source_id = 'source_qbo' and active))::text as "selectedActiveMasterRows",
+  ((select count(*) from erp_financials.accounting_companies where tenant_id = 'tenant_qbo' and company_id = 'company_qbo')
+    + (select count(*) from erp_financials.accounting_sources where tenant_id = 'tenant_qbo' and source_id = 'source_qbo')
+    + (select count(*) from erp_financials.company_sources where tenant_id = 'tenant_qbo' and company_id = 'company_qbo' and source_id = 'source_qbo'))::text as "selectedIdentityRows",
+  ((select count(*) from erp_financials.reporting_books where tenant_id = 'tenant_qbo' and company_id = 'company_qbo')
+    + (select count(*) from erp_financials.reporting_book_sources where tenant_id = 'tenant_qbo' and source_id = 'source_qbo')
+    + (select count(*) from erp_financials.reporting_book_accounts where tenant_id = 'tenant_qbo' and company_id = 'company_qbo')
+    + (select count(*) from erp_financials.reporting_book_account_mappings where tenant_id = 'tenant_qbo' and source_id = 'source_qbo'))::text as "reportingConfigurationRows",
+  ((select count(*) from erp_financials.accounting_sources where source_id = 'source_qbo_other')
+    + (select count(*) from erp_financials.company_sources where source_id = 'source_qbo_other')
+    + (select count(*) from erp_financials.accounts where source_id = 'source_qbo_other')
+    + (select count(*) from erp_financials.transactions where source_id = 'source_qbo_other'))::text as "otherSourceRows",
+  ((select count(*) from erp_financials.accounting_sources where source_id = 'source_native')
+    + (select count(*) from erp_financials.company_sources where source_id = 'source_native')
+    + (select count(*) from erp_financials.accounts where source_id = 'source_native')
+    + (select count(*) from erp_financials.transactions where source_id = 'source_native'))::text as "nativeSourceRows",
+  (select status from erp_financials.accounting_sources where tenant_id = 'tenant_qbo' and source_id = 'source_qbo') as "selectedStatus"
+`);
+  const row = result.rows[0];
+  if (row === undefined) throw new Error("source reset state query returned no row");
+  return row;
 }
 
 function quickBooksSubledgerFacts(): CanonicalAccountingFactSet {

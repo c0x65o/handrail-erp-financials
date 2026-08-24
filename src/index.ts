@@ -41,6 +41,10 @@ export {
   validatePostgresSchema
 } from "./postgres-storage.js";
 export {
+  SOURCE_RESET_COUNT_LIMIT,
+  resetSourceImportState
+} from "./source-import-reset.js";
+export {
   POSTGRES_MIGRATIONS,
   PostgresMigrationError,
   migratePostgresSchema,
@@ -252,6 +256,10 @@ export type {
   PostgresMigrationPlan,
   PostgresMigrationTransactionRunner
 } from "./postgres-migrations.js";
+export type {
+  ResetSourceImportStateInput,
+  SanitizedSourceResetCounts
+} from "./source-import-reset.js";
 export type {
   AppendFinancialLifecycleEventInput,
   FinancialLifecycleEventResult,

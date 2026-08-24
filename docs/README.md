@@ -42,6 +42,9 @@ same canonical model.
   runbook for full/incremental sync usage, checkpoint semantics, provider
   report reconciliation, Future ERP adoption, safe drilldown refs, prohibited
   credential/raw-payload boundaries, and validation commands.
+- [source-import-reset.md](source-import-reset.md): Transaction-client-scoped,
+  source-isolated clean retry that preserves identity, reporting configuration,
+  native/post-cutover facts, OAuth, and credentials.
 - [future-erp-dependency-handoff.md](future-erp-dependency-handoff.md):
   Reproducible local dependency/link setup for Future ERP, exact targeted
   validation commands, SDK/service package expectations, adoption flow, and the
