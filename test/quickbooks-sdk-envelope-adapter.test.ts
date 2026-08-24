@@ -678,6 +678,84 @@ describe("QuickBooks SDK envelope adapter", () => {
     expect(lineInserts.reduce((sum, params) => sum + Number(params[16]), 0)).toBe(1250);
   });
 
+  it("retains a settled QuickBooks deposit and its balanced GL without projecting accountless allocation lines", async () => {
+    const envelope = fullSyncEnvelope();
+    const resources = envelope.normalizedResources;
+    const adapted = adaptHandrailQuickBooksSdkFullSyncEnvelope({
+      ...envelope,
+      normalizedResources: {
+        ...resources,
+        transactions: (resources?.transactions ?? []).map((value) => ({
+          ...fixtureResource(value),
+          sourceObject: "Deposit",
+          transactionType: "deposit",
+          sourceObjectId: "102",
+          id: "102",
+          amount: 408,
+          documentNumber: undefined,
+          party: undefined
+        })),
+        transaction_lines: (resources?.transaction_lines ?? []).map((value) => ({
+          ...fixtureResource(value),
+          sourceObject: "Deposit",
+          transactionType: "deposit",
+          transactionId: "102",
+          sourceObjectId: "102:synthetic-line-1",
+          id: "102:synthetic-line-1",
+          lineId: "synthetic-line-1",
+          detailType: "DepositLineDetail",
+          amount: 408,
+          account: undefined,
+          item: undefined,
+          quantity: undefined,
+          unitAmount: undefined,
+          linkedTransactions: [{ transactionId: "payment_700", transactionType: "Payment" }]
+        })),
+        ledger_entries: (resources?.ledger_entries ?? []).map((value, index) => ({
+          ...fixtureResource(value),
+          sourceObject: "Deposit",
+          transactionType: "deposit",
+          transactionId: "102",
+          sourceObjectId: `102:provider-general-ledger-${String(index + 1)}`,
+          id: `102:provider-general-ledger-${String(index + 1)}`,
+          lineId: `provider-general-ledger-${String(index + 1)}`,
+          amount: 408
+        }))
+      }
+    }, adapterOptions());
+    const mapped = mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(adapted, {
+      companyId: "company_spartan",
+      accountingBasis: "accrual",
+      currencyCode: "USD"
+    });
+    const lineInserts: readonly unknown[][] = [];
+    const calls: string[] = [];
+    const result = await persistQuickBooksSubledgerResources({
+      client: {
+        query(sql, params = []) {
+          calls.push(sql);
+          if (sql.includes('insert into "erp_financials"."subledger_document_lines"')) {
+            (lineInserts as unknown[][]).push([...params]);
+          }
+          return Promise.resolve({ rows: [], rowCount: 1 });
+        }
+      },
+      companyId: "company_spartan",
+      importedAt: "2026-08-13T12:46:00.000Z",
+      facts: mapped.facts,
+      resources: adapted.resources
+    });
+
+    expect(mapped.facts.postings.map((posting) => [posting.debitAmount, posting.creditAmount])).toEqual([
+      ["408.00", "0.00"],
+      ["0.00", "408.00"]
+    ]);
+    expect(result.documents).toBe(1);
+    expect(result.documentLines).toBe(0);
+    expect(lineInserts).toHaveLength(0);
+    expect(calls.some((sql) => sql.includes('delete from "erp_financials"."subledger_document_lines"'))).toBe(true);
+  });
+
   it("still fails closed when a posting bill line has no canonical account", async () => {
     const envelope = fullSyncEnvelope();
     const resources = envelope.normalizedResources;

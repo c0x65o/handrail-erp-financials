@@ -874,7 +874,14 @@ function documentLineItemAccount(
 function importsCommercialDocumentLines(documentType: ImportedDocumentType): boolean {
   // Payment lines describe allocations to other documents; they are persisted
   // as subledger applications below, not duplicated as commercial detail.
-  return documentType !== "customer_payment" && documentType !== "bill_payment";
+  // Deposit lines likewise describe which already-recorded receipts were moved
+  // into a bank account. QuickBooks may omit an AccountRef from those lines
+  // because the balanced provider GL carries the authoritative Undeposited
+  // Funds and bank accounts. Retain the settled deposit header and its canonical
+  // ledger postings without inventing an account for an allocation line.
+  return documentType !== "customer_payment" &&
+    documentType !== "bill_payment" &&
+    documentType !== "deposit";
 }
 
 function isQuickBooksProviderOnlyNonPostingLine(detailType: string | undefined): boolean {
