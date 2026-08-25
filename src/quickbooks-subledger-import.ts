@@ -160,6 +160,7 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
   let removedLedgerPostings = 0;
   let skippedDocumentLines = 0;
   const applicationOnlyProjections = new Map<string, ApplicationOnlyProjection>();
+  const providerOffsetBillPayments = new Set<string>();
 
   for (const resource of operationalDocuments) {
     if (resource.syncAction === "voided" || resource.syncAction === "deleted" || resource.syncAction === "skipped") continue;
@@ -169,6 +170,20 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
     const transaction = transactionBySourceId.get(normalized.sourceTransactionId);
     const originalAmount = positiveAmount(normalized.totalAmount);
     if (transaction === undefined || originalAmount === undefined) {
+      if (quickBooksZeroTotalProviderOffsetBillPayment(
+        normalized,
+        transaction === undefined,
+        projectableDocumentSourceIds
+      )) {
+        // QuickBooks uses a zero-cash BillPayment as a relationship container
+        // when vendor credits exactly offset Purchase or Deposit documents.
+        // Those linked documents and their balanced journals retain the full
+        // accounting effect; the container must not create another document,
+        // application, or posting.
+        providerOffsetBillPayments.add(normalized.sourceTransactionId);
+        skippedTransactions += 1;
+        continue;
+      }
       const applicationOnly = quickBooksZeroTotalBillPaymentProjection(
         normalized,
         transaction === undefined,
@@ -364,7 +379,10 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
   for (const resource of operationalDocuments) {
     if (resource.syncAction === "voided" || resource.syncAction === "deleted" || resource.syncAction === "skipped") continue;
     const source = resource.resource;
-    if (applicationOnlyProjections.has(source.sourceTransactionId)) continue;
+    if (
+      applicationOnlyProjections.has(source.sourceTransactionId) ||
+      providerOffsetBillPayments.has(source.sourceTransactionId)
+    ) continue;
     if (importedApplicationType(source.sourceTransactionType) === undefined) continue;
     const sourceDocumentId = documentIdBySourceId.get(source.sourceTransactionId);
     if (sourceDocumentId === undefined) continue;
@@ -429,7 +447,10 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
   for (const resource of operationalDocuments) {
     if (resource.syncAction === "voided" || resource.syncAction === "deleted" || resource.syncAction === "skipped") continue;
     const source = resource.resource;
-    if (applicationOnlyProjections.has(source.sourceTransactionId)) continue;
+    if (
+      applicationOnlyProjections.has(source.sourceTransactionId) ||
+      providerOffsetBillPayments.has(source.sourceTransactionId)
+    ) continue;
     const applicationType = importedApplicationType(source.sourceTransactionType);
     if (applicationType === undefined) continue;
     const sourceDocumentId = documentIdBySourceId.get(source.sourceTransactionId);
@@ -1102,6 +1123,52 @@ type RejectedZeroTotalApplicationProjection = {
   readonly diagnostic: QuickBooksSubledgerProjectionDiagnostic;
 };
 
+function quickBooksZeroTotalProviderOffsetBillPayment(
+  transaction: NormalizedQuickBooksLedgerTransaction,
+  missingBalancedJournal: boolean,
+  projectableDocumentSourceIds: ReadonlySet<string>
+): boolean {
+  if (
+    transaction.sourceTransactionType !== "BillPayment" ||
+    transaction.totalAmount === undefined ||
+    Number(transaction.totalAmount) !== 0 ||
+    !missingBalancedJournal ||
+    transaction.lines.length === 0
+  ) {
+    return false;
+  }
+
+  let offsetDocumentTotal = 0;
+  let vendorCreditTotal = 0;
+  for (const line of transaction.lines) {
+    const amount = line.sourceAmount === undefined ? Number.NaN : Math.abs(Number(line.sourceAmount));
+    const linked = line.linkedTransactions ?? [];
+    const reference = linked.length === 1 ? linked[0] : undefined;
+    if (
+      !Number.isFinite(amount) ||
+      amount <= 0 ||
+      reference === undefined ||
+      !projectableDocumentSourceIds.has(reference.sourceTransactionId)
+    ) {
+      return false;
+    }
+    if (reference.sourceTransactionType === "VendorCredit") {
+      vendorCreditTotal += amount;
+    } else if (
+      reference.sourceTransactionType === "Purchase" ||
+      reference.sourceTransactionType === "Deposit"
+    ) {
+      offsetDocumentTotal += amount;
+    } else {
+      return false;
+    }
+  }
+
+  return offsetDocumentTotal > 0 &&
+    vendorCreditTotal > 0 &&
+    Math.abs(offsetDocumentTotal - vendorCreditTotal) <= 0.005;
+}
+
 function quickBooksZeroTotalBillPaymentProjection(
   transaction: NormalizedQuickBooksLedgerTransaction,
   missingBalancedJournal: boolean,
@@ -1265,6 +1332,7 @@ function quickBooksZeroTotalCustomerCreditProjection(
   type LinkedAmount = {
     readonly sourceTransactionId: string;
     readonly amount: number;
+    readonly lineNumber: number;
   };
   const invoices: LinkedAmount[] = [];
   const creditMemos: LinkedAmount[] = [];
@@ -1292,13 +1360,19 @@ function quickBooksZeroTotalCustomerCreditProjection(
         missingLinkedAmountCount += 1;
         continue;
       }
-      const evidence = { sourceTransactionId: reference.sourceTransactionId, amount };
+      const evidence = {
+        sourceTransactionId: reference.sourceTransactionId,
+        amount,
+        lineNumber: line.lineNumber
+      };
       if (type === "Invoice") invoices.push(evidence);
       else if (type === "CreditMemo") creditMemos.push(evidence);
       else otherLinkedAmount += amount;
     }
   }
 
+  invoices.sort(compareLinkedAmount);
+  creditMemos.sort(compareLinkedAmount);
   const invoiceTotal = invoices.reduce((sum, value) => sum + value.amount, 0);
   const creditMemoTotal = creditMemos.reduce((sum, value) => sum + value.amount, 0);
   const missingLinkedTransactionIds = [...invoices, ...creditMemos]
@@ -1314,12 +1388,16 @@ function quickBooksZeroTotalCustomerCreditProjection(
     ...(linkedTransactionCount === 0 ? ["no_linked_transactions"] : []),
     ...(invoices.length === 0 ? ["no_invoice_link"] : []),
     ...(creditMemos.length === 0 ? ["no_credit_memo_link"] : []),
-    ...(invoices.length > 1 ? ["multiple_invoice_links"] : []),
-    ...(creditMemos.length > 1 ? ["multiple_credit_memo_links"] : []),
     ...(otherLinkedAmount !== 0 || [...typeCounts.keys()].some((type) => type !== "Invoice" && type !== "CreditMemo")
       ? ["unsupported_linked_transaction_type"]
       : []),
-    ...(transaction.lines.length !== 2 || nonZeroLineCount !== 2 ? ["incomplete_application_lines"] : []),
+    ...(transaction.lines.length === 0 ||
+      transaction.lines.length !== nonZeroLineCount ||
+      transaction.lines.length !== linkedTransactionCount ||
+      invoices.length === 0 ||
+      creditMemos.length === 0
+      ? ["incomplete_application_lines"]
+      : []),
     ...(unlinkedNonZeroLineCount > 0 ? ["unlinked_nonzero_line"] : []),
     ...(multiLinkedLineCount > 0 ? ["multi_link_amount_ambiguous"] : []),
     ...(missingLinkedAmountCount > 0 ? ["missing_per_link_amount"] : []),
@@ -1363,21 +1441,33 @@ function quickBooksZeroTotalCustomerCreditProjection(
     return { eligible: false, allocations: [], diagnostic };
   }
 
-  const invoice = invoices[0];
-  const creditMemo = creditMemos[0];
-  if (invoice === undefined || creditMemo === undefined) {
-    return { eligible: false, allocations: [], diagnostic };
+  const allocations: ApplicationOnlyAllocation[] = [];
+  const remainingInvoices = invoices.map((value) => ({ ...value }));
+  const remainingCredits = creditMemos.map((value) => ({ ...value }));
+  let invoiceIndex = 0;
+  let creditIndex = 0;
+  while (invoiceIndex < remainingInvoices.length && creditIndex < remainingCredits.length) {
+    const invoice = remainingInvoices[invoiceIndex];
+    const creditMemo = remainingCredits[creditIndex];
+    if (invoice === undefined || creditMemo === undefined) break;
+    const amount = Math.min(invoice.amount, creditMemo.amount);
+    if (amount <= 0) break;
+    allocations.push({
+      sourceDocumentSourceTransactionId: creditMemo.sourceTransactionId,
+      targetDocumentSourceTransactionId: invoice.sourceTransactionId,
+      amount: amount.toFixed(2)
+    });
+    invoice.amount -= amount;
+    creditMemo.amount -= amount;
+    if (invoice.amount <= 0.005) invoiceIndex += 1;
+    if (creditMemo.amount <= 0.005) creditIndex += 1;
   }
   return {
     eligible: true,
     sourceTransactionType: "Payment",
     applicationType: "credit_to_invoice",
     projectionKind: "customer_credit_application",
-    allocations: [{
-      sourceDocumentSourceTransactionId: creditMemo.sourceTransactionId,
-      targetDocumentSourceTransactionId: invoice.sourceTransactionId,
-      amount: invoice.amount.toFixed(2)
-    }],
+    allocations,
     ...(transaction.currencyCode === undefined ? {} : { currencyCode: transaction.currencyCode }),
     transactionDate: transaction.transactionDate,
     ...(transaction.sourceUpdatedAt === undefined ? {} : { sourceUpdatedAt: transaction.sourceUpdatedAt }),

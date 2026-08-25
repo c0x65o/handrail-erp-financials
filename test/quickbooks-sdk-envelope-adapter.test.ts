@@ -289,7 +289,134 @@ describe("QuickBooks SDK envelope adapter", () => {
     ]);
   });
 
-  it("projects the staging-proven zero-cash Payment as one credit-memo application without cash postings", async () => {
+  it("skips a zero-cash BillPayment that exactly offsets a Deposit with VendorCredits", async () => {
+    const adapted = adaptHandrailQuickBooksSdkFullSyncEnvelope(fullSyncEnvelope(), adapterOptions());
+    const mapped = mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(adapted, {
+      companyId: "company_spartan",
+      accountingBasis: "accrual",
+      currencyCode: "USD"
+    });
+    const resourceTemplate = adapted.resources.operationalDocuments?.[0];
+    const transactionTemplate = mapped.facts.transactions[0];
+    if (resourceTemplate === undefined || transactionTemplate === undefined) {
+      throw new Error("QuickBooks provider-offset fixture requires a document and transaction template.");
+    }
+    const linkedDocument = (
+      sourceTransactionId: string,
+      sourceTransactionType: "Deposit" | "VendorCredit",
+      totalAmount: string
+    ) => ({
+      ...resourceTemplate,
+      resourceId: sourceTransactionId,
+      resource: {
+        ...resourceTemplate.resource,
+        sourceTransactionId,
+        sourceTransactionType,
+        totalAmount,
+        openAmount: "0.00",
+        unappliedAmount: "0.00",
+        lines: []
+      }
+    });
+    const deposit = linkedDocument("deposit_2704", "Deposit", "1948.06");
+    const firstCredit = linkedDocument("vendor_credit_1", "VendorCredit", "1000.00");
+    const secondCredit = linkedDocument("vendor_credit_2", "VendorCredit", "948.06");
+    const providerOffset = {
+      ...resourceTemplate,
+      resourceId: "2704",
+      resource: {
+        ...resourceTemplate.resource,
+        sourceTransactionId: "2704",
+        sourceTransactionType: "BillPayment",
+        totalAmount: "0.00",
+        openAmount: "0.00",
+        unappliedAmount: "0.00",
+        lines: [
+          {
+            ...resourceTemplate.resource.lines[0],
+            sourceLineId: "deposit-line",
+            lineNumber: 1,
+            sourceAmount: "1948.06",
+            linkedTransactions: [{
+              sourceTransactionId: "deposit_2704",
+              sourceTransactionType: "Deposit"
+            }],
+            postings: []
+          },
+          {
+            ...resourceTemplate.resource.lines[0],
+            sourceLineId: "credit-line-1",
+            lineNumber: 2,
+            sourceAmount: "1000.00",
+            linkedTransactions: [{
+              sourceTransactionId: "vendor_credit_1",
+              sourceTransactionType: "VendorCredit"
+            }],
+            postings: []
+          },
+          {
+            ...resourceTemplate.resource.lines[0],
+            sourceLineId: "credit-line-2",
+            lineNumber: 3,
+            sourceAmount: "948.06",
+            linkedTransactions: [{
+              sourceTransactionId: "vendor_credit_2",
+              sourceTransactionType: "VendorCredit"
+            }],
+            postings: []
+          }
+        ]
+      }
+    };
+    const calls: Array<{ sql: string; params: readonly unknown[] }> = [];
+    const result = await persistQuickBooksSubledgerResources({
+      client: {
+        query(sql, params = []) {
+          calls.push({ sql, params });
+          return Promise.resolve({ rows: [], rowCount: 1 });
+        }
+      },
+      companyId: "company_spartan",
+      importedAt: "2026-08-25T04:41:37.000Z",
+      facts: {
+        ...mapped.facts,
+        transactions: [
+          {
+            ...transactionTemplate,
+            transactionId: "transaction_deposit_2704",
+            sourceTransactionId: "deposit_2704",
+            sourceTransactionType: "Deposit"
+          },
+          {
+            ...transactionTemplate,
+            transactionId: "transaction_vendor_credit_1",
+            sourceTransactionId: "vendor_credit_1",
+            sourceTransactionType: "VendorCredit"
+          },
+          {
+            ...transactionTemplate,
+            transactionId: "transaction_vendor_credit_2",
+            sourceTransactionId: "vendor_credit_2",
+            sourceTransactionType: "VendorCredit"
+          }
+        ]
+      },
+      resources: {
+        ...adapted.resources,
+        operationalDocuments: [deposit, firstCredit, secondCredit, providerOffset]
+      }
+    });
+
+    expect(result.documents).toBe(3);
+    expect(result.skippedTransactions).toBe(1);
+    expect(result.applications).toBe(0);
+    expect(calls.some((call) =>
+      call.sql.includes('insert into "erp_financials"."subledger_documents"') &&
+      call.params[14]?.toString().includes("BillPayment:2704")
+    )).toBe(false);
+  });
+
+  it("projects Payment 1909 as two credit-memo applications without a cash document or postings", async () => {
     const adapted = adaptHandrailQuickBooksSdkFullSyncEnvelope(fullSyncEnvelope(), adapterOptions());
     const mapped = mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(adapted, {
       companyId: "company_spartan",
@@ -303,7 +430,8 @@ describe("QuickBooks SDK envelope adapter", () => {
     }
     const canonicalDocument = (
       sourceTransactionId: string,
-      sourceTransactionType: "Invoice" | "CreditMemo"
+      sourceTransactionType: "Invoice" | "CreditMemo",
+      totalAmount: string
     ) => ({
       ...resourceTemplate,
       resourceId: sourceTransactionId,
@@ -311,7 +439,7 @@ describe("QuickBooks SDK envelope adapter", () => {
         ...resourceTemplate.resource,
         sourceTransactionId,
         sourceTransactionType,
-        totalAmount: "100.00",
+        totalAmount,
         openAmount: "0.00",
         unappliedAmount: "0.00",
         lines: []
@@ -319,10 +447,10 @@ describe("QuickBooks SDK envelope adapter", () => {
     });
     const applicationOnlyPayment = {
       ...resourceTemplate,
-      resourceId: "74",
+      resourceId: "1909",
       resource: {
         ...resourceTemplate.resource,
-        sourceTransactionId: "74",
+        sourceTransactionId: "1909",
         sourceTransactionType: "Payment",
         totalAmount: "0.00",
         openAmount: "0.00",
@@ -338,10 +466,18 @@ describe("QuickBooks SDK envelope adapter", () => {
           },
           {
             ...resourceTemplate.resource.lines[0],
-            sourceLineId: "invoice-line",
+            sourceLineId: "invoice-line-1",
             lineNumber: 2,
-            sourceAmount: "100.00",
+            sourceAmount: "60.00",
             linkedTransactions: [{ sourceTransactionId: "invoice_72", sourceTransactionType: "Invoice" }],
+            postings: []
+          },
+          {
+            ...resourceTemplate.resource.lines[0],
+            sourceLineId: "invoice-line-2",
+            lineNumber: 3,
+            sourceAmount: "40.00",
+            linkedTransactions: [{ sourceTransactionId: "invoice_75", sourceTransactionType: "Invoice" }],
             postings: []
           }
         ]
@@ -356,6 +492,12 @@ describe("QuickBooks SDK envelope adapter", () => {
           ...transactionTemplate,
           transactionId: "transaction_invoice_72",
           sourceTransactionId: "invoice_72",
+          sourceTransactionType: "Invoice"
+        },
+        {
+          ...transactionTemplate,
+          transactionId: "transaction_invoice_75",
+          sourceTransactionId: "invoice_75",
           sourceTransactionType: "Invoice"
         },
         {
@@ -380,36 +522,56 @@ describe("QuickBooks SDK envelope adapter", () => {
       resources: {
         ...adapted.resources,
         operationalDocuments: [
-          canonicalDocument("invoice_72", "Invoice"),
-          canonicalDocument("credit_73", "CreditMemo"),
+          canonicalDocument("invoice_72", "Invoice", "60.00"),
+          canonicalDocument("invoice_75", "Invoice", "40.00"),
+          canonicalDocument("credit_73", "CreditMemo", "100.00"),
           applicationOnlyPayment
         ]
       }
     });
 
-    expect(result).toMatchObject({ documents: 2, applications: 1, skippedApplications: 0 });
-    expect(applicationFacts.transactions.some((transaction) => transaction.sourceTransactionId === "74")).toBe(false);
+    expect(result).toMatchObject({ documents: 3, applications: 2, skippedApplications: 0 });
+    expect(applicationFacts.transactions.some((transaction) => transaction.sourceTransactionId === "1909")).toBe(false);
     expect(applicationFacts.postings).toHaveLength(0);
-    const applicationInsert = calls.find((call) =>
+    const applicationInserts = calls.filter((call) =>
       call.params[4] === "credit_to_invoice" &&
       call.sql.includes('insert into "erp_financials"."subledger_applications"')
     );
-    expect(applicationInsert?.params.slice(5, 10)).toEqual([
-      expect.stringMatching(/^qbo_document_/),
-      expect.stringMatching(/^qbo_document_/),
-      "100.00",
-      "USD",
-      "2026-08-13"
+    expect(applicationInserts.map((call) => call.params.slice(5, 10))).toEqual([
+      [
+        expect.stringMatching(/^qbo_document_/),
+        expect.stringMatching(/^qbo_document_/),
+        "60.00",
+        "USD",
+        "2026-08-13"
+      ],
+      [
+        expect.stringMatching(/^qbo_document_/),
+        expect.stringMatching(/^qbo_document_/),
+        "40.00",
+        "USD",
+        "2026-08-13"
+      ]
     ]);
-    const provenanceEvent = calls.find((call) =>
+    expect(applicationInserts[0]?.params[5]).toBe(applicationInserts[1]?.params[5]);
+    expect(applicationInserts[0]?.params[6]).not.toBe(applicationInserts[1]?.params[6]);
+    const provenanceEvents = calls.filter((call) =>
       call.sql.includes('insert into "erp_financials"."financial_lifecycle_events"') &&
       JSON.stringify(call.params).includes("customer_credit_application")
     );
-    expect(provenanceEvent?.params).toEqual(expect.arrayContaining([
-      expect.stringContaining('"sourceTransactionId":"74"'),
-      expect.stringContaining('"creditMemoSourceTransactionId":"credit_73"'),
-      expect.stringContaining('"invoiceSourceTransactionId":"invoice_72"')
+    expect(provenanceEvents).toHaveLength(2);
+    expect(provenanceEvents.map((call) => call.params[11])).toEqual([
+      expect.stringContaining('"sourceTransactionId":"1909"'),
+      expect.stringContaining('"sourceTransactionId":"1909"')
+    ]);
+    expect(provenanceEvents.map((call) => call.params[11])).toEqual(expect.arrayContaining([
+      expect.stringContaining('"creditMemoSourceTransactionId":"credit_73","invoiceSourceTransactionId":"invoice_72"'),
+      expect.stringContaining('"creditMemoSourceTransactionId":"credit_73","invoiceSourceTransactionId":"invoice_75"')
     ]));
+    expect(calls.some((call) =>
+      call.sql.includes('insert into "erp_financials"."subledger_documents"') &&
+      call.params[14]?.toString().includes("Payment:1909")
+    )).toBe(false);
   });
 
   it("fails closed for incomplete, mismatched, ambiguous, and unsupported zero-total Payment applications", async () => {
@@ -470,9 +632,15 @@ describe("QuickBooks SDK envelope adapter", () => {
         reason: "invoice_credit_totals_mismatch"
       },
       {
-        name: "ambiguous",
-        lines: [creditLine, invoiceLine, { ...invoiceLine, sourceLineId: "invoice-line-2", lineNumber: 3 }],
-        reason: "multiple_invoice_links"
+        name: "ambiguous per-link amount",
+        lines: [{
+          ...creditLine,
+          linkedTransactions: [
+            { sourceTransactionId: "credit_73", sourceTransactionType: "CreditMemo" },
+            { sourceTransactionId: "credit_73", sourceTransactionType: "CreditMemo" }
+          ]
+        }, invoiceLine],
+        reason: "multi_link_amount_ambiguous"
       },
       {
         name: "unsupported",
