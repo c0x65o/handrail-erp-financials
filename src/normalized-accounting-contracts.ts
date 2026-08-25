@@ -21,6 +21,7 @@ import type {
   SyncCheckpointStatus,
   TenantId
 } from "./canonical-model.js";
+import type { SourceRecordDisposition } from "./source-record-dispositions.js";
 
 export type NormalizedAccountingSyncMode = "full" | "incremental" | "backfill" | "reprocess";
 
@@ -180,6 +181,7 @@ export type NormalizedAccountingSyncEnvelopeFields<Mode extends NormalizedAccoun
   readonly resourceCounts: NormalizedAccountingResourceCounts;
   readonly warningSummary?: NormalizedAccountingSyncIssueSummary;
   readonly errorSummary?: NormalizedAccountingSyncIssueSummary;
+  readonly recordDispositions?: readonly SourceRecordDisposition[];
   readonly idempotencyKey: string;
   readonly idempotencyKeys: NormalizedAccountingSyncIdempotencyKeys;
 };

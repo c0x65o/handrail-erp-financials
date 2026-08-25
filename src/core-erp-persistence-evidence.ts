@@ -15,11 +15,13 @@ import type {
 import type { CanonicalFactPersistenceResult } from "./canonical-fact-persistence.js";
 import type { ReportFreshnessRow } from "./postgres-storage.js";
 import type { CanonicalAccountingFactSet } from "./source-adapters.js";
+import type { SourceRecordDisposition } from "./source-record-dispositions.js";
 
 export const CORE_ERP_PERSISTENCE_EVIDENCE_DEFAULT_SOURCE_REF_LIMIT = 25;
 export const CORE_ERP_PERSISTENCE_EVIDENCE_DEFAULT_FRESHNESS_ROW_LIMIT = 25;
 export const CORE_ERP_PERSISTENCE_EVIDENCE_DEFAULT_CHANGED_RESOURCE_LIMIT = 50;
 export const CORE_ERP_PERSISTENCE_EVIDENCE_DEFAULT_DRILLDOWN_POSTING_LIMIT = 100;
+export const CORE_ERP_PERSISTENCE_EVIDENCE_DEFAULT_DISPOSITION_LIMIT = 50;
 
 export type CoreErpPersistenceEvidenceImportBatchSummary = {
   readonly importBatchId: string;
@@ -109,6 +111,13 @@ export type CoreErpPersistenceEvidenceChangedResourcesSummary = {
   readonly actions: readonly CoreErpPersistenceEvidenceChangedResourceAction[];
 };
 
+export type CoreErpPersistenceEvidenceDispositionSummary = {
+  readonly total: number;
+  readonly returned: number;
+  readonly truncated: boolean;
+  readonly records: readonly SourceRecordDisposition[];
+};
+
 export type CoreErpPersistenceEvidence = {
   readonly tenantId: string;
   readonly companyId: string;
@@ -123,6 +132,7 @@ export type CoreErpPersistenceEvidence = {
   readonly freshness: CoreErpPersistenceEvidenceFreshnessSummary;
   readonly sourceReferences: CoreErpPersistenceEvidenceSourceReferences;
   readonly changedResources: CoreErpPersistenceEvidenceChangedResourcesSummary;
+  readonly recordDispositions?: CoreErpPersistenceEvidenceDispositionSummary;
 };
 
 export type BuildCoreErpPersistenceEvidenceInput = {
@@ -133,10 +143,12 @@ export type BuildCoreErpPersistenceEvidenceInput = {
   readonly sourceRefs?: readonly SafeSourcePayloadRef[];
   readonly resumeFromCheckpointId?: string;
   readonly changedResourceActions?: readonly CoreErpPersistenceEvidenceChangedResourceAction[];
+  readonly recordDispositions?: readonly SourceRecordDisposition[];
   readonly maxSourceRefs?: number;
   readonly maxFreshnessRows?: number;
   readonly maxChangedResourceActions?: number;
   readonly maxDrilldownPostingIds?: number;
+  readonly maxRecordDispositions?: number;
 };
 
 export function buildCoreErpPersistenceEvidence(input: BuildCoreErpPersistenceEvidenceInput): CoreErpPersistenceEvidence {
@@ -154,6 +166,8 @@ export function buildCoreErpPersistenceEvidence(input: BuildCoreErpPersistenceEv
     input.maxChangedResourceActions ?? CORE_ERP_PERSISTENCE_EVIDENCE_DEFAULT_CHANGED_RESOURCE_LIMIT;
   const maxDrilldownPostingIds =
     input.maxDrilldownPostingIds ?? CORE_ERP_PERSISTENCE_EVIDENCE_DEFAULT_DRILLDOWN_POSTING_LIMIT;
+  const maxRecordDispositions =
+    input.maxRecordDispositions ?? CORE_ERP_PERSISTENCE_EVIDENCE_DEFAULT_DISPOSITION_LIMIT;
   const sourceRefs = collectSafeSourceRefs(input);
   const boundedSourceRefs = sourceRefs.slice(0, maxSourceRefs);
   const freshnessRows = (input.freshnessRows ?? []).map(toEvidenceFreshnessRow);
@@ -162,6 +176,9 @@ export function buildCoreErpPersistenceEvidence(input: BuildCoreErpPersistenceEv
   const changedActions = [...(input.changedResourceActions ?? [])];
   assertNoCredentialKeys(changedActions);
   const boundedChangedActions = changedActions.slice(0, maxChangedResourceActions);
+  const dispositions = [...(input.recordDispositions ?? [])];
+  assertNoCredentialKeys(dispositions);
+  const boundedDispositions = dispositions.slice(0, maxRecordDispositions);
   const freshThrough = maxIsoDateTime([...freshnessRows.map((row) => row.freshThrough), input.facts.checkpoint.freshThrough]);
   const accountingBasis = input.facts.postings[0]?.accountingBasis;
 
@@ -252,7 +269,17 @@ export function buildCoreErpPersistenceEvidence(input: BuildCoreErpPersistenceEv
       returned: boundedChangedActions.length,
       truncated: changedActions.length > boundedChangedActions.length,
       actions: boundedChangedActions
-    }
+    },
+    ...(dispositions.length === 0
+      ? {}
+      : {
+          recordDispositions: {
+            total: dispositions.length,
+            returned: boundedDispositions.length,
+            truncated: dispositions.length > boundedDispositions.length,
+            records: boundedDispositions
+          }
+        })
   };
 
   return evidence;
@@ -341,6 +368,7 @@ function collectSafeSourceRefs(input: BuildCoreErpPersistenceEvidenceInput): rea
       transaction.sourcePayloadRef === undefined ? [] : [transaction.sourcePayloadRef]
     ),
     ...input.facts.postings.flatMap((posting) => (posting.sourcePayloadRef === undefined ? [] : [posting.sourcePayloadRef])),
+    ...(input.recordDispositions ?? []).map((disposition) => disposition.sourcePayloadRef),
     ...(input.sourceRefs ?? [])
   ];
   const deduplicated = new Map<string, SafeSourcePayloadRef>();

@@ -52,6 +52,10 @@ import type {
   NormalizedQuickBooksTrialBalanceReportRequestEnvelope,
   NormalizedQuickBooksTrialBalanceReportResponseEnvelope
 } from "./normalized-accounting-contracts.js";
+import {
+  assertSourceRecordDispositionAdvisories,
+  assertSourceRecordDispositionsExcluded
+} from "./source-record-dispositions.js";
 
 export type HandrailQuickBooksIncrementalSyncRequest =
   NormalizedQuickBooksIncrementalSyncRequestEnvelope & {
@@ -283,6 +287,8 @@ export function buildNormalizedQuickBooksFullSyncResponse(
 
   const resources = sanitizeQuickBooksResourceSet(providerResources);
   validateResourceSetIdentity(request.sourceIdentity, resources);
+  assertSourceRecordDispositionsExcluded(resources, request.recordDispositions, request.importBatchId);
+  assertSourceRecordDispositionAdvisories(request.warningSummary, request.recordDispositions);
 
   const resourceCounts = countQuickBooksResources(resources);
   const importBatch = normalizeFullSyncImportBatch(request, resources.importBatch, resourceCounts);
@@ -304,6 +310,7 @@ export function buildNormalizedQuickBooksFullSyncResponse(
     resourceCounts,
     ...(request.warningSummary === undefined ? {} : { warningSummary: request.warningSummary }),
     ...(request.errorSummary === undefined ? {} : { errorSummary: request.errorSummary }),
+    ...(request.recordDispositions === undefined ? {} : { recordDispositions: request.recordDispositions }),
     idempotencyKey: request.idempotencyKey,
     idempotencyKeys: {
       ...request.idempotencyKeys,
@@ -331,6 +338,8 @@ export function buildNormalizedQuickBooksIncrementalSyncResponse(
 
   const resources = sanitizeQuickBooksSyncResourceSet(providerResources);
   validateResourceSetIdentity(request.sourceIdentity, resources);
+  assertSourceRecordDispositionsExcluded(resources, request.recordDispositions, request.importBatchId);
+  assertSourceRecordDispositionAdvisories(request.warningSummary, request.recordDispositions);
 
   const resourceCounts = countQuickBooksResources(resources);
   const importBatch = normalizeIncrementalSyncImportBatch(request, resources.importBatch, resourceCounts);
@@ -353,6 +362,7 @@ export function buildNormalizedQuickBooksIncrementalSyncResponse(
     resourceCounts,
     ...(request.warningSummary === undefined ? {} : { warningSummary: request.warningSummary }),
     ...(request.errorSummary === undefined ? {} : { errorSummary: request.errorSummary }),
+    ...(request.recordDispositions === undefined ? {} : { recordDispositions: request.recordDispositions }),
     idempotencyKey: request.idempotencyKey,
     idempotencyKeys: {
       ...request.idempotencyKeys,

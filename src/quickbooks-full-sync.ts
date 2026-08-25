@@ -22,6 +22,10 @@ import type {
   NormalizedQuickBooksResourceSet
 } from "./normalized-accounting-contracts.js";
 import type { QuickBooksSubledgerImportResult } from "./quickbooks-subledger-import.js";
+import {
+  assertSourceRecordDispositionAdvisories,
+  assertSourceRecordDispositionsExcluded
+} from "./source-record-dispositions.js";
 
 export type QuickBooksFullSyncClient = Pick<HandrailQuickBooksFullSyncServiceHandler, "fullSync">;
 
@@ -95,7 +99,10 @@ export function createQuickBooksFullSyncWorker(options: QuickBooksFullSyncWorker
         evidence: buildCoreErpPersistenceEvidence({
           facts: mapped.facts,
           persistence,
-          generatedAt: mapped.adapterInput.context.importedAt
+          generatedAt: mapped.adapterInput.context.importedAt,
+          ...(response.recordDispositions === undefined
+            ? {}
+            : { recordDispositions: response.recordDispositions })
         }),
         ...(removedLedgerFacts === undefined ? {} : { removedLedgerFacts })
       };
@@ -146,6 +153,8 @@ export function mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(
   options: QuickBooksFullSyncMapOptions
 ): QuickBooksFullSyncMapResult {
   assertNoCredentialKeys(response);
+  assertSourceRecordDispositionsExcluded(response.resources, response.recordDispositions, response.importBatchId);
+  assertSourceRecordDispositionAdvisories(response.warningSummary, response.recordDispositions);
   const resources = fullSyncResourcesWithEnvelopeMetadata(response);
   const baseAdapterInput = adaptNormalizedQuickBooksResourceSetToAdapterInput(resources, {
     ...(options.accountingBasis === undefined ? {} : { accountingBasis: options.accountingBasis }),

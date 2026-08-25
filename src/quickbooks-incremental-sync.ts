@@ -23,6 +23,10 @@ import type {
 } from "./normalized-accounting-contracts.js";
 import type { PostgresStorageAdapter } from "./postgres-storage.js";
 import type { QuickBooksSubledgerImportResult } from "./quickbooks-subledger-import.js";
+import {
+  assertSourceRecordDispositionAdvisories,
+  assertSourceRecordDispositionsExcluded
+} from "./source-record-dispositions.js";
 
 export type QuickBooksIncrementalSyncClient = Pick<HandrailQuickBooksFullSyncServiceHandler, "incrementalSync">;
 
@@ -100,7 +104,10 @@ export function createQuickBooksIncrementalSyncWorker(
           persistence,
           generatedAt: mapped.adapterInput.context.importedAt,
           ...(mapped.resumeFromCheckpointId === undefined ? {} : { resumeFromCheckpointId: mapped.resumeFromCheckpointId }),
-          changedResourceActions: mapped.changedResourceActions
+          changedResourceActions: mapped.changedResourceActions,
+          ...(response.recordDispositions === undefined
+            ? {}
+            : { recordDispositions: response.recordDispositions })
         })
       };
     }
@@ -128,6 +135,8 @@ export function mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts(
   options: QuickBooksIncrementalSyncMapOptions & { readonly resumeFromCheckpointId?: SyncCheckpointId }
 ): QuickBooksIncrementalSyncMapResult {
   assertNoCredentialKeys(response);
+  assertSourceRecordDispositionsExcluded(response.resources, response.recordDispositions, response.importBatchId);
+  assertSourceRecordDispositionAdvisories(response.warningSummary, response.recordDispositions);
   const resources = incrementalSyncResourcesWithEnvelopeMetadata(response);
   const originalAccountSourceIds = new Set((response.resources.accounts ?? []).map((resource) => resource.resource.sourceAccountId));
   const baseAdapterInput = adaptNormalizedQuickBooksResourceSetToAdapterInput(resources, {

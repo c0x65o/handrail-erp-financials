@@ -104,6 +104,7 @@ export {
 export {
   CORE_ERP_PERSISTENCE_EVIDENCE_DEFAULT_CHANGED_RESOURCE_LIMIT,
   CORE_ERP_PERSISTENCE_EVIDENCE_DEFAULT_DRILLDOWN_POSTING_LIMIT,
+  CORE_ERP_PERSISTENCE_EVIDENCE_DEFAULT_DISPOSITION_LIMIT,
   CORE_ERP_PERSISTENCE_EVIDENCE_DEFAULT_FRESHNESS_ROW_LIMIT,
   CORE_ERP_PERSISTENCE_EVIDENCE_DEFAULT_SOURCE_REF_LIMIT,
   buildCoreErpPersistenceEvidence
@@ -136,6 +137,7 @@ export {
   adaptHandrailQuickBooksSdkIncrementalSyncEnvelope,
   adaptHandrailQuickBooksSdkSyncEnvelope
 } from "./quickbooks-sdk-envelope-adapter.js";
+export { consumeSourceRecordDispositions } from "./source-record-dispositions.js";
 export { createFutureErpQuickBooksIncrementalSyncWorker } from "./future-erp-quickbooks-incremental-sync.js";
 export {
   generateFutureErpCanonicalReportSnapshotsFromImport,
@@ -696,6 +698,7 @@ export type {
   CoreErpPersistenceEvidenceChangedResourceAction,
   CoreErpPersistenceEvidenceChangedResourcesSummary,
   CoreErpPersistenceEvidenceCheckpointSummary,
+  CoreErpPersistenceEvidenceDispositionSummary,
   CoreErpPersistenceEvidenceFreshnessRow,
   CoreErpPersistenceEvidenceFreshnessSummary,
   CoreErpPersistenceEvidenceImportBatchSummary,
@@ -993,6 +996,13 @@ export type {
   HandrailQuickBooksSdkNormalizedResourceMap,
   HandrailQuickBooksSdkNormalizedSyncEnvelope
 } from "./quickbooks-sdk-envelope-adapter.js";
+export type {
+  ConsumeSourceRecordDispositionsInput,
+  ConsumedSourceRecordDispositions,
+  SourceDispositionResourceMap,
+  SourceRecordDisposition,
+  SourceRecordDispositionKind
+} from "./source-record-dispositions.js";
 export type {
   BuiltReport,
   CashFlowActivity,

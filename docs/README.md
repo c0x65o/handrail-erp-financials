@@ -39,6 +39,9 @@ same canonical model.
   P&L, balance sheet, cash flow, expenses, and drilldown.
 - [quickbooks-boundary.md](quickbooks-boundary.md): How this package should
   consume the existing QuickBooks integration without owning OAuth or tokens.
+- [source-record-dispositions.md](source-record-dispositions.md): Strict,
+  provider-neutral zero-effect disposition validation, projection bypass,
+  provenance, retry, warning, and reconciliation-evidence contract.
 - [storage-host-app-handoff.md](storage-host-app-handoff.md): Worker-facing
   contract between QuickBooks SDK/service output, host-app orchestration, and
   ERP Financials canonical storage. This is the normalized QuickBooks handoff

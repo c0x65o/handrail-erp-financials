@@ -441,6 +441,13 @@ Use `adaptHandrailQuickBooksSdkIncrementalSyncEnvelope` with
 The adapter only reshapes safe normalized SDK data; it does not call Intuit,
 retain credentials, or infer accounting postings in the host app.
 
+Both adapters also consume explicit per-record zero-effect dispositions through
+the provider-neutral `SourceRecordDisposition` contract. Accepted records are
+excluded from canonical projection but remain visible in import warnings,
+source provenance, and persistence evidence; malformed, contradictory, or
+data-mismatched dispositions fail before persistence. See
+[source-record-dispositions.md](docs/source-record-dispositions.md).
+
 For service and SDK boundaries, the package also exports normalized QuickBooks
 resource contracts such as `NormalizedQuickBooksResourceSet`,
 `NormalizedQuickBooksCompanyInfoResource`, `NormalizedQuickBooksAccountResource`,

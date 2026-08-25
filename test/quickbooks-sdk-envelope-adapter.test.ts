@@ -124,7 +124,7 @@ describe("QuickBooks SDK envelope adapter", () => {
     });
   });
 
-  it("replays a staged zero-effect BillPayment as voided without creating an active payment", async () => {
+  it("honors an explicit normalized void action without creating an active payment", async () => {
     const envelope = fullSyncEnvelope();
     const resources = envelope.normalizedResources;
     const stagedEnvelope = {
@@ -136,7 +136,7 @@ describe("QuickBooks SDK envelope adapter", () => {
           sourceObject: "BillPayment",
           transactionType: "bill_payment",
           amount: 0,
-          privateNote: "Voided bill payment"
+          syncAction: "voided"
         })),
         transaction_lines: (resources?.transaction_lines ?? []).map((value) => ({
           ...fixtureResource(value),

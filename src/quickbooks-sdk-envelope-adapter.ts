@@ -28,6 +28,8 @@ import type {
   NormalizedQuickBooksResourceSet,
   NormalizedQuickBooksSourceIdentity
 } from "./normalized-accounting-contracts.js";
+import { consumeSourceRecordDispositions } from "./source-record-dispositions.js";
+import type { SourceRecordDisposition } from "./source-record-dispositions.js";
 
 const QUICKBOOKS_SDK_SYNC_CONTRACT_ID = "handrail.quickbooks.normalized-sync-envelope.v1";
 const MAX_SOURCE_REF_BYTES = 512;
@@ -103,6 +105,7 @@ export type HandrailQuickBooksSdkNormalizedSyncEnvelope = {
   readonly normalizedResources?: HandrailQuickBooksSdkNormalizedResourceMap;
   readonly normalizedCompleteness?: HandrailQuickBooksSdkNormalizedCompletenessMap;
   readonly normalizationWarnings?: readonly HandrailQuickBooksSdkNormalizationWarning[];
+  readonly providerDispositions?: readonly unknown[];
   readonly deltaCounts: HandrailQuickBooksSdkDeltaCounts;
   readonly audit: {
     readonly checkpointId?: string;
@@ -138,6 +141,7 @@ export type HandrailQuickBooksSdkNormalizedSyncEnvelope = {
     readonly audit?: {
       readonly sourcePayloadRef?: string;
     };
+    readonly providerDispositions?: readonly unknown[];
   };
 };
 
@@ -167,6 +171,7 @@ export type HandrailQuickBooksSdkEnvelopeEvidence = {
   readonly deltaCounts: HandrailQuickBooksSdkDeltaCounts;
   readonly normalizedCompleteness?: HandrailQuickBooksSdkNormalizedCompletenessMap;
   readonly normalizationWarnings?: readonly HandrailQuickBooksSdkNormalizationWarning[];
+  readonly recordDispositions?: readonly SourceRecordDisposition[];
 };
 
 export type HandrailQuickBooksSdkAdaptedFullSyncEnvelope =
@@ -192,8 +197,8 @@ export function adaptHandrailQuickBooksSdkFullSyncEnvelope(
   options: HandrailQuickBooksSdkEnvelopeAdapterOptions
 ): HandrailQuickBooksSdkAdaptedFullSyncEnvelope {
   const context = prepareAdapterContext(response, options);
-  const resources = mapSdkResources(response, context);
-  const common = adaptedEnvelopeFields(response, context, resources);
+  const mapped = mapSdkResources(response, context);
+  const common = adaptedEnvelopeFields(response, context, mapped.resources, mapped.recordDispositions);
   const adapted: HandrailQuickBooksSdkAdaptedFullSyncEnvelope = {
     ...common,
     syncMode: "full",
@@ -208,8 +213,8 @@ export function adaptHandrailQuickBooksSdkIncrementalSyncEnvelope(
   options: HandrailQuickBooksSdkEnvelopeAdapterOptions
 ): HandrailQuickBooksSdkAdaptedIncrementalSyncEnvelope {
   const context = prepareAdapterContext(response, options);
-  const resources = mapSdkResources(response, context);
-  const common = adaptedEnvelopeFields(response, context, resources);
+  const mapped = mapSdkResources(response, context);
+  const common = adaptedEnvelopeFields(response, context, mapped.resources, mapped.recordDispositions);
   const adapted: HandrailQuickBooksSdkAdaptedIncrementalSyncEnvelope = {
     ...common,
     syncMode: "incremental",
@@ -243,7 +248,7 @@ function prepareAdapterContext(
   if (contractId !== QUICKBOOKS_SDK_SYNC_CONTRACT_ID) {
     throw new Error(`Unsupported QuickBooks SDK sync contract: ${contractId}`);
   }
-  assertNoCredentialKeys(response);
+  assertSdkEnvelopeNoCredentials(response);
   const normalizedResources = response.normalizedResources;
   if (normalizedResources === undefined) {
     throw new Error("QuickBooks SDK sync envelope does not include normalizedResources.");
@@ -311,11 +316,19 @@ type AdaptedQuickBooksResourceSet = NormalizedQuickBooksResourceSet & {
 function mapSdkResources(
   response: HandrailQuickBooksSdkNormalizedSyncEnvelope,
   context: AdapterContext
-): AdaptedQuickBooksResourceSet {
-  const input = response.normalizedResources;
-  if (input === undefined) {
+): { readonly resources: AdaptedQuickBooksResourceSet; readonly recordDispositions: readonly SourceRecordDisposition[] } {
+  const normalizedResources = response.normalizedResources;
+  if (normalizedResources === undefined) {
     throw new Error("QuickBooks SDK sync envelope does not include normalizedResources.");
   }
+  const consumed = consumeSourceRecordDispositions({
+    importBatchId: response.importBatchId,
+    rootDispositions: response.providerDispositions,
+    nestedDispositions: response.syncJob.providerDispositions,
+    normalizedResources,
+    skippedCount: response.deltaCounts.skippedCount
+  });
+  const input = consumed.normalizedResources;
   const latestSourceUpdatedAt = latestResourceUpdatedAt(input);
   const checkpoint = {
     checkpointId: context.checkpointId,
@@ -333,7 +346,7 @@ function mapSdkResources(
     ...(latestSourceUpdatedAt === undefined ? {} : { latestSourceUpdatedAt }),
     status: checkpointStatus(response.status)
   };
-  const issueSummary = sdkWarningSummary(response);
+  const issueSummary = sdkWarningSummary(response, consumed.dispositions);
   const importBatch = {
     importBatchId: response.importBatchId,
     syncMode: response.syncMode,
@@ -353,7 +366,7 @@ function mapSdkResources(
     input.transaction_lines ?? []
   );
 
-  return {
+  const resources: AdaptedQuickBooksResourceSet = {
     identity: context.sourceIdentity,
     importBatch,
     checkpoint,
@@ -371,6 +384,7 @@ function mapSdkResources(
     classes: (input.classes ?? []).map((value, index) => classResource(context, value, index)),
     departments: (input.locations ?? []).map((value, index) => departmentResource(context, value, index))
   };
+  return { resources, recordDispositions: consumed.dispositions };
 }
 
 function operationalDocumentResources(
@@ -423,15 +437,7 @@ function operationalDocumentResources(
     const emailStatus = optionalString(header, "emailStatus");
     const printStatus = optionalString(header, "printStatus");
     const memo = optionalString(header, "privateNote");
-    const syncAction = operationalDocumentAction(
-      header,
-      context,
-      metadata.sourceObject,
-      totalAmount,
-      memo,
-      operationalLines,
-      ledger
-    );
+    const syncAction = resourceAction(header, context);
     const resource: NormalizedQuickBooksLedgerTransaction = {
       sourceTransactionId: metadata.sourceObjectId,
       sourceTransactionType: metadata.sourceObject,
@@ -468,42 +474,6 @@ function operationalDocumentResources(
       syncAction
     );
   });
-}
-
-function operationalDocumentAction(
-  header: Record<string, unknown>,
-  context: AdapterContext,
-  sourceObject: string,
-  totalAmount: number | undefined,
-  memo: string | undefined,
-  lines: readonly Record<string, unknown>[],
-  ledger: NormalizedQuickBooksLedgerTransactionResource | undefined
-): NormalizedAccountingSyncResourceAction | undefined {
-  const explicitAction = optionalString(header, "syncAction");
-  if (explicitAction !== undefined) return resourceAction(header, context);
-
-  if (sourceObject !== "BillPayment" || totalAmount !== 0 || ledger !== undefined) {
-    return context.syncAction;
-  }
-
-  const explicitlyVoided = memo !== undefined && /\bvoid(?:ed)?\b/i.test(memo);
-  const hasLinkedTransactions = lines.some((line) => {
-    const linked = line.linkedTransactions;
-    return Array.isArray(linked) && linked.length > 0;
-  });
-  const hasNonZeroLineAmount = lines.some((line) => {
-    const amount = optionalNumber(line, "amount");
-    return amount !== undefined && amount !== 0;
-  });
-
-  // Compatibility path for staged batches created before the connector
-  // persisted syncAction. A zero cash total can represent credit/application
-  // activity, so infer a void only when the memo says so or no economic/link
-  // evidence remains. Ambiguous records keep their normal action and fail
-  // closed in the subledger projection with structured diagnostics.
-  return explicitlyVoided || (!hasLinkedTransactions && !hasNonZeroLineAmount)
-    ? "voided"
-    : context.syncAction;
 }
 
 function operationalDocumentLine(
@@ -563,9 +533,10 @@ function operationalDocumentLine(
 function adaptedEnvelopeFields(
   response: HandrailQuickBooksSdkNormalizedSyncEnvelope,
   context: AdapterContext,
-  resources: AdaptedQuickBooksResourceSet
+  resources: AdaptedQuickBooksResourceSet,
+  recordDispositions: readonly SourceRecordDisposition[]
 ) {
-  const warningSummary = sdkWarningSummary(response);
+  const warningSummary = sdkWarningSummary(response, recordDispositions);
   const resourceCounts = normalizeResourceCounts(response.normalizedResourceCounts);
   const idempotencyKey = `quickbooks-sdk:${context.tenantId}:${response.importBatchId}`;
   const status = importBatchStatus(response.status, warningSummary);
@@ -606,6 +577,7 @@ function adaptedEnvelopeFields(
     sdkContractId: QUICKBOOKS_SDK_SYNC_CONTRACT_ID as typeof QUICKBOOKS_SDK_SYNC_CONTRACT_ID,
     sdkSyncJobId: response.jobId,
     deltaCounts: response.deltaCounts,
+    ...(recordDispositions.length === 0 ? {} : { recordDispositions }),
     ...(response.normalizedCompleteness === undefined
       ? {}
       : { normalizedCompleteness: response.normalizedCompleteness }),
@@ -1176,7 +1148,8 @@ function validateNormalizedResourceIdentity(
 }
 
 function sdkWarningSummary(
-  response: HandrailQuickBooksSdkNormalizedSyncEnvelope
+  response: HandrailQuickBooksSdkNormalizedSyncEnvelope,
+  recordDispositions: readonly SourceRecordDisposition[] = []
 ): NormalizedAccountingSyncIssueSummary | undefined {
   const issues: NormalizedAccountingSyncIssue[] = (response.normalizationWarnings ?? []).map((warning) => ({
     code: warning.code,
@@ -1203,7 +1176,25 @@ function sdkWarningSummary(
       });
     }
   }
+  for (const disposition of recordDispositions) {
+    issues.push({
+      code: "source_record_disposition",
+      message: `Source record was explicitly excluded from canonical financial projection: ${disposition.reason}.`,
+      severity: "warning",
+      resourceType: disposition.sourceRecordType,
+      resourceId: disposition.sourceRecordId,
+      sourcePayloadRef: disposition.sourcePayloadRef
+    });
+  }
   return issues.length === 0 ? undefined : { count: issues.length, items: issues };
+}
+
+function assertSdkEnvelopeNoCredentials(response: HandrailQuickBooksSdkNormalizedSyncEnvelope): void {
+  const envelope = { ...response };
+  const syncJob = { ...response.syncJob };
+  delete envelope.providerDispositions;
+  delete syncJob.providerDispositions;
+  assertNoCredentialKeys({ ...envelope, syncJob });
 }
 
 function importBatchStatus(
