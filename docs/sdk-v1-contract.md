@@ -98,7 +98,8 @@ cutover and two source charts mapped onto one book chart.
 - `paymentMatching`: append-only accept/reject decisions and atomic
   accept-and-apply.
 - `bankReconciliation`: idempotent feed ingest, exact bank-posting match,
-  approved unmatch, and ignore.
+  approved optimistic-concurrency unmatch using persisted match evidence,
+  ignore, and independently approved audited unignore/reopen.
 - `queries`: cursor-paginated invoices, vendor bills, payments, credits/refunds, general
   ledger, chart of accounts, financial statements, dashboard, A/R and A/P
   aging, bank review, invoice delivery history, customer-payment/application
@@ -112,6 +113,16 @@ The query layer returns decimal strings and owns SQL, status derivation,
 effective-source filtering, account mapping, hierarchy roll-up, aging buckets,
 and dashboard signs. Routes and UI components should call these methods rather
 than query financial tables.
+
+Matched bank-review rows are a durable command bridge: a row discriminated by
+`status: "matched"` includes both `bankReconciliationMatchId` and
+`bankReconciliationMatchVersion` from the persisted active match. Hosts use
+those values after a reload rather than retaining only the match command
+response. Ignored rows can return to `unmatched` only through
+`bankReconciliation.unignore` at the current statement-line version. That
+correction requires an actor and different approver plus request, correlation,
+reason code/detail, and occurrence evidence; stale commands roll back, and an
+identical request retry does not append duplicate lifecycle or outbox rows.
 
 The screen summaries have accounting-specific semantics. Invoice outstanding
 and overdue totals exclude drafts and voids; unsent draft value is separate;

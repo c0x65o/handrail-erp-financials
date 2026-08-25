@@ -58,7 +58,7 @@ aging totals, and reconciliation totals.
 | Document | Preserve stable invoice draft, issued invoice, customer-payment, vendor-bill, and bill-payment IDs or deterministic source crosswalks. Preserve document numbers as business evidence, not as the only identity. |
 | Transaction | Preserve the canonical `transactionId` returned or crosswalked for journal detail, reversal, correction, and statement-line matching. |
 | Application | Preserve `paymentApplicationId`; apply/unapply addresses the canonical application rather than editing balances locally. |
-| Statement line | Keep the bank feed's stable `externalLineId`, the canonical `bankStatementLineId`, and the resulting `bankReconciliationMatchId`. A monthly statement balance alone is not reconciliation identity. |
+| Statement line | Keep the bank feed's stable `externalLineId` and canonical `bankStatementLineId`. For a matched line, reload `bankReconciliationMatchId` and `bankReconciliationMatchVersion` from `listBankReconciliation`; command-response-only evidence is insufficient. A monthly statement balance alone is not reconciliation identity. |
 | Idempotency | Derive one stable `idempotencyKey` for each logical command and reuse it for an identical retry. Do not generate a new key merely because an HTTP request was retried. |
 | Request and correlation | Every mutation carries a stable `operation.requestId` and an end-to-end `operation.correlationId`; BLU may also keep its HTTP identifiers in its route layer. |
 | Actor | Set `operation.actorRef` to the authenticated BLU principal after BLU authorization. Never accept the durable actor solely from request JSON. |
@@ -102,7 +102,8 @@ aging totals, and reconciliation totals.
 | Schedule, clear, or cancel a bill payment | `sdk.commands.billPayments.schedule`, `sdk.commands.billPayments.clear`, `sdk.commands.billPayments.cancel` | Keep instruction and accounting lifecycle canonical; clearing is the posting transition. |
 | Void and unapply a bill payment | `sdk.commands.billPayments.voidAndUnapply` | Independent approval and one compensating canonical operation. |
 | Ingest a bank statement line | `sdk.bankReconciliation.ingest` | Stable external line ID, account, date, currency, and decimal amount. |
-| Match, unmatch, or ignore a statement line | `sdk.bankReconciliation.match`, `sdk.bankReconciliation.unmatch`, `sdk.bankReconciliation.ignore` | Match individual canonical statement lines to transactions; unmatch requires independent approval. BLU's period-close UI references this evidence rather than replacing it with statement-level totals. |
+| Match or unmatch a statement line | `sdk.bankReconciliation.match`, `sdk.bankReconciliation.unmatch` | Match individual canonical statement lines to transactions. After any reload, unmatch uses the persisted `bankReconciliationMatchId` and `bankReconciliationMatchVersion` returned by the bounded reconciliation read. A stale match version returns `optimistic_concurrency_conflict` before audit or state mutation. |
+| Ignore or reopen a statement line | `sdk.bankReconciliation.ignore`, `sdk.bankReconciliation.unignore` | Ignore an unmatched line at its current line version. Reopening is the audited `ignored` to `unmatched` correction: it requires actor, distinct approver, stable request/correlation IDs, reason code and detail, occurrence time, and the reloaded statement-line version. A stale version conflicts without mutation; retrying the identical request ID returns the same resulting open line without duplicate audit or outbox evidence. |
 
 The harness is the allowlist. Other SDK features are not part of the approved
 BLU adapter contract until the harness and this document are deliberately
@@ -127,7 +128,7 @@ same accounting result in application code.
 | Customer-payment register and detail | `sdk.queries.listPayments`, `sdk.queries.getCustomerPayment` | Filtered customer-payment page and exact canonical receipt/application evidence. |
 | Bill-payment register, detail, and totals | `sdk.queries.listBillPayments`, `sdk.queries.getBillPayment`, `sdk.queries.getBillPaymentSummary` | Bounded disbursement lifecycle, allocations, posting evidence, and complete filtered summary. |
 | Payment applications and totals | `sdk.queries.listPaymentApplications`, `sdk.queries.getPaymentApplication`, `sdk.queries.getPaymentSummary` | Bounded application evidence and complete filtered payment KPIs. |
-| Reconciliation review and totals | `sdk.queries.listBankReconciliation`, `sdk.queries.getBankReconciliationSummary` | Bounded individual-line review plus complete canonical reconciliation totals. |
+| Reconciliation review and totals | `sdk.queries.listBankReconciliation`, `sdk.queries.getBankReconciliationSummary` | Bounded individual-line review plus complete canonical reconciliation totals. Every `status: "matched"` item includes its persisted match ID and match version so a host can unmatch safely after reload; ignored and open lines retain their statement-line version for correction concurrency. |
 | Profit and loss | `sdk.queries.getFinancialStatement({ reportName: "profit_and_loss", ... })` | Canonical statement lines and totals for the requested period. |
 | Balance sheet | `sdk.queries.getFinancialStatement({ reportName: "balance_sheet", ... })` | Canonical as-of book balances. |
 | Trial balance | `sdk.queries.getFinancialStatement({ reportName: "trial_balance", ... })` | Canonical debit/credit balance evidence. |

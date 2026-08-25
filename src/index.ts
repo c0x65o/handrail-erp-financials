@@ -396,7 +396,8 @@ export type {
   BankReconciliationService,
   BankStatementLineResult,
   IngestBankStatementLineInput,
-  MatchBankStatementLineInput
+  MatchBankStatementLineInput,
+  UnignoreBankStatementLineInput
 } from "./bank-reconciliation.js";
 export type {
   BeginFiscalPeriodCloseInput,

@@ -11,6 +11,12 @@ canonical facts, effective-dated reporting books, a book-owned chart, source
 mappings, journal/subledger commands, invoice lifecycle, atomic matching,
 bank reconciliation, book-aware statements/dashboard/aging/list reads,
 transactional outbox runtime, workers, fixtures, health, and focused tests.
+The BLU-shaped reconciliation boundary also carries persisted match identity
+and match version on every reloaded matched line, and supports an audited,
+independently approved `ignored` to `unmatched` correction. Hosts must use the
+current persisted match or statement-line version, treat stale versions as
+conflicts without mutation, and reuse the same operation request ID when
+retrying a correction.
 
 The next milestone is first-application adoption through
 `@handrail/erp-financials/sdk`. Any missing financial edge case found there

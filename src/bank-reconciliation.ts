@@ -46,6 +46,12 @@ export type MatchBankStatementLineInput = {
   readonly method: "automatic" | "manual";
 };
 
+export type UnignoreBankStatementLineInput = {
+  readonly operation: FinancialOperationContext;
+  readonly bankStatementLineId: string;
+  readonly expectedVersion: number;
+};
+
 export type BankReconciliationMatchResult = {
   readonly status: "matched" | "already_matched" | "unmatched" | "voided";
   readonly bankReconciliationMatchId: string;
@@ -61,6 +67,7 @@ export type BankReconciliationService = {
   match(input: MatchBankStatementLineInput): Promise<BankReconciliationMatchResult>;
   unmatch(input: { readonly operation: FinancialOperationContext; readonly bankReconciliationMatchId: string; readonly expectedVersion: number }): Promise<BankReconciliationMatchResult>;
   ignore(input: { readonly operation: FinancialOperationContext; readonly bankStatementLineId: string; readonly expectedVersion: number }): Promise<BankStatementLineResult>;
+  unignore(input: UnignoreBankStatementLineInput): Promise<BankStatementLineResult>;
 };
 
 type Scope = {
@@ -98,7 +105,8 @@ export function createBankReconciliationService(input: {
     ingest: (command) => ingest(scope, command),
     match: (command) => match(scope, command),
     unmatch: (command) => unmatch(scope, command),
-    ignore: (command) => ignore(scope, command)
+    ignore: (command) => ignore(scope, command),
+    unignore: (command) => unignore(scope, command)
   };
 }
 
@@ -302,6 +310,81 @@ where "tenant_id" = $1 and "company_id" = $2 and "book_id" = $3 and "bank_statem
       { bankStatementLineId: input.bankStatementLineId });
     void lifecycleEvent;
     return bankLineResult(row);
+  });
+}
+
+async function unignore(scope: Scope, input: UnignoreBankStatementLineInput): Promise<BankStatementLineResult> {
+  assertIndependentApproval(input.operation);
+  if (input.operation.reasonDetail === undefined) {
+    throw new ErpFinancialsError(
+      "authorization_context_invalid",
+      "operation.reasonDetail is required when reopening an ignored bank statement line"
+    );
+  }
+  assertVersion(input.expectedVersion);
+  const lifecycleIdempotencyKey = `bank-line:${input.bankStatementLineId}:unignored:request:${input.operation.requestId}`;
+  const outboxIdempotencyKey = `bank-line:${input.bankStatementLineId}:outbox:unignored:request:${input.operation.requestId}`;
+  const payload = {
+    priorVersion: input.expectedVersion,
+    resultingVersion: input.expectedVersion + 1
+  } as const;
+  return scope.database.transaction(async (client) => {
+    const result = await client.query(
+      `select * from "erp_financials"."bank_statement_lines"
+where "tenant_id" = $1 and "company_id" = $2 and "book_id" = $3 and "bank_statement_line_id" = $4 for update`,
+      [scope.tenantId, scope.companyId, scope.bookId, input.bankStatementLineId]
+    );
+    const row = requiredRow(result.rows[0], "bank statement line");
+    const lifecycleEvent = await appendFinancialLifecycleEvent(client, lifecycle(scope, input.operation, {
+      aggregateType: "bank_statement_line",
+      aggregateId: input.bankStatementLineId,
+      eventType: "bank_statement_line.unignored",
+      idempotencyKey: lifecycleIdempotencyKey,
+      payload
+    }));
+    if (lifecycleEvent.status === "already_recorded") {
+      if (row.status !== "unmatched" || integer(row.version, "version") !== input.expectedVersion + 1) {
+        throw new ErpFinancialsError(
+          "idempotency_conflict",
+          `Bank statement line reopen request ${input.operation.requestId} no longer has its stable resulting state`
+        );
+      }
+      await outbox(
+        client,
+        scope,
+        "bank_statement_line.unignored",
+        "bank_statement_line",
+        input.bankStatementLineId,
+        outboxIdempotencyKey,
+        { bankStatementLineId: input.bankStatementLineId, resultingVersion: input.expectedVersion + 1 }
+      );
+      return bankLineResult(row);
+    }
+    if (integer(row.version, "version") !== input.expectedVersion) {
+      throw concurrency(input.bankStatementLineId, input.expectedVersion);
+    }
+    if (row.status !== "ignored") {
+      throw new ErpFinancialsError("reconciliation_conflict", "Only an ignored bank statement line can be reopened");
+    }
+    const updated = await client.query(
+      `update "erp_financials"."bank_statement_lines"
+set "status" = 'unmatched', "version" = "version" + 1, "updated_at" = $5
+where "tenant_id" = $1 and "company_id" = $2 and "book_id" = $3 and "bank_statement_line_id" = $4
+  and "status" = 'ignored' and "version" = $6 returning *`,
+      [scope.tenantId, scope.companyId, scope.bookId, input.bankStatementLineId, scope.now(), input.expectedVersion]
+    );
+    const reopened = updated.rows[0];
+    if (reopened === undefined) throw concurrency(input.bankStatementLineId, input.expectedVersion);
+    await outbox(
+      client,
+      scope,
+      "bank_statement_line.unignored",
+      "bank_statement_line",
+      input.bankStatementLineId,
+      outboxIdempotencyKey,
+      { bankStatementLineId: input.bankStatementLineId, resultingVersion: input.expectedVersion + 1 }
+    );
+    return bankLineResult(reopened);
   });
 }
 

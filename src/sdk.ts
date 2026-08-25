@@ -279,7 +279,8 @@ export type {
   BankReconciliationService,
   BankStatementLineResult,
   IngestBankStatementLineInput,
-  MatchBankStatementLineInput
+  MatchBankStatementLineInput,
+  UnignoreBankStatementLineInput
 } from "./bank-reconciliation.js";
 export type { AcceptPaymentMatchInput, AcceptPaymentMatchResult, PaymentMatchingService } from "./payment-matching.js";
 export type {

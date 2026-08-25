@@ -155,6 +155,10 @@ const migrationFiles = {
   sourceImportResetV21: new URL(
     "../migrations/future-erp/20260823010000_add_source_import_reset_guard.sql",
     import.meta.url
+  ),
+  bankStatementLineUnignoreV22: new URL(
+    "../migrations/future-erp/20260825010000_add_bank_statement_line_unignore.sql",
+    import.meta.url
   )
 } as const;
 
@@ -288,6 +292,13 @@ export const POSTGRES_MIGRATIONS: readonly PostgresMigrationDefinition[] = [
     20,
     21,
     migrationFiles.sourceImportResetV21
+  ),
+  migration(
+    "20260825010000_add_bank_statement_line_unignore",
+    "Add audited reversible ignored bank statement line lifecycle",
+    21,
+    22,
+    migrationFiles.bankStatementLineUnignoreV22
   )
 ] as const;
 

@@ -49,7 +49,7 @@ describeIntegration("ERP Financials real PostgreSQL", () => {
     expect(result.targetVersion).toBe(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion);
     expect(result.applied.at(-1)?.toVersion).toBe(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion);
     expect(schema).toMatchObject({ compatible: true, fixtureSupport: true, issues: [] });
-    expect(history).toMatchObject({ compatible: true, currentVersion: 21, issues: [] });
+    expect(history).toMatchObject({ compatible: true, currentVersion: 22, issues: [] });
     await expect(
       pool.query("update erp_financials.schema_migrations set name = 'tampered' where to_version = 20")
     ).rejects.toThrow("schema migration history is append-only");
@@ -1623,6 +1623,20 @@ where tenant_id = 'tenant_1' and source_id = 'source_1' and transaction_id = 'jo
       idempotencyKey: "bank-match-1001",
       method: "manual"
     })).resolves.toMatchObject({ status: "matched", matchedAmount: "25.00" });
+    const reloadedMatchedPage = await sdk.queries.listBankReconciliation({ status: "matched", limit: 25 });
+    const reloadedMatchedLine = reloadedMatchedPage.items.find(
+      (line) => line.bankStatementLineId === bankLine.bankStatementLineId
+    );
+    expect(reloadedMatchedLine).toMatchObject({
+      status: "matched",
+      bankReconciliationMatchVersion: 1,
+      matchedTransactionId: payment.journal.transactionId,
+      matchMethod: "manual",
+      version: 2
+    });
+    if (reloadedMatchedLine === undefined || reloadedMatchedLine.status !== "matched") {
+      throw new Error("Expected the matched line to reload with durable match evidence");
+    }
 
     const invoice = await sdk.queries.getInvoice(issued.invoiceDocumentId, "2026-08-12");
     expect(invoice).toMatchObject({ status: "paid", openAmount: "0.00", originalAmount: "25.00" });
@@ -1693,6 +1707,139 @@ where tenant_id = 'tenant_1' and source_id = 'source_1' and transaction_id = 'jo
       expect.objectContaining({ bookAccountKey: "service_revenue", directAmount: "25.00", amount: "25.00" })
     ]);
     await expect(sdk.queries.getBankReconciliationSummary()).resolves.toMatchObject({ matchedCount: 1 });
+
+    const staleMatchEvidence = await reconciliationEvidenceCounts(
+      pool,
+      reloadedMatchedLine.bankReconciliationMatchId,
+      "bank_reconciliation.unmatched"
+    );
+    await expect(sdk.bankReconciliation.unmatch({
+      operation: { ...operation, requestId: "request:stale-bank-unmatch" },
+      bankReconciliationMatchId: reloadedMatchedLine.bankReconciliationMatchId,
+      expectedVersion: reloadedMatchedLine.bankReconciliationMatchVersion + 1
+    })).rejects.toMatchObject({ code: "optimistic_concurrency_conflict" });
+    await expect(reconciliationEvidenceCounts(
+      pool,
+      reloadedMatchedLine.bankReconciliationMatchId,
+      "bank_reconciliation.unmatched"
+    )).resolves.toEqual(staleMatchEvidence);
+
+    await expect(sdk.bankReconciliation.unmatch({
+      operation: { ...operation, requestId: "request:bank-unmatch" },
+      bankReconciliationMatchId: reloadedMatchedLine.bankReconciliationMatchId,
+      expectedVersion: reloadedMatchedLine.bankReconciliationMatchVersion
+    })).resolves.toMatchObject({ status: "unmatched", version: 2 });
+    const reloadedUnmatchedPage = await sdk.queries.listBankReconciliation({ status: "unmatched", limit: 25 });
+    const reloadedUnmatchedLine = reloadedUnmatchedPage.items.find(
+      (line) => line.bankStatementLineId === bankLine.bankStatementLineId
+    );
+    expect(reloadedUnmatchedLine).toMatchObject({ status: "unmatched", version: 3 });
+    if (reloadedUnmatchedLine === undefined) throw new Error("Expected the unmatched bank line to reload");
+
+    await expect(sdk.bankReconciliation.ignore({
+      operation: { ...operation, requestId: "request:bank-ignore" },
+      bankStatementLineId: reloadedUnmatchedLine.bankStatementLineId,
+      expectedVersion: reloadedUnmatchedLine.version
+    })).resolves.toMatchObject({ status: "ignored", version: 4 });
+    const reloadedIgnoredPage = await sdk.queries.listBankReconciliation({ status: "ignored", limit: 25 });
+    const reloadedIgnoredLine = reloadedIgnoredPage.items.find(
+      (line) => line.bankStatementLineId === bankLine.bankStatementLineId
+    );
+    expect(reloadedIgnoredLine).toMatchObject({ status: "ignored", version: 4 });
+    if (reloadedIgnoredLine === undefined) throw new Error("Expected the ignored bank line to reload");
+
+    const reopenOperation = {
+      ...operation,
+      requestId: "request:bank-unignore",
+      correlationId: "correlation:bank-correction",
+      reasonCode: "bank_line_ignored_in_error",
+      reasonDetail: "Controller approved reopening the incorrectly ignored bank statement line"
+    } as const;
+    const beforeRejectedReopen = await reconciliationEvidenceCounts(
+      pool,
+      reloadedIgnoredLine.bankStatementLineId,
+      "bank_statement_line.unignored"
+    );
+    const { approverRef: omittedApproverRef, ...missingApproverOperation } = reopenOperation;
+    const { reasonDetail: omittedReasonDetail, ...missingReasonDetailOperation } = reopenOperation;
+    void omittedApproverRef;
+    void omittedReasonDetail;
+    await expect(sdk.bankReconciliation.unignore({
+      operation: { ...reopenOperation, requestId: "request:stale-bank-unignore" },
+      bankStatementLineId: reloadedIgnoredLine.bankStatementLineId,
+      expectedVersion: reloadedIgnoredLine.version - 1
+    })).rejects.toMatchObject({ code: "optimistic_concurrency_conflict" });
+    await expect(sdk.bankReconciliation.unignore({
+      operation: { ...missingApproverOperation, requestId: "request:missing-approver" },
+      bankStatementLineId: reloadedIgnoredLine.bankStatementLineId,
+      expectedVersion: reloadedIgnoredLine.version
+    })).rejects.toMatchObject({ code: "authorization_context_invalid" });
+    await expect(sdk.bankReconciliation.unignore({
+      operation: { ...reopenOperation, requestId: "request:missing-actor", actorRef: "" },
+      bankStatementLineId: reloadedIgnoredLine.bankStatementLineId,
+      expectedVersion: reloadedIgnoredLine.version
+    })).rejects.toMatchObject({ code: "authorization_context_invalid" });
+    await expect(sdk.bankReconciliation.unignore({
+      operation: { ...missingReasonDetailOperation, requestId: "request:missing-reason-detail" },
+      bankStatementLineId: reloadedIgnoredLine.bankStatementLineId,
+      expectedVersion: reloadedIgnoredLine.version
+    })).rejects.toMatchObject({ code: "authorization_context_invalid" });
+    await expect(sdk.bankReconciliation.unignore({
+      operation: { ...reopenOperation, requestId: "request:self-approved", approverRef: reopenOperation.actorRef },
+      bankStatementLineId: reloadedIgnoredLine.bankStatementLineId,
+      expectedVersion: reloadedIgnoredLine.version
+    })).rejects.toMatchObject({ code: "authorization_context_invalid" });
+    await expect(reconciliationEvidenceCounts(
+      pool,
+      reloadedIgnoredLine.bankStatementLineId,
+      "bank_statement_line.unignored"
+    )).resolves.toEqual(beforeRejectedReopen);
+
+    const reopened = await sdk.bankReconciliation.unignore({
+      operation: reopenOperation,
+      bankStatementLineId: reloadedIgnoredLine.bankStatementLineId,
+      expectedVersion: reloadedIgnoredLine.version
+    });
+    expect(reopened).toMatchObject({ status: "unmatched", version: 5 });
+    await expect(sdk.queries.listBankReconciliation({ status: "unmatched", limit: 25 })).resolves.toMatchObject({
+      items: [expect.objectContaining({
+        bankStatementLineId: reloadedIgnoredLine.bankStatementLineId,
+        status: "unmatched",
+        version: 5
+      })]
+    });
+    const firstReopenEvidence = await reconciliationEvidenceCounts(
+      pool,
+      reloadedIgnoredLine.bankStatementLineId,
+      "bank_statement_line.unignored"
+    );
+    expect(firstReopenEvidence).toEqual({ auditCount: 1, outboxCount: 1 });
+    await expect(sdk.bankReconciliation.unignore({
+      operation: reopenOperation,
+      bankStatementLineId: reloadedIgnoredLine.bankStatementLineId,
+      expectedVersion: reloadedIgnoredLine.version
+    })).resolves.toEqual(reopened);
+    await expect(reconciliationEvidenceCounts(
+      pool,
+      reloadedIgnoredLine.bankStatementLineId,
+      "bank_statement_line.unignored"
+    )).resolves.toEqual(firstReopenEvidence);
+    await expect(pool.query(
+      `select actor_ref, approver_ref, request_id, correlation_id, reason_code, reason_detail, occurred_at
+from erp_financials.financial_lifecycle_events
+where aggregate_id = $1 and event_type = 'bank_statement_line.unignored'`,
+      [reloadedIgnoredLine.bankStatementLineId]
+    )).resolves.toMatchObject({
+      rows: [{
+        actor_ref: reopenOperation.actorRef,
+        approver_ref: reopenOperation.approverRef,
+        request_id: reopenOperation.requestId,
+        correlation_id: reopenOperation.correlationId,
+        reason_code: reopenOperation.reasonCode,
+        reason_detail: reopenOperation.reasonDetail,
+        occurred_at: new Date(reopenOperation.occurredAt)
+      }]
+    });
 
     const delivered: string[] = [];
     const runtimeResult = await sdk.createRuntime({
@@ -2235,6 +2382,24 @@ function sdkOperation() {
     reasonCode: "sdk_integration_test",
     occurredAt: "2026-08-12T11:59:00.000Z"
   } as const;
+}
+
+async function reconciliationEvidenceCounts(
+  pool: Pool,
+  aggregateId: string,
+  eventType: string
+): Promise<{ readonly auditCount: number; readonly outboxCount: number }> {
+  const result = await pool.query<{ audit_count: number; outbox_count: number }>(
+    `select
+  (select count(*)::integer from erp_financials.financial_lifecycle_events
+   where aggregate_id = $1 and event_type = $2) as audit_count,
+  (select count(*)::integer from erp_financials.financial_outbox
+   where aggregate_id = $1 and event_type = $2) as outbox_count`,
+    [aggregateId, eventType]
+  );
+  const row = result.rows[0];
+  if (row === undefined) throw new Error("Expected reconciliation evidence counts");
+  return { auditCount: row.audit_count, outboxCount: row.outbox_count };
 }
 
 async function seedSubledgerDocuments(pool: Pool): Promise<void> {

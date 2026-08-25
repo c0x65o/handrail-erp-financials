@@ -53,8 +53,8 @@ export type PostgresTableManifest = {
 };
 
 export type PostgresSchemaManifest = {
-  readonly manifestVersion: "2026-08-23.source-import-reset";
-  readonly schemaVersion: 21;
+  readonly manifestVersion: "2026-08-25.bank-statement-line-unignore";
+  readonly schemaVersion: 22;
   readonly dialect: "postgres";
   readonly namespace: "erp_financials";
   readonly requiredTriggers: readonly PostgresTriggerManifest[];
@@ -144,8 +144,8 @@ const table = (
 });
 
 export const POSTGRES_CANONICAL_SCHEMA_MANIFEST: PostgresSchemaManifest = {
-  manifestVersion: "2026-08-23.source-import-reset",
-  schemaVersion: 21,
+  manifestVersion: "2026-08-25.bank-statement-line-unignore",
+  schemaVersion: 22,
   dialect: "postgres",
   namespace: "erp_financials",
   requiredTriggers: [

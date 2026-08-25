@@ -836,7 +836,7 @@ export type AgingReport = {
   readonly totals: Omit<AgingRow, "partyId" | "partyName">;
 };
 
-export type BankReconciliationListItem = {
+type BankReconciliationListItemBase = {
   readonly bankStatementLineId: string;
   readonly sourceId: string;
   readonly bankAccountId: string;
@@ -846,11 +846,25 @@ export type BankReconciliationListItem = {
   readonly currencyCode: IsoCurrencyCode;
   readonly description?: string;
   readonly reference?: string;
-  readonly status: "unmatched" | "matched" | "ignored";
   readonly version: number;
-  readonly matchedTransactionId?: string;
-  readonly matchMethod?: "automatic" | "manual";
 };
+
+export type BankReconciliationListItem = BankReconciliationListItemBase & (
+  | {
+      readonly status: "matched";
+      readonly bankReconciliationMatchId: string;
+      readonly bankReconciliationMatchVersion: number;
+      readonly matchedTransactionId: string;
+      readonly matchMethod: "automatic" | "manual";
+    }
+  | {
+      readonly status: "unmatched" | "ignored";
+      readonly bankReconciliationMatchId?: undefined;
+      readonly bankReconciliationMatchVersion?: undefined;
+      readonly matchedTransactionId?: undefined;
+      readonly matchMethod?: undefined;
+    }
+);
 
 export type BankReconciliationSummary = {
   readonly currencyCode: IsoCurrencyCode;
@@ -4779,7 +4793,8 @@ async function listBankReconciliation(
   return scope.database.transaction(async (client) => {
     const book = await resolveBook(client, scope);
     const result = await client.query(
-      `select line.*, match."transaction_id", match."method"
+      `select line.*, match."bank_reconciliation_match_id", match."version" as "bank_reconciliation_match_version",
+  match."transaction_id", match."method"
 from "erp_financials"."bank_statement_lines" line
 left join "erp_financials"."bank_reconciliation_matches" match
   on match."tenant_id" = line."tenant_id" and match."company_id" = line."company_id" and match."book_id" = line."book_id"
@@ -5985,9 +6000,8 @@ function commercialLineFromRow(row: Readonly<Record<string, unknown>>): Commerci
 function bankLineFromRow(row: Readonly<Record<string, unknown>>): BankReconciliationListItem {
   const description = optionalString(row.description);
   const reference = optionalString(row.reference);
-  const transactionId = optionalString(row.transaction_id);
-  const method = optionalString(row.method) as BankReconciliationListItem["matchMethod"];
-  return {
+  const status = string(row.status, "status");
+  const base = {
     bankStatementLineId: string(row.bank_statement_line_id, "bank_statement_line_id"),
     sourceId: string(row.source_id, "source_id"),
     bankAccountId: string(row.bank_account_id, "bank_account_id"),
@@ -5997,11 +6011,22 @@ function bankLineFromRow(row: Readonly<Record<string, unknown>>): BankReconcilia
     currencyCode: string(row.currency_code, "currency_code"),
     ...(description === undefined ? {} : { description }),
     ...(reference === undefined ? {} : { reference }),
-    status: string(row.status, "status") as BankReconciliationListItem["status"],
-    version: integer(row.version, "version"),
-    ...(transactionId === undefined ? {} : { matchedTransactionId: transactionId }),
-    ...(method === undefined ? {} : { matchMethod: method })
+    version: integer(row.version, "version")
   };
+  if (status === "matched") {
+    const method = string(row.method, "method");
+    if (method !== "automatic" && method !== "manual") throw new Error(`Stored reconciliation method ${method} is invalid`);
+    return {
+      ...base,
+      status,
+      bankReconciliationMatchId: string(row.bank_reconciliation_match_id, "bank_reconciliation_match_id"),
+      bankReconciliationMatchVersion: integer(row.bank_reconciliation_match_version, "bank_reconciliation_match_version"),
+      matchedTransactionId: string(row.transaction_id, "transaction_id"),
+      matchMethod: method
+    };
+  }
+  if (status === "unmatched" || status === "ignored") return { ...base, status };
+  throw new Error(`Stored bank statement line status ${status} is invalid`);
 }
 
 function partyFromRow(row: Readonly<Record<string, unknown>>): PartyListItem {

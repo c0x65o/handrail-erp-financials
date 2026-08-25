@@ -27,6 +27,7 @@ import type {
   PaymentListItem,
   PaymentSummary,
   PostingLockReadModel,
+  UnignoreBankStatementLineInput,
   VendorBillDetail,
   VendorBillListItem,
   VendorBillSummary
@@ -630,16 +631,39 @@ async function compileBluBankReconciliationCommands(
     idempotencyKey: "blu-bank-line-1001-match",
     method: "manual"
   });
+  const matchedPage = await sdk.queries.listBankReconciliation({ status: "matched", limit: 50 });
+  const reloadedMatch = matchedPage.items.find(
+    (line) => line.bankStatementLineId === BLU_FINANCIAL_IDS.bankStatementLineId
+  );
+  if (reloadedMatch === undefined || reloadedMatch.status !== "matched") {
+    throw new Error("The matched statement line must reload with durable match evidence");
+  }
   await sdk.bankReconciliation.unmatch({
     operation: approvedOperation,
-    bankReconciliationMatchId: BLU_FINANCIAL_IDS.bankReconciliationMatchId,
-    expectedVersion: 1
+    bankReconciliationMatchId: reloadedMatch.bankReconciliationMatchId,
+    expectedVersion: reloadedMatch.bankReconciliationMatchVersion
   });
+  const unmatchedPage = await sdk.queries.listBankReconciliation({ status: "unmatched", limit: 50 });
+  const reloadedUnmatchedLine = unmatchedPage.items.find(
+    (line) => line.bankStatementLineId === BLU_FINANCIAL_IDS.bankStatementLineId
+  );
+  if (reloadedUnmatchedLine === undefined) throw new Error("The unmatched statement line must reload");
   await sdk.bankReconciliation.ignore({
-    operation,
+    operation: approvedOperation,
     bankStatementLineId: BLU_FINANCIAL_IDS.bankStatementLineId,
-    expectedVersion: 2
+    expectedVersion: reloadedUnmatchedLine.version
   });
+  const ignoredPage = await sdk.queries.listBankReconciliation({ status: "ignored", limit: 50 });
+  const reloadedIgnoredLine = ignoredPage.items.find(
+    (line) => line.bankStatementLineId === BLU_FINANCIAL_IDS.bankStatementLineId
+  );
+  if (reloadedIgnoredLine === undefined) throw new Error("The ignored statement line must reload");
+  const unignoreCommand: UnignoreBankStatementLineInput = {
+    operation: approvedOperation,
+    bankStatementLineId: reloadedIgnoredLine.bankStatementLineId,
+    expectedVersion: reloadedIgnoredLine.version
+  };
+  await sdk.bankReconciliation.unignore(unignoreCommand);
 }
 
 function bluOperation(requestId: string, independentlyApproved = false): BluOperation {
@@ -649,6 +673,7 @@ function bluOperation(requestId: string, independentlyApproved = false): BluOper
     requestId,
     correlationId: "correlation_blu_contract",
     reasonCode: "blu_financial_operation",
+    reasonDetail: "Compile the supported BLU financial kernel contract",
     occurredAt: "2026-08-01T12:00:00.000Z"
   };
 }

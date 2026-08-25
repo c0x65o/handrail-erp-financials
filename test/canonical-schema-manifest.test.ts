@@ -34,11 +34,15 @@ const WRITE_OFF_APPLICATION_UPGRADE_SQL = readFileSync(
   new URL("../migrations/future-erp/20260815030000_add_write_off_invoice_applications.sql", import.meta.url),
   "utf8"
 );
+const BANK_STATEMENT_LINE_UNIGNORE_UPGRADE_SQL = readFileSync(
+  new URL("../migrations/future-erp/20260825010000_add_bank_statement_line_unignore.sql", import.meta.url),
+  "utf8"
+);
 
 describe("canonical schema manifest", () => {
   it("is versioned and covers the documented canonical entities", () => {
-    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.manifestVersion).toBe("2026-08-23.source-import-reset");
-    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion).toBe(21);
+    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.manifestVersion).toBe("2026-08-25.bank-statement-line-unignore");
+    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion).toBe(22);
 
     const tableNames = POSTGRES_CANONICAL_SCHEMA_MANIFEST.tables.map((table) => table.name);
 
@@ -255,12 +259,26 @@ describe("canonical schema manifest", () => {
       [17, 18],
       [18, 19],
       [19, 20],
-      [20, 21]
+      [20, 21],
+      [21, 22]
     ]);
     expect(renderPostgresSchemaSql()).toContain('create table if not exists "erp_financials"."schema_migrations"');
     expect(FUTURE_ERP_CANONICAL_SCHEMA_MIGRATION_SQL).not.toMatch(
       /\b(token|secret|credential|password|client_secret|access_token|refresh_token|raw_provider_payload|raw_payload)\b/i
     );
+  });
+
+  it("adds only the guarded ignored-to-unmatched bank statement line transition", () => {
+    expect(BANK_STATEMENT_LINE_UNIGNORE_UPGRADE_SQL).toContain(
+      `(old."status" = 'ignored' and new."status" = 'unmatched')`
+    );
+    expect(BANK_STATEMENT_LINE_UNIGNORE_UPGRADE_SQL).toContain(
+      `new."version" <> old."version" + 1`
+    );
+    expect(BANK_STATEMENT_LINE_UNIGNORE_UPGRADE_SQL).toContain(
+      `"erp_financials"."source_import_reset_scope_allowed"`
+    );
+    expect(BANK_STATEMENT_LINE_UNIGNORE_UPGRADE_SQL).not.toContain("drop table");
   });
 
   it("ships a fail-closed v6 to v7 report snapshot scope upgrade", () => {
