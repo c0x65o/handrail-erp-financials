@@ -10,6 +10,8 @@ import {
   QuickBooksSubledgerProjectionError
 } from "../src/index.js";
 import type {
+  HandrailQuickBooksSdkAdaptedFullSyncEnvelope,
+  HandrailQuickBooksSdkAdaptedIncrementalSyncEnvelope,
   HandrailQuickBooksSdkFullSyncEnvelope,
   HandrailQuickBooksSdkIncrementalSyncEnvelope,
   HandrailQuickBooksSdkNormalizedResourceMap
@@ -122,6 +124,73 @@ describe("QuickBooks SDK envelope adapter", () => {
       cursorKind: "updated_since",
       cursorValue: "2026-08-13T13:00:00.000Z"
     });
+  });
+
+  it.each(["full", "incremental"] as const)(
+    "maps arbitrary Class identities into provider-neutral reporting dimensions for %s sync",
+    (mode) => {
+      const base = mode === "full" ? fullSyncEnvelope() : incrementalSyncEnvelope();
+      const classId = "class:arbitrary/reporting-42";
+      const parentId = "class:arbitrary/parent-7";
+      const template = fixtureResource(base.normalizedResources?.accounts?.[0]);
+      const response = {
+        ...base,
+        normalizedResources: {
+          ...base.normalizedResources,
+          classes: [{
+            ...template,
+            id: `accounting_class_${classId}`,
+            sourceObject: "Class",
+            sourceObjectId: classId,
+            name: "Service Line",
+            displayName: "Professional Services:Service Line",
+            parentRef: { value: parentId, name: "Professional Services" },
+          }],
+        },
+      };
+      const adapted = mode === "full"
+        ? adaptHandrailQuickBooksSdkFullSyncEnvelope(response as HandrailQuickBooksSdkFullSyncEnvelope, adapterOptions())
+        : adaptHandrailQuickBooksSdkIncrementalSyncEnvelope(response as HandrailQuickBooksSdkIncrementalSyncEnvelope, adapterOptions());
+      const mapped = mode === "full"
+        ? mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(adapted as HandrailQuickBooksSdkAdaptedFullSyncEnvelope, {
+            companyId: "company_spartan", accountingBasis: "accrual", currencyCode: "USD",
+          })
+        : mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts(adapted as HandrailQuickBooksSdkAdaptedIncrementalSyncEnvelope, {
+            companyId: "company_spartan", accountingBasis: "accrual", currencyCode: "USD",
+            resumeFromCheckpointId: "checkpoint_full_spartan",
+          });
+
+      expect(adapted.resources.classes?.[0]?.resource.parentDimensionRef).toEqual({
+        sourceObjectId: parentId,
+        displayName: "Professional Services",
+        dimensionKind: "class",
+      });
+      expect(mapped.facts.dimensions).toEqual([expect.objectContaining({
+        dimensionKind: "class",
+        sourceDimensionId: classId,
+        name: "Service Line",
+        active: true,
+      })]);
+      expect(mapped.facts.dimensions[0]?.parentDimensionId).toMatch(/^dimension_[a-f0-9]+$/);
+    },
+  );
+
+  it("fails closed when a Class reporting dimension has no provider name", () => {
+    const base = fullSyncEnvelope();
+    const template = fixtureResource(base.normalizedResources?.accounts?.[0]);
+    expect(() => adaptHandrailQuickBooksSdkFullSyncEnvelope({
+      ...base,
+      normalizedResources: {
+        ...base.normalizedResources,
+        classes: [{
+          ...template,
+          id: "accounting_class_missing_name",
+          sourceObject: "Class",
+          sourceObjectId: "class:arbitrary/missing-name",
+          name: "",
+        }],
+      },
+    }, adapterOptions())).toThrow(/QuickBooks class class:arbitrary\/missing-name is missing name/);
   });
 
   it("honors an explicit normalized void action without creating an active payment", async () => {
