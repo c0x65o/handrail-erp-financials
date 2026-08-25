@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "packageName": "@handrail/erp-financials",
+  "version": "0.3.32",
+  "tag": "v0.3.32",
+  "commit": "be77c72d01331e8e0371a532d4569996286d1306",
+  "repository": "https://github.com/c0x65o/handrail-erp-financials.git",
+  "installSpec": "git+https://github.com/c0x65o/handrail-erp-financials.git#v0.3.32",
+  "publicExports": [
+    ".",
+    "./sdk"
+  ]
+}

@@ -160,7 +160,9 @@ responses.
   undeclared subpath.
 - BLU pins the exact published tag that actually contains and passes the
   approved BLU harness. Package version `0.3.32` is the first release of this
-  contract, published as the immutable `v0.3.32` Git tag.
+  contract, published as the immutable `v0.3.32` Git tag. The exact dependency
+  spec, approved commit, publication safeguards, and clean-consumer evidence
+  are recorded in [blu-v0.3.32-release.md](blu-v0.3.32-release.md).
 - Breaking contract changes remain possible before 1.0. A gap found during BLU
   adoption is ERP Financials contract work: extend the public SDK, its harness,
   and tests here instead of adding BLU-local accounting SQL or a second ledger.

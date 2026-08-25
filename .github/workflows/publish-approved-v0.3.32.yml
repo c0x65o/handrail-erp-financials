@@ -1,0 +1,40 @@
+name: Publish approved ERP Financials v0.3.32
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/publish-approved-v0.3.32.yml
+      - releases/v0.3.32.json
+      - scripts/publish-approved-git-release.mjs
+      - scripts/verify-approved-release-install.mjs
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-approved-erp-financials-v0.3.32
+  cancel-in-progress: false
+
+jobs:
+  publish-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out complete release history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Use supported Node.js version
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.11.0"
+
+      - name: Publish the approved tag without rewriting refs
+        run: node scripts/publish-approved-git-release.mjs --publish
+
+      - name: Install and import the release as a clean consumer
+        run: node scripts/verify-approved-release-install.mjs
