@@ -378,6 +378,190 @@ where event.payload ->> 'sourceTransactionId' = 'bill_payment_all'
     });
   });
 
+  it("persists, replays, revises, and voids a zero-cash Payment credit application without cash activity", async () => {
+    await migratePostgresSchema(runner, { appliedByRef: "integration:quickbooks-customer-credit-payment" });
+    await seedQuickBooksImportScope(pool);
+    await pool.query(`
+insert into erp_financials.transactions (
+  transaction_id, tenant_id, source_id, source_transaction_id, source_transaction_type,
+  transaction_number, transaction_date, posted_at, updated_at, party_id, currency_code, status,
+  source_payload_ref
+) values (
+  'transaction_credit_qbo', 'tenant_qbo', 'source_qbo', 'credit_73', 'CreditMemo', 'CM-73',
+  '2026-08-09', '2026-08-09T12:00:00Z', '2026-08-10T10:00:00Z', 'customer_qbo', 'USD', 'posted', '{}'::jsonb
+)
+`);
+    const baseFacts = quickBooksSubledgerFacts();
+    const invoiceFact = baseFacts.transactions.find((transaction) => transaction.sourceTransactionId === "invoice_600");
+    if (invoiceFact === undefined) throw new Error("Customer-credit integration fixture requires an invoice fact.");
+    const facts: CanonicalAccountingFactSet = {
+      ...baseFacts,
+      transactions: [
+        invoiceFact,
+        {
+          ...invoiceFact,
+          transactionId: "transaction_credit_qbo",
+          sourceTransactionId: "credit_73",
+          sourceTransactionType: "CreditMemo",
+          transactionNumber: "CM-73",
+          transactionDate: "2026-08-09"
+        }
+      ],
+      postings: []
+    };
+    const baseResources = quickBooksSubledgerResources("40.00", true, "2026-08-10T10:00:00.000Z");
+    const invoiceTemplate = baseResources.operationalDocuments?.find((resource) =>
+      resource.resource.sourceTransactionType === "Invoice"
+    );
+    const paymentTemplate = baseResources.operationalDocuments?.find((resource) =>
+      resource.resource.sourceTransactionType === "Payment"
+    );
+    const lineTemplate = paymentTemplate?.resource.lines[0];
+    if (invoiceTemplate === undefined || paymentTemplate === undefined || lineTemplate === undefined) {
+      throw new Error("Customer-credit integration fixture requires invoice, payment, and line templates.");
+    }
+    const resourcesAt = (
+      amount: string,
+      sourceUpdatedAt: string,
+      syncAction?: "voided"
+    ): HandrailQuickBooksSdkResourceSet => {
+      const invoice = {
+        ...invoiceTemplate,
+        sourceUpdatedAt,
+        resource: {
+          ...invoiceTemplate.resource,
+          openAmount: syncAction === "voided" ? "100.00" : (amount === "40.00" ? "60.00" : "70.00"),
+          sourceUpdatedAt
+        }
+      };
+      const creditMemo = {
+        ...invoiceTemplate,
+        sourceUpdatedAt,
+        resourceId: "credit_73",
+        resource: {
+          ...invoiceTemplate.resource,
+          sourceTransactionId: "credit_73",
+          sourceTransactionType: "CreditMemo",
+          transactionNumber: "CM-73",
+          transactionDate: "2026-08-09",
+          totalAmount: "40.00",
+          openAmount: syncAction === "voided" ? "40.00" : (amount === "40.00" ? "0.00" : "10.00"),
+          sourceUpdatedAt,
+          lines: []
+        }
+      };
+      const payment = {
+        ...paymentTemplate,
+        sourceUpdatedAt,
+        ...(syncAction === undefined ? {} : { syncAction }),
+        resource: {
+          ...paymentTemplate.resource,
+          sourceTransactionId: "payment_700",
+          sourceTransactionType: "Payment",
+          totalAmount: "0.00",
+          openAmount: "0.00",
+          unappliedAmount: "0.00",
+          sourceUpdatedAt,
+          lines: [
+            {
+              ...lineTemplate,
+              sourceLineId: "credit-line",
+              lineNumber: 1,
+              sourceAmount: amount,
+              linkedTransactions: [{ sourceTransactionId: "credit_73", sourceTransactionType: "CreditMemo" }],
+              postings: []
+            },
+            {
+              ...lineTemplate,
+              sourceLineId: "invoice-line",
+              lineNumber: 2,
+              sourceAmount: amount,
+              linkedTransactions: [{ sourceTransactionId: "invoice_600", sourceTransactionType: "Invoice" }],
+              postings: []
+            }
+          ]
+        }
+      };
+      return {
+        ...baseResources,
+        operationalDocuments: syncAction === "voided" ? [payment] : [invoice, creditMemo, payment]
+      };
+    };
+    const persist = (
+      resources: HandrailQuickBooksSdkResourceSet,
+      importedAt: string,
+      replaceMissingDocuments = false
+    ) => runner.transaction((client) => persistQuickBooksSubledgerResources({
+      client, companyId: "company_qbo", importedAt, facts, resources, replaceMissingDocuments
+    }));
+
+    const fullResources = resourcesAt("40.00", "2026-08-10T10:00:00.000Z");
+    await expect(persist(fullResources, "2026-08-10T10:01:00.000Z", true)).resolves.toMatchObject({
+      documents: 2,
+      applications: 1,
+      removedLedgerPostings: 0
+    });
+    await expect(persist(fullResources, "2026-08-10T10:02:00.000Z", true)).resolves.toMatchObject({
+      documents: 0,
+      applications: 0,
+      removedLedgerPostings: 0
+    });
+    await expect(persist(
+      resourcesAt("30.00", "2026-08-11T10:00:00.000Z"),
+      "2026-08-11T10:01:00.000Z"
+    )).resolves.toMatchObject({ applications: 1, removedLedgerPostings: 0 });
+    await expect(persist(
+      resourcesAt("30.00", "2026-08-12T10:00:00.000Z", "voided"),
+      "2026-08-12T10:01:00.000Z"
+    )).resolves.toMatchObject({ applications: 0, removedLedgerPostings: 0 });
+    await expect(persist(
+      resourcesAt("30.00", "2026-08-12T10:00:00.000Z", "voided"),
+      "2026-08-12T10:02:00.000Z"
+    )).resolves.toMatchObject({ applications: 0, removedLedgerPostings: 0 });
+
+    const application = await pool.query<{
+      application_type: string;
+      applied_amount: string;
+      status: string;
+      version: number;
+      source_type: string;
+      target_type: string;
+      projection_kind: string;
+      wrapper_source_id: string;
+    }>(`
+select application.application_type, application.applied_amount::text, application.status, application.version,
+  source.document_type as source_type, target.document_type as target_type,
+  event.payload ->> 'projectionKind' as projection_kind,
+  event.payload ->> 'sourceTransactionId' as wrapper_source_id
+from erp_financials.subledger_applications application
+join erp_financials.subledger_documents source on source.subledger_document_id = application.source_document_id
+join erp_financials.subledger_documents target on target.subledger_document_id = application.target_document_id
+join erp_financials.financial_lifecycle_events event on event.event_id = application.applied_event_id
+where event.payload ->> 'sourceTransactionId' = 'payment_700'
+`);
+    expect(application.rows).toEqual([{
+      application_type: "credit_to_invoice",
+      applied_amount: "30.00",
+      status: "voided",
+      version: 3,
+      source_type: "credit_memo",
+      target_type: "invoice",
+      projection_kind: "customer_credit_application",
+      wrapper_source_id: "payment_700"
+    }]);
+    await expect(quickBooksDocumentState(pool)).resolves.toEqual([
+      { source_id: "credit_73", original_amount: "40.00", open_amount: "40.00", status: "open" },
+      { source_id: "invoice_600", original_amount: "100.00", open_amount: "100.00", status: "open" }
+    ]);
+    const cashImpact = await pool.query<{ count: string }>(`
+select count(*)::text
+from erp_financials.ledger_postings posting
+join erp_financials.transactions transaction on transaction.transaction_id = posting.transaction_id
+where transaction.source_transaction_id = 'payment_700'
+`);
+    expect(cashImpact.rows[0]?.count).toBe("0");
+  });
+
   it("retires deleted delta documents and documents missing from an authoritative full snapshot", async () => {
     await migratePostgresSchema(runner, { appliedByRef: "integration:quickbooks-retirement" });
     await seedQuickBooksImportScope(pool);

@@ -6,7 +6,8 @@ import {
   assertNoCredentialKeys,
   mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts,
   mapNormalizedQuickBooksIncrementalSyncResponseToCanonicalFacts,
-  persistQuickBooksSubledgerResources
+  persistQuickBooksSubledgerResources,
+  QuickBooksSubledgerProjectionError
 } from "../src/index.js";
 import type {
   HandrailQuickBooksSdkFullSyncEnvelope,
@@ -506,23 +507,87 @@ describe("QuickBooks SDK envelope adapter", () => {
           lines: unsafe.lines
         }
       };
-      await expect(persistQuickBooksSubledgerResources({
-        client: { query: () => Promise.resolve({ rows: [], rowCount: 1 }) },
-        companyId: "company_spartan",
-        importedAt: "2026-08-25T00:31:00.000Z",
-        facts,
-        resources: {
-          ...adapted.resources,
-          operationalDocuments: [document("invoice_72", "Invoice"), document("credit_73", "CreditMemo"), payment]
-        }
-      }), unsafe.name).rejects.toMatchObject({
-        code: "quickbooks_subledger_projection_invalid",
-        diagnostic: {
-          projectionKind: "unclassified_zero_total",
-          rejectionReasons: expect.arrayContaining([unsafe.reason])
-        }
-      });
+      try {
+        await persistQuickBooksSubledgerResources({
+          client: { query: () => Promise.resolve({ rows: [], rowCount: 1 }) },
+          companyId: "company_spartan",
+          importedAt: "2026-08-25T00:31:00.000Z",
+          facts,
+          resources: {
+            ...adapted.resources,
+            operationalDocuments: [document("invoice_72", "Invoice"), document("credit_73", "CreditMemo"), payment]
+          }
+        });
+        throw new Error(`Expected unsafe ${unsafe.name} projection to fail closed.`);
+      } catch (error: unknown) {
+        if (!(error instanceof QuickBooksSubledgerProjectionError)) throw error;
+        expect(error.code).toBe("quickbooks_subledger_projection_invalid");
+        expect(error.diagnostic).toMatchObject({
+          projectionKind: "unclassified_zero_total"
+        });
+        expect(error.diagnostic.rejectionReasons).toContain(unsafe.reason);
+      }
     }
+
+    const guardedPayment = (sourceTransactionId: string, totalAmount: string) => ({
+      ...resourceTemplate,
+      resourceId: sourceTransactionId,
+      resource: {
+        ...resourceTemplate.resource,
+        sourceTransactionId,
+        sourceTransactionType: "Payment",
+        totalAmount,
+        openAmount: "0.00",
+        unappliedAmount: "0.00",
+        lines: [creditLine, invoiceLine]
+      }
+    });
+    const documents = [document("invoice_72", "Invoice"), document("credit_73", "CreditMemo")];
+    await expect(persistQuickBooksSubledgerResources({
+      client: { query: () => Promise.resolve({ rows: [], rowCount: 1 }) },
+      companyId: "company_spartan",
+      importedAt: "2026-08-25T00:31:00.000Z",
+      facts,
+      resources: {
+        ...adapted.resources,
+        operationalDocuments: [...documents, guardedPayment("positive-payment", "1.00")]
+      }
+    })).rejects.toMatchObject({
+      diagnostic: {
+        missingBalancedJournal: true,
+        totalAmountState: "positive",
+        projectionKind: "canonical_document",
+        rejectionReasons: ["missing_balanced_journal"]
+      }
+    });
+    await expect(persistQuickBooksSubledgerResources({
+      client: { query: () => Promise.resolve({ rows: [], rowCount: 1 }) },
+      companyId: "company_spartan",
+      importedAt: "2026-08-25T00:31:00.000Z",
+      facts: {
+        ...facts,
+        transactions: [
+          ...facts.transactions,
+          {
+            ...transactionTemplate,
+            transactionId: "transaction_balanced_payment",
+            sourceTransactionId: "balanced-payment",
+            sourceTransactionType: "Payment"
+          }
+        ]
+      },
+      resources: {
+        ...adapted.resources,
+        operationalDocuments: [...documents, guardedPayment("balanced-payment", "0.00")]
+      }
+    })).rejects.toMatchObject({
+      diagnostic: {
+        missingBalancedJournal: false,
+        totalAmountState: "zero",
+        projectionKind: "canonical_document",
+        rejectionReasons: ["non_positive_total"]
+      }
+    });
   });
 
   it("fails an ambiguous zero-total BillPayment with structured safe diagnostics", async () => {
