@@ -276,16 +276,253 @@ describe("QuickBooks SDK envelope adapter", () => {
     expect(result.documents).toBe(2);
     expect(result.applications).toBe(1);
     const applicationInsert = calls.find((call) =>
-      call.sql.includes("'vendor_credit_to_bill'") &&
+      call.params[4] === "vendor_credit_to_bill" &&
       call.sql.includes('insert into "erp_financials"."subledger_applications"')
     );
-    expect(applicationInsert?.params.slice(4, 9)).toEqual([
+    expect(applicationInsert?.params.slice(5, 10)).toEqual([
       expect.stringMatching(/^qbo_document_/),
       expect.stringMatching(/^qbo_document_/),
       "125.00",
       "USD",
       "2026-08-13"
     ]);
+  });
+
+  it("projects the staging-proven zero-cash Payment as one credit-memo application without cash postings", async () => {
+    const adapted = adaptHandrailQuickBooksSdkFullSyncEnvelope(fullSyncEnvelope(), adapterOptions());
+    const mapped = mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(adapted, {
+      companyId: "company_spartan",
+      accountingBasis: "accrual",
+      currencyCode: "USD"
+    });
+    const resourceTemplate = adapted.resources.operationalDocuments?.[0];
+    const transactionTemplate = mapped.facts.transactions[0];
+    if (resourceTemplate === undefined || transactionTemplate === undefined) {
+      throw new Error("QuickBooks customer-credit application fixture requires a document and transaction template.");
+    }
+    const canonicalDocument = (
+      sourceTransactionId: string,
+      sourceTransactionType: "Invoice" | "CreditMemo"
+    ) => ({
+      ...resourceTemplate,
+      resourceId: sourceTransactionId,
+      resource: {
+        ...resourceTemplate.resource,
+        sourceTransactionId,
+        sourceTransactionType,
+        totalAmount: "100.00",
+        openAmount: "0.00",
+        unappliedAmount: "0.00",
+        lines: []
+      }
+    });
+    const applicationOnlyPayment = {
+      ...resourceTemplate,
+      resourceId: "74",
+      resource: {
+        ...resourceTemplate.resource,
+        sourceTransactionId: "74",
+        sourceTransactionType: "Payment",
+        totalAmount: "0.00",
+        openAmount: "0.00",
+        unappliedAmount: "0.00",
+        lines: [
+          {
+            ...resourceTemplate.resource.lines[0],
+            sourceLineId: "credit-line",
+            lineNumber: 1,
+            sourceAmount: "100.00",
+            linkedTransactions: [{ sourceTransactionId: "credit_73", sourceTransactionType: "CreditMemo" }],
+            postings: []
+          },
+          {
+            ...resourceTemplate.resource.lines[0],
+            sourceLineId: "invoice-line",
+            lineNumber: 2,
+            sourceAmount: "100.00",
+            linkedTransactions: [{ sourceTransactionId: "invoice_72", sourceTransactionType: "Invoice" }],
+            postings: []
+          }
+        ]
+      }
+    };
+    const calls: Array<{ sql: string; params: readonly unknown[] }> = [];
+
+    const applicationFacts = {
+      ...mapped.facts,
+      transactions: [
+        {
+          ...transactionTemplate,
+          transactionId: "transaction_invoice_72",
+          sourceTransactionId: "invoice_72",
+          sourceTransactionType: "Invoice"
+        },
+        {
+          ...transactionTemplate,
+          transactionId: "transaction_credit_73",
+          sourceTransactionId: "credit_73",
+          sourceTransactionType: "CreditMemo"
+        }
+      ],
+      postings: []
+    };
+    const result = await persistQuickBooksSubledgerResources({
+      client: {
+        query(sql, params = []) {
+          calls.push({ sql, params });
+          return Promise.resolve({ rows: [], rowCount: 1 });
+        }
+      },
+      companyId: "company_spartan",
+      importedAt: "2026-08-25T00:31:00.000Z",
+      facts: applicationFacts,
+      resources: {
+        ...adapted.resources,
+        operationalDocuments: [
+          canonicalDocument("invoice_72", "Invoice"),
+          canonicalDocument("credit_73", "CreditMemo"),
+          applicationOnlyPayment
+        ]
+      }
+    });
+
+    expect(result).toMatchObject({ documents: 2, applications: 1, skippedApplications: 0 });
+    expect(applicationFacts.transactions.some((transaction) => transaction.sourceTransactionId === "74")).toBe(false);
+    expect(applicationFacts.postings).toHaveLength(0);
+    const applicationInsert = calls.find((call) =>
+      call.params[4] === "credit_to_invoice" &&
+      call.sql.includes('insert into "erp_financials"."subledger_applications"')
+    );
+    expect(applicationInsert?.params.slice(5, 10)).toEqual([
+      expect.stringMatching(/^qbo_document_/),
+      expect.stringMatching(/^qbo_document_/),
+      "100.00",
+      "USD",
+      "2026-08-13"
+    ]);
+    const provenanceEvent = calls.find((call) =>
+      call.sql.includes('insert into "erp_financials"."financial_lifecycle_events"') &&
+      JSON.stringify(call.params).includes("customer_credit_application")
+    );
+    expect(provenanceEvent?.params).toEqual(expect.arrayContaining([
+      expect.stringContaining('"sourceTransactionId":"74"'),
+      expect.stringContaining('"creditMemoSourceTransactionId":"credit_73"'),
+      expect.stringContaining('"invoiceSourceTransactionId":"invoice_72"')
+    ]));
+  });
+
+  it("fails closed for incomplete, mismatched, ambiguous, and unsupported zero-total Payment applications", async () => {
+    const adapted = adaptHandrailQuickBooksSdkFullSyncEnvelope(fullSyncEnvelope(), adapterOptions());
+    const mapped = mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(adapted, {
+      companyId: "company_spartan",
+      accountingBasis: "accrual",
+      currencyCode: "USD"
+    });
+    const resourceTemplate = adapted.resources.operationalDocuments?.[0];
+    const transactionTemplate = mapped.facts.transactions[0];
+    const lineTemplate = resourceTemplate?.resource.lines[0];
+    if (resourceTemplate === undefined || transactionTemplate === undefined || lineTemplate === undefined) {
+      throw new Error("QuickBooks unsafe customer-credit fixtures require document, transaction, and line templates.");
+    }
+    const document = (sourceTransactionId: string, sourceTransactionType: "CreditMemo" | "Invoice") => ({
+      ...resourceTemplate,
+      resourceId: sourceTransactionId,
+      resource: {
+        ...resourceTemplate.resource,
+        sourceTransactionId,
+        sourceTransactionType,
+        totalAmount: "100.00",
+        openAmount: "100.00",
+        unappliedAmount: "100.00",
+        lines: []
+      }
+    });
+    const creditLine = {
+      ...lineTemplate,
+      sourceLineId: "credit-line",
+      lineNumber: 1,
+      sourceAmount: "100.00",
+      linkedTransactions: [{ sourceTransactionId: "credit_73", sourceTransactionType: "CreditMemo" }],
+      postings: []
+    };
+    const invoiceLine = {
+      ...lineTemplate,
+      sourceLineId: "invoice-line",
+      lineNumber: 2,
+      sourceAmount: "100.00",
+      linkedTransactions: [{ sourceTransactionId: "invoice_72", sourceTransactionType: "Invoice" }],
+      postings: []
+    };
+    const facts = {
+      ...mapped.facts,
+      transactions: [
+        { ...transactionTemplate, transactionId: "transaction_invoice_72", sourceTransactionId: "invoice_72", sourceTransactionType: "Invoice" },
+        { ...transactionTemplate, transactionId: "transaction_credit_73", sourceTransactionId: "credit_73", sourceTransactionType: "CreditMemo" }
+      ],
+      postings: []
+    };
+    const unsafeCases = [
+      { name: "incomplete", lines: [invoiceLine], reason: "no_credit_memo_link" },
+      {
+        name: "mismatched",
+        lines: [creditLine, { ...invoiceLine, sourceAmount: "99.00" }],
+        reason: "invoice_credit_totals_mismatch"
+      },
+      {
+        name: "ambiguous",
+        lines: [creditLine, invoiceLine, { ...invoiceLine, sourceLineId: "invoice-line-2", lineNumber: 3 }],
+        reason: "multiple_invoice_links"
+      },
+      {
+        name: "unsupported",
+        lines: [creditLine, {
+          ...invoiceLine,
+          linkedTransactions: [{ sourceTransactionId: "invoice_72", sourceTransactionType: "Bill" }]
+        }],
+        reason: "unsupported_linked_transaction_type"
+      },
+      {
+        name: "missing linked document",
+        lines: [{
+          ...creditLine,
+          linkedTransactions: [{ sourceTransactionId: "credit_missing", sourceTransactionType: "CreditMemo" }]
+        }, invoiceLine],
+        reason: "missing_linked_document"
+      }
+    ];
+
+    for (const unsafe of unsafeCases) {
+      const payment = {
+        ...resourceTemplate,
+        resourceId: `unsafe-${unsafe.name}`,
+        resource: {
+          ...resourceTemplate.resource,
+          sourceTransactionId: `unsafe-${unsafe.name}`,
+          sourceTransactionType: "Payment",
+          totalAmount: "0.00",
+          openAmount: "0.00",
+          unappliedAmount: "0.00",
+          memo: undefined,
+          lines: unsafe.lines
+        }
+      };
+      await expect(persistQuickBooksSubledgerResources({
+        client: { query: () => Promise.resolve({ rows: [], rowCount: 1 }) },
+        companyId: "company_spartan",
+        importedAt: "2026-08-25T00:31:00.000Z",
+        facts,
+        resources: {
+          ...adapted.resources,
+          operationalDocuments: [document("invoice_72", "Invoice"), document("credit_73", "CreditMemo"), payment]
+        }
+      }), unsafe.name).rejects.toMatchObject({
+        code: "quickbooks_subledger_projection_invalid",
+        diagnostic: {
+          projectionKind: "unclassified_zero_total",
+          rejectionReasons: expect.arrayContaining([unsafe.reason])
+        }
+      });
+    }
   });
 
   it("fails an ambiguous zero-total BillPayment with structured safe diagnostics", async () => {
