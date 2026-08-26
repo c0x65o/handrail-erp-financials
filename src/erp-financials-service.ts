@@ -2533,15 +2533,15 @@ function assertSubledgerApplicationDocuments(
   target: Record<string, unknown>,
   amount: DecimalString
 ): void {
-  const expectedTypes: Record<SubledgerApplicationType, readonly [SubledgerDocumentType, SubledgerDocumentType]> = {
-    customer_payment_to_invoice: ["customer_payment", "invoice"],
-    bill_payment_to_bill: ["bill_payment", "vendor_bill"],
-    credit_to_invoice: ["credit_memo", "invoice"],
-    vendor_credit_to_bill: ["vendor_credit", "vendor_bill"],
-    write_off_to_invoice: ["write_off", "invoice"]
+  const expectedTypes: Record<SubledgerApplicationType, readonly [readonly SubledgerDocumentType[], SubledgerDocumentType]> = {
+    customer_payment_to_invoice: [["customer_payment"], "invoice"],
+    bill_payment_to_bill: [["bill_payment"], "vendor_bill"],
+    credit_to_invoice: [["credit_memo", "deposit"], "invoice"],
+    vendor_credit_to_bill: [["vendor_credit"], "vendor_bill"],
+    write_off_to_invoice: [["write_off"], "invoice"]
   };
   const types = expectedTypes[input.applicationType];
-  if (source.document_type !== types[0] || target.document_type !== types[1]) {
+  if (!types[0].includes(source.document_type as SubledgerDocumentType) || target.document_type !== types[1]) {
     throw new ErpFinancialsValidationError("Application documents do not match applicationType");
   }
   if (source.party_id == null || source.party_id !== target.party_id) {

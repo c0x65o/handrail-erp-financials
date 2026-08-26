@@ -159,6 +159,10 @@ const migrationFiles = {
   bankStatementLineUnignoreV22: new URL(
     "../migrations/future-erp/20260825010000_add_bank_statement_line_unignore.sql",
     import.meta.url
+  ),
+  customerDepositInvoiceApplicationsV23: new URL(
+    "../migrations/future-erp/20260826010000_add_customer_deposit_invoice_applications.sql",
+    import.meta.url
   )
 } as const;
 
@@ -299,6 +303,13 @@ export const POSTGRES_MIGRATIONS: readonly PostgresMigrationDefinition[] = [
     21,
     22,
     migrationFiles.bankStatementLineUnignoreV22
+  ),
+  migration(
+    "20260826010000_add_customer_deposit_invoice_applications",
+    "Allow customer deposits to satisfy invoice credits",
+    22,
+    23,
+    migrationFiles.customerDepositInvoiceApplicationsV23
   )
 ] as const;
 

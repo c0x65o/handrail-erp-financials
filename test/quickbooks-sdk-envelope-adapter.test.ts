@@ -643,6 +643,110 @@ describe("QuickBooks SDK envelope adapter", () => {
     )).toBe(false);
   });
 
+  it("projects a zero-cash Deposit-to-Invoice Payment as a strict customer credit application", async () => {
+    const adapted = adaptHandrailQuickBooksSdkFullSyncEnvelope(fullSyncEnvelope(), adapterOptions());
+    const mapped = mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(adapted, {
+      companyId: "company_spartan",
+      accountingBasis: "accrual",
+      currencyCode: "USD"
+    });
+    const resourceTemplate = adapted.resources.operationalDocuments?.[0];
+    const transactionTemplate = mapped.facts.transactions[0];
+    const lineTemplate = resourceTemplate?.resource.lines[0];
+    if (resourceTemplate === undefined || transactionTemplate === undefined || lineTemplate === undefined) {
+      throw new Error("Customer-deposit application fixture requires document, transaction, and line templates.");
+    }
+    const document = (sourceTransactionId: string, sourceTransactionType: "Deposit" | "Invoice") => ({
+      ...resourceTemplate,
+      resourceId: sourceTransactionId,
+      resource: {
+        ...resourceTemplate.resource,
+        sourceTransactionId,
+        sourceTransactionType,
+        totalAmount: "1.00",
+        openAmount: "0.00",
+        unappliedAmount: "0.00",
+        lines: []
+      }
+    });
+    const payment = {
+      ...resourceTemplate,
+      resourceId: "381",
+      resource: {
+        ...resourceTemplate.resource,
+        sourceTransactionId: "381",
+        sourceTransactionType: "Payment",
+        totalAmount: "0.00",
+        openAmount: "0.00",
+        unappliedAmount: "0.00",
+        lines: [
+          {
+            ...lineTemplate,
+            sourceLineId: "deposit-line",
+            lineNumber: 1,
+            sourceAmount: "1.00",
+            linkedTransactions: [{ sourceTransactionId: "deposit_380", sourceTransactionType: "Deposit" }],
+            postings: []
+          },
+          {
+            ...lineTemplate,
+            sourceLineId: "invoice-line",
+            lineNumber: 2,
+            sourceAmount: "1.00",
+            linkedTransactions: [{ sourceTransactionId: "invoice_379", sourceTransactionType: "Invoice" }],
+            postings: []
+          }
+        ]
+      }
+    };
+    const calls: Array<{ sql: string; params: readonly unknown[] }> = [];
+
+    const result = await persistQuickBooksSubledgerResources({
+      client: {
+        query(sql, params = []) {
+          calls.push({ sql, params });
+          return Promise.resolve({ rows: [], rowCount: 1 });
+        }
+      },
+      companyId: "company_spartan",
+      importedAt: "2026-08-26T01:11:43.185Z",
+      facts: {
+        ...mapped.facts,
+        transactions: [
+          { ...transactionTemplate, transactionId: "transaction_deposit_380", sourceTransactionId: "deposit_380", sourceTransactionType: "Deposit" },
+          { ...transactionTemplate, transactionId: "transaction_invoice_379", sourceTransactionId: "invoice_379", sourceTransactionType: "Invoice" }
+        ],
+        postings: []
+      },
+      resources: {
+        ...adapted.resources,
+        operationalDocuments: [document("deposit_380", "Deposit"), document("invoice_379", "Invoice"), payment]
+      }
+    });
+
+    expect(result).toMatchObject({ documents: 2, applications: 1, skippedApplications: 0 });
+    const depositInsert = calls.find((call) =>
+      call.sql.includes('insert into "erp_financials"."subledger_documents"') && call.params[4] === "deposit"
+    );
+    expect(depositInsert?.params.slice(11, 14)).toEqual(["1.00", "1.00", "open"]);
+    const applicationInsert = calls.find((call) =>
+      call.sql.includes('insert into "erp_financials"."subledger_applications"')
+    );
+    expect(applicationInsert?.params[4]).toBe("credit_to_invoice");
+    expect(applicationInsert?.params[7]).toBe("1.00");
+    const applicationEvent = calls.find((call) =>
+      call.sql.includes('insert into "erp_financials"."financial_lifecycle_events"') &&
+      call.params[5] === "quickbooks_customer_deposit_application_imported"
+    );
+    expect(applicationEvent?.params[11]).toEqual(expect.stringContaining(
+      '"depositSourceTransactionId":"deposit_380","invoiceSourceTransactionId":"invoice_379"'
+    ));
+    expect(calls.some((call) =>
+      call.sql.includes('insert into "erp_financials"."subledger_documents"') &&
+      call.params[14]?.toString().includes("Payment:381")
+    )).toBe(false);
+  });
+
   it("fails closed for incomplete, mismatched, ambiguous, and unsupported zero-total Payment applications", async () => {
     const adapted = adaptHandrailQuickBooksSdkFullSyncEnvelope(fullSyncEnvelope(), adapterOptions());
     const mapped = mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(adapted, {

@@ -62,6 +62,7 @@ export type QuickBooksSubledgerProjectionDiagnostic = {
   readonly projectionKind:
     | "canonical_document"
     | "customer_credit_application"
+    | "customer_deposit_application"
     | "vendor_credit_application"
     | "unclassified_zero_total";
   readonly rejectionReasons: readonly string[];
@@ -161,6 +162,22 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
   let skippedDocumentLines = 0;
   const applicationOnlyProjections = new Map<string, ApplicationOnlyProjection>();
   const providerOffsetBillPayments = new Set<string>();
+  const customerDepositApplicationSourceIds = new Set<string>();
+
+  for (const resource of operationalDocuments) {
+    if (resource.syncAction === "voided" || resource.syncAction === "deleted" || resource.syncAction === "skipped") continue;
+    const normalized = resource.resource;
+    const projection = quickBooksZeroTotalCustomerCreditProjection(
+      normalized,
+      transactionBySourceId.get(normalized.sourceTransactionId) === undefined,
+      projectableDocumentSourceIds
+    );
+    if (projection?.eligible === true && projection.projectionKind === "customer_deposit_application") {
+      for (const allocation of projection.allocations) {
+        customerDepositApplicationSourceIds.add(allocation.sourceDocumentSourceTransactionId);
+      }
+    }
+  }
 
   for (const resource of operationalDocuments) {
     if (resource.syncAction === "voided" || resource.syncAction === "deleted" || resource.syncAction === "skipped") continue;
@@ -211,7 +228,11 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
     }
     const eventId = stableId("qbo_event", documentId, "imported");
     const idempotencyKey = `quickbooks:subledger:${input.facts.source.sourceId}:${normalized.sourceTransactionType}:${normalized.sourceTransactionId}`;
-    const initialState = initialDocumentState(documentType, originalAmount);
+    const initialState = initialDocumentState(
+      documentType,
+      originalAmount,
+      customerDepositApplicationSourceIds.has(normalized.sourceTransactionId)
+    );
     const payload: JsonValue = {
       provider: "quickbooks",
       sourceTransactionId: normalized.sourceTransactionId,
@@ -624,6 +645,11 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
               vendorCreditSourceTransactionId: allocation.sourceDocumentSourceTransactionId,
               billSourceTransactionId: allocation.targetDocumentSourceTransactionId
             }
+          : projection.projectionKind === "customer_deposit_application"
+            ? {
+                depositSourceTransactionId: allocation.sourceDocumentSourceTransactionId,
+                invoiceSourceTransactionId: allocation.targetDocumentSourceTransactionId
+              }
           : {
               creditMemoSourceTransactionId: allocation.sourceDocumentSourceTransactionId,
               invoiceSourceTransactionId: allocation.targetDocumentSourceTransactionId
@@ -639,7 +665,9 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
         aggregateId: applicationId,
         eventType: projection.projectionKind === "vendor_credit_application"
           ? "quickbooks_vendor_credit_application_imported"
-          : "quickbooks_customer_credit_application_imported",
+          : projection.projectionKind === "customer_deposit_application"
+            ? "quickbooks_customer_deposit_application_imported"
+            : "quickbooks_customer_credit_application_imported",
         occurredAt: projection.sourceUpdatedAt ?? input.importedAt,
         recordedAt: input.importedAt,
         idempotencyKey: `${idempotencyKey}:event`,
@@ -713,7 +741,7 @@ join "erp_financials"."financial_lifecycle_events" event
   and event."source_id" = application."source_id" and event."event_id" = application."applied_event_id"
 where application."tenant_id" = $1 and application."company_id" = $2 and application."source_id" = $3
   and application."status" = 'applied'
-  and event."payload" ->> 'projectionKind' in ('customer_credit_application', 'vendor_credit_application')
+  and event."payload" ->> 'projectionKind' in ('customer_credit_application', 'customer_deposit_application', 'vendor_credit_application')
   and not (event."payload" ->> 'sourceTransactionId' = any($4::text[]))`,
       [input.facts.company.tenantId, input.companyId, input.facts.source.sourceId, incomingSourceIds]
     );
@@ -875,7 +903,7 @@ where application."tenant_id" = $1 and application."company_id" = $2 and applica
   and application."status" = 'applied'
   and event."payload" ->> 'sourceTransactionId' = $4
   and event."payload" ->> 'sourceTransactionType' = $5
-  and event."payload" ->> 'projectionKind' in ('customer_credit_application', 'vendor_credit_application')`,
+  and event."payload" ->> 'projectionKind' in ('customer_credit_application', 'customer_deposit_application', 'vendor_credit_application')`,
     [
       input.facts.company.tenantId,
       input.companyId,
@@ -1024,8 +1052,12 @@ where transaction."tenant_id" = $1 and transaction."source_id" = $2
 
 function initialDocumentState(
   documentType: ImportedDocumentType,
-  originalAmount: string
+  originalAmount: string,
+  applicationCreditAvailable = false
 ): { readonly openAmount: string; readonly status: "open" | "settled" } {
+  if (documentType === "deposit" && applicationCreditAvailable) {
+    return { openAmount: originalAmount, status: "open" };
+  }
   if (["refund", "deposit", "transfer", "sales_receipt", "purchase"].includes(documentType)) {
     return { openAmount: "0.00", status: "settled" };
   }
@@ -1109,7 +1141,10 @@ type ApplicationOnlyProjection = {
   readonly eligible: true;
   readonly sourceTransactionType: "BillPayment" | "Payment";
   readonly applicationType: "credit_to_invoice" | "vendor_credit_to_bill";
-  readonly projectionKind: "customer_credit_application" | "vendor_credit_application";
+  readonly projectionKind:
+    | "customer_credit_application"
+    | "customer_deposit_application"
+    | "vendor_credit_application";
   readonly allocations: readonly ApplicationOnlyAllocation[];
   readonly currencyCode?: string;
   readonly transactionDate: string;
@@ -1336,6 +1371,7 @@ function quickBooksZeroTotalCustomerCreditProjection(
   };
   const invoices: LinkedAmount[] = [];
   const creditMemos: LinkedAmount[] = [];
+  const deposits: LinkedAmount[] = [];
   const typeCounts = new Map<string, number>();
   let otherLinkedAmount = 0;
   let linkedTransactionCount = 0;
@@ -1367,15 +1403,21 @@ function quickBooksZeroTotalCustomerCreditProjection(
       };
       if (type === "Invoice") invoices.push(evidence);
       else if (type === "CreditMemo") creditMemos.push(evidence);
+      else if (type === "Deposit") deposits.push(evidence);
       else otherLinkedAmount += amount;
     }
   }
 
   invoices.sort(compareLinkedAmount);
   creditMemos.sort(compareLinkedAmount);
+  deposits.sort(compareLinkedAmount);
   const invoiceTotal = invoices.reduce((sum, value) => sum + value.amount, 0);
   const creditMemoTotal = creditMemos.reduce((sum, value) => sum + value.amount, 0);
-  const missingLinkedTransactionIds = [...invoices, ...creditMemos]
+  const depositTotal = deposits.reduce((sum, value) => sum + value.amount, 0);
+  const depositApplication = deposits.length > 0 && creditMemos.length === 0;
+  const credits = depositApplication ? deposits : creditMemos;
+  const creditTotal = depositApplication ? depositTotal : creditMemoTotal;
+  const missingLinkedTransactionIds = [...invoices, ...credits]
     .filter((value) => !projectableDocumentSourceIds.has(value.sourceTransactionId))
     .map((value) => value.sourceTransactionId)
     .filter((value, index, values) => values.indexOf(value) === index)
@@ -1387,21 +1429,23 @@ function quickBooksZeroTotalCustomerCreditProjection(
   const rejectionReasons = [
     ...(linkedTransactionCount === 0 ? ["no_linked_transactions"] : []),
     ...(invoices.length === 0 ? ["no_invoice_link"] : []),
-    ...(creditMemos.length === 0 ? ["no_credit_memo_link"] : []),
-    ...(otherLinkedAmount !== 0 || [...typeCounts.keys()].some((type) => type !== "Invoice" && type !== "CreditMemo")
+    ...(credits.length === 0 ? [depositApplication ? "no_deposit_link" : "no_credit_memo_link"] : []),
+    ...(deposits.length > 0 && creditMemos.length > 0 ? ["mixed_credit_source_types"] : []),
+    ...(otherLinkedAmount !== 0 || [...typeCounts.keys()].some((type) =>
+      type !== "Invoice" && type !== (depositApplication ? "Deposit" : "CreditMemo"))
       ? ["unsupported_linked_transaction_type"]
       : []),
     ...(transaction.lines.length === 0 ||
       transaction.lines.length !== nonZeroLineCount ||
       transaction.lines.length !== linkedTransactionCount ||
       invoices.length === 0 ||
-      creditMemos.length === 0
+      credits.length === 0
       ? ["incomplete_application_lines"]
       : []),
     ...(unlinkedNonZeroLineCount > 0 ? ["unlinked_nonzero_line"] : []),
     ...(multiLinkedLineCount > 0 ? ["multi_link_amount_ambiguous"] : []),
     ...(missingLinkedAmountCount > 0 ? ["missing_per_link_amount"] : []),
-    ...(Math.abs(invoiceTotal - creditMemoTotal) > 0.005 ? ["invoice_credit_totals_mismatch"] : []),
+    ...(Math.abs(invoiceTotal - creditTotal) > 0.005 ? ["invoice_credit_totals_mismatch"] : []),
     ...(transaction.unappliedAmount === undefined || !Number.isFinite(unappliedAmount) || unappliedAmount !== 0
       ? ["invalid_unapplied_amount"]
       : []),
@@ -1417,7 +1461,7 @@ function quickBooksZeroTotalCustomerCreditProjection(
     ...(transaction.openAmount === undefined ? {} : { openAmount: transaction.openAmount }),
     ...(transaction.unappliedAmount === undefined ? {} : { unappliedAmount: transaction.unappliedAmount }),
     projectionKind: rejectionReasons.length === 0
-      ? "customer_credit_application"
+      ? depositApplication ? "customer_deposit_application" : "customer_credit_application"
       : "unclassified_zero_total",
     rejectionReasons,
     lineCount: transaction.lines.length,
@@ -1433,7 +1477,7 @@ function quickBooksZeroTotalCustomerCreditProjection(
     vendorCreditLinkedAmountTotal: linkedAmountTotal(transaction, "VendorCredit"),
     invoiceLinkedAmountTotal: invoiceTotal.toFixed(2),
     creditMemoLinkedAmountTotal: creditMemoTotal.toFixed(2),
-    otherLinkedAmountTotal: otherLinkedAmount.toFixed(2),
+    otherLinkedAmountTotal: (otherLinkedAmount + (depositApplication ? 0 : depositTotal)).toFixed(2),
     missingLinkedTransactionIds,
     memoIndicatesVoid
   };
@@ -1443,7 +1487,7 @@ function quickBooksZeroTotalCustomerCreditProjection(
 
   const allocations: ApplicationOnlyAllocation[] = [];
   const remainingInvoices = invoices.map((value) => ({ ...value }));
-  const remainingCredits = creditMemos.map((value) => ({ ...value }));
+  const remainingCredits = credits.map((value) => ({ ...value }));
   let invoiceIndex = 0;
   let creditIndex = 0;
   while (invoiceIndex < remainingInvoices.length && creditIndex < remainingCredits.length) {
@@ -1466,7 +1510,7 @@ function quickBooksZeroTotalCustomerCreditProjection(
     eligible: true,
     sourceTransactionType: "Payment",
     applicationType: "credit_to_invoice",
-    projectionKind: "customer_credit_application",
+    projectionKind: depositApplication ? "customer_deposit_application" : "customer_credit_application",
     allocations,
     ...(transaction.currencyCode === undefined ? {} : { currencyCode: transaction.currencyCode }),
     transactionDate: transaction.transactionDate,

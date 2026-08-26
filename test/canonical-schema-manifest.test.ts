@@ -38,11 +38,15 @@ const BANK_STATEMENT_LINE_UNIGNORE_UPGRADE_SQL = readFileSync(
   new URL("../migrations/future-erp/20260825010000_add_bank_statement_line_unignore.sql", import.meta.url),
   "utf8"
 );
+const CUSTOMER_DEPOSIT_INVOICE_APPLICATIONS_UPGRADE_SQL = readFileSync(
+  new URL("../migrations/future-erp/20260826010000_add_customer_deposit_invoice_applications.sql", import.meta.url),
+  "utf8"
+);
 
 describe("canonical schema manifest", () => {
   it("is versioned and covers the documented canonical entities", () => {
-    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.manifestVersion).toBe("2026-08-25.bank-statement-line-unignore");
-    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion).toBe(22);
+    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.manifestVersion).toBe("2026-08-26.customer-deposit-invoice-applications");
+    expect(POSTGRES_CANONICAL_SCHEMA_MANIFEST.schemaVersion).toBe(23);
 
     const tableNames = POSTGRES_CANONICAL_SCHEMA_MANIFEST.tables.map((table) => table.name);
 
@@ -260,7 +264,8 @@ describe("canonical schema manifest", () => {
       [18, 19],
       [19, 20],
       [20, 21],
-      [21, 22]
+      [21, 22],
+      [22, 23]
     ]);
     expect(renderPostgresSchemaSql()).toContain('create table if not exists "erp_financials"."schema_migrations"');
     expect(FUTURE_ERP_CANONICAL_SCHEMA_MIGRATION_SQL).not.toMatch(
@@ -279,6 +284,13 @@ describe("canonical schema manifest", () => {
       `"erp_financials"."source_import_reset_scope_allowed"`
     );
     expect(BANK_STATEMENT_LINE_UNIGNORE_UPGRADE_SQL).not.toContain("drop table");
+    expect(CUSTOMER_DEPOSIT_INVOICE_APPLICATIONS_UPGRADE_SQL).toContain(
+      `source_document."document_type" not in ('credit_memo', 'deposit')`
+    );
+    expect(CUSTOMER_DEPOSIT_INVOICE_APPLICATIONS_UPGRADE_SQL).toContain(
+      "subledger application amount exceeds an available document balance"
+    );
+    expect(CUSTOMER_DEPOSIT_INVOICE_APPLICATIONS_UPGRADE_SQL).not.toContain("drop table");
   });
 
   it("ships a fail-closed v6 to v7 report snapshot scope upgrade", () => {
