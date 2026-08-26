@@ -137,7 +137,10 @@ export {
   adaptHandrailQuickBooksSdkIncrementalSyncEnvelope,
   adaptHandrailQuickBooksSdkSyncEnvelope
 } from "./quickbooks-sdk-envelope-adapter.js";
-export { consumeSourceRecordDispositions } from "./source-record-dispositions.js";
+export {
+  compactSourceRecordDispositionWarningSummary,
+  consumeSourceRecordDispositions
+} from "./source-record-dispositions.js";
 export { createFutureErpQuickBooksIncrementalSyncWorker } from "./future-erp-quickbooks-incremental-sync.js";
 export {
   generateFutureErpCanonicalReportSnapshotsFromImport,
@@ -997,6 +1000,7 @@ export type {
   HandrailQuickBooksSdkNormalizedSyncEnvelope
 } from "./quickbooks-sdk-envelope-adapter.js";
 export type {
+  CompactSourceRecordDispositionWarningSummaryInput,
   ConsumeSourceRecordDispositionsInput,
   ConsumedSourceRecordDispositions,
   SourceDispositionResourceMap,

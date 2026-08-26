@@ -4,6 +4,7 @@ import {
   adaptHandrailQuickBooksSdkFullSyncEnvelope,
   adaptHandrailQuickBooksSdkIncrementalSyncEnvelope,
   buildCoreErpPersistenceEvidence,
+  compactSourceRecordDispositionWarningSummary,
   createQuickBooksFullSyncWorker,
   createQuickBooksIncrementalSyncWorker,
   consumeSourceRecordDispositions,
@@ -22,6 +23,68 @@ const sourceRecordId = "record:arbitrary/-9007199254740993?revision=alpha";
 const importBatchId = "batch_disposition_contract";
 
 describe("provider-neutral source record dispositions", () => {
+  it("compacts non-authoritative warnings before disposition identity and provenance", () => {
+    const dispositions = Array.from({ length: 9 }, (_, index) => {
+      const type = index === 4 || index === 5 ? "BillPayment" : index < 4 ? "Purchase" : "Payment";
+      const id = String(2_600 + index);
+      return {
+        disposition: "skipped" as const,
+        reason: index === 4 ? "zero_cash_deposit_vendor_credit_offset" : "zero_effect_voided",
+        sourceRecordType: type,
+        sourceRecordId: id,
+        sourcePayloadRef: {
+          sourceObjectType: type,
+          sourceObjectId: id,
+          storageRef: `raw://batch-with-a-production-length-correlation-0123456789/objects/${type}/sync-jobs/sync_20260826001022_1234567890123456/records/${id}`
+        }
+      };
+    });
+    const warningSummary = {
+      count: 14,
+      items: [
+        ...Array.from({ length: 5 }, (_, index) => ({
+          code: "source_window_record_excluded",
+          message: `Source-window warning ${String(index + 1)}`,
+          severity: "warning" as const,
+          resourceType: "Bill",
+          resourceId: String(index + 1)
+        })),
+        ...dispositions.map((disposition) => ({
+          code: "source_record_disposition",
+          message: `Source record was explicitly excluded from canonical financial projection: ${disposition.reason}.`,
+          severity: "warning" as const,
+          resourceType: disposition.sourceRecordType,
+          resourceId: disposition.sourceRecordId,
+          sourcePayloadRef: disposition.sourcePayloadRef
+        }))
+      ]
+    };
+
+    const compacted = compactSourceRecordDispositionWarningSummary({
+      dispositions,
+      maximumBytes: 3_600,
+      warningSummary
+    });
+
+    expect(Buffer.byteLength(JSON.stringify(compacted), "utf8")).toBeLessThanOrEqual(3_600);
+    expect(compacted.count).toBe(14);
+    const compactedDispositions = compacted.items?.filter((item) => item.code === "source_record_disposition");
+    expect(compactedDispositions).toHaveLength(9);
+    for (const disposition of dispositions) {
+      expect(compactedDispositions).toContainEqual(expect.objectContaining({
+        message: disposition.reason,
+        resourceType: disposition.sourceRecordType,
+        resourceId: disposition.sourceRecordId,
+        sourcePayloadRef: disposition.sourcePayloadRef
+      }));
+    }
+    expect(() => compactSourceRecordDispositionWarningSummary({
+      dispositions,
+      maximumBytes: 1_000,
+      warningSummary
+    })).toThrow("provenance exceeds the canonical JSON boundary");
+  });
+
   it("applies the same arbitrary-ID contract to full and incremental envelopes and retries deterministically", () => {
     const full = adaptHandrailQuickBooksSdkFullSyncEnvelope(
       dispositionEnvelope("full"),

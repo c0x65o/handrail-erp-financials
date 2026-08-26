@@ -1,5 +1,9 @@
 import { assertNoCredentialKeys, assertSafeSourcePayloadRef } from "./canonical-model.js";
 import type { SafeSourcePayloadRef } from "./canonical-model.js";
+import type {
+  NormalizedAccountingSyncIssue,
+  NormalizedAccountingSyncIssueSummary
+} from "./normalized-accounting-contracts.js";
 
 const MAX_DISPOSITION_REASON_LENGTH = 128;
 const MAX_SOURCE_IDENTITY_LENGTH = 256;
@@ -53,6 +57,60 @@ export type ConsumedSourceRecordDispositions = {
   readonly dispositions: readonly SourceRecordDisposition[];
   readonly normalizedResources: SourceDispositionResourceMap;
 };
+
+export type CompactSourceRecordDispositionWarningSummaryInput = {
+  readonly dispositions: readonly SourceRecordDisposition[] | undefined;
+  readonly maximumBytes?: number;
+  readonly warningSummary: NormalizedAccountingSyncIssueSummary;
+};
+
+/**
+ * Bounds an import-batch warning summary without separating a source-record
+ * disposition from the identity and safe payload provenance that authorize it.
+ * Non-disposition warnings are retained on a best-effort basis; disposition
+ * evidence is reconstructed first and fails closed when it cannot fit.
+ */
+export function compactSourceRecordDispositionWarningSummary(
+  input: CompactSourceRecordDispositionWarningSummaryInput
+): NormalizedAccountingSyncIssueSummary {
+  const maximumBytes = input.maximumBytes ?? 3_600;
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes <= 0 || maximumBytes > 4_096) {
+    throw new Error("Source record disposition warning-summary maximumBytes must be between 1 and 4096.");
+  }
+
+  const dispositions = input.dispositions ?? [];
+  assertSourceRecordDispositionAdvisories(input.warningSummary, dispositions);
+
+  const items: NormalizedAccountingSyncIssue[] = dispositions.map((disposition) => ({
+    code: "source_record_disposition",
+    message: disposition.reason,
+    severity: "warning" as const,
+    resourceType: disposition.sourceRecordType,
+    resourceId: disposition.sourceRecordId,
+    sourcePayloadRef: disposition.sourcePayloadRef
+  }));
+  const compacted: NormalizedAccountingSyncIssueSummary = {
+    count: input.warningSummary.count,
+    ...(items.length === 0 ? {} : { items })
+  };
+  if (serializedBytes(compacted) > maximumBytes) {
+    throw new Error("Source record disposition warning-summary provenance exceeds the canonical JSON boundary.");
+  }
+
+  for (const item of input.warningSummary.items ?? []) {
+    if (item.code === "source_record_disposition") continue;
+    const candidate: NormalizedAccountingSyncIssueSummary = {
+      count: input.warningSummary.count,
+      items: [...items, item]
+    };
+    if (serializedBytes(candidate) <= maximumBytes) items.push(item);
+  }
+
+  return {
+    count: input.warningSummary.count,
+    ...(items.length === 0 ? {} : { items })
+  };
+}
 
 export function consumeSourceRecordDispositions(
   input: ConsumeSourceRecordDispositionsInput
@@ -367,6 +425,10 @@ function canonicalResourceContainsDisposition(value: unknown, disposition: Sourc
 
 function dispositionIdentity(disposition: SourceRecordDisposition): string {
   return `${disposition.sourceRecordType}\u0000${disposition.sourceRecordId}`;
+}
+
+function serializedBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
 }
 
 function requiredRecord(value: unknown, path: string): Record<string, unknown> {
