@@ -239,6 +239,129 @@ describe("QuickBooks SDK envelope adapter", () => {
     expect(result.applications).toBe(0);
   });
 
+  it("keeps a balanced zero-net journal while omitting its zero-value subledger document", async () => {
+    const adapted = adaptHandrailQuickBooksSdkFullSyncEnvelope(fullSyncEnvelope(), adapterOptions());
+    const mapped = mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(adapted, {
+      companyId: "company_spartan",
+      accountingBasis: "accrual",
+      currencyCode: "USD"
+    });
+    const resourceTemplate = adapted.resources.operationalDocuments?.[0];
+    const transactionTemplate = mapped.facts.transactions[0];
+    if (resourceTemplate === undefined || transactionTemplate === undefined) {
+      throw new Error("QuickBooks zero-net journal fixture requires a resource and transaction template.");
+    }
+    const sourceTransactionId = "invoice:balanced-zero-net/arbitrary-1048";
+    const result = await persistQuickBooksSubledgerResources({
+      client: { query: () => Promise.resolve({ rows: [], rowCount: 0 }) },
+      companyId: "company_spartan",
+      importedAt: "2026-08-26T00:10:22.000Z",
+      facts: {
+        ...mapped.facts,
+        transactions: [{
+          ...transactionTemplate,
+          transactionId: "transaction_zero_net_invoice",
+          sourceTransactionId,
+          sourceTransactionType: "Invoice"
+        }]
+      },
+      resources: {
+        ...adapted.resources,
+        operationalDocuments: [{
+          ...resourceTemplate,
+          resourceId: sourceTransactionId,
+          resource: {
+            ...resourceTemplate.resource,
+            sourceTransactionId,
+            sourceTransactionType: "Invoice",
+            totalAmount: "0.00",
+            openAmount: "0.00",
+            unappliedAmount: undefined,
+            lines: []
+          }
+        }]
+      }
+    });
+
+    expect(result).toMatchObject({
+      documents: 0,
+      documentLines: 0,
+      skippedTransactions: 1
+    });
+  });
+
+  it("reports every invalid document projection in one fail-closed preflight", async () => {
+    const adapted = adaptHandrailQuickBooksSdkFullSyncEnvelope(fullSyncEnvelope(), adapterOptions());
+    const mapped = mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(adapted, {
+      companyId: "company_spartan",
+      accountingBasis: "accrual",
+      currencyCode: "USD"
+    });
+    const resourceTemplate = adapted.resources.operationalDocuments?.[0];
+    if (resourceTemplate === undefined) {
+      throw new Error("QuickBooks projection preflight fixture requires a resource template.");
+    }
+    const invalidDocument = (
+      sourceTransactionType: "Bill" | "Invoice",
+      sourceTransactionId: string
+    ) => ({
+      ...resourceTemplate,
+      resourceId: sourceTransactionId,
+      resource: {
+        ...resourceTemplate.resource,
+        sourceTransactionId,
+        sourceTransactionType,
+        totalAmount: "0.00",
+        openAmount: "0.00",
+        unappliedAmount: undefined,
+        lines: []
+      }
+    });
+    const statements: string[] = [];
+
+    try {
+      await persistQuickBooksSubledgerResources({
+        client: {
+          query: (sql) => {
+            statements.push(sql);
+            return Promise.resolve({ rows: [], rowCount: 0 });
+          }
+        },
+        companyId: "company_spartan",
+        importedAt: "2026-08-26T00:10:22.000Z",
+        facts: { ...mapped.facts, transactions: [], postings: [] },
+        resources: {
+          ...adapted.resources,
+          operationalDocuments: [
+            invalidDocument("Invoice", "invoice:arbitrary-1048"),
+            invalidDocument("Bill", "bill:arbitrary-2048")
+          ]
+        }
+      });
+      throw new Error("Expected projection preflight to fail.");
+    } catch (error: unknown) {
+      if (!(error instanceof QuickBooksSubledgerProjectionError)) throw error;
+      expect(error.code).toBe("quickbooks_subledger_projection_invalid");
+      expect(error.diagnosticCount).toBe(2);
+      expect(error.diagnosticsTruncated).toBe(false);
+      expect(error.diagnostics).toEqual([
+        expect.objectContaining({
+          sourceTransactionType: "Invoice",
+          sourceTransactionId: "invoice:arbitrary-1048",
+          rejectionReasons: ["missing_balanced_journal", "non_positive_total"]
+        }),
+        expect.objectContaining({
+          sourceTransactionType: "Bill",
+          sourceTransactionId: "bill:arbitrary-2048",
+          rejectionReasons: ["missing_balanced_journal", "non_positive_total"]
+        })
+      ]);
+    }
+
+    expect(statements).toHaveLength(2);
+    expect(statements.every((statement) => /^select\b/i.test(statement.trim()))).toBe(true);
+  });
+
   it("projects a zero-cash BillPayment with complete bill and vendor-credit evidence as a direct application", async () => {
     const adapted = adaptHandrailQuickBooksSdkFullSyncEnvelope(fullSyncEnvelope(), adapterOptions());
     const mapped = mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(adapted, {
@@ -1439,7 +1562,14 @@ describe("QuickBooks SDK envelope adapter", () => {
       importedAt: "2026-08-13T12:46:00.000Z",
       facts: mapped.facts,
       resources: adapted.resources
-    })).rejects.toThrow(/Bill payment_700 line 1 has an amount but no canonical account/);
+    })).rejects.toMatchObject({
+      code: "quickbooks_subledger_projection_invalid",
+      diagnostic: {
+        sourceTransactionType: "Bill",
+        sourceTransactionId: "payment_700",
+        rejectionReasons: ["missing_canonical_line_account"]
+      }
+    });
   });
 
   it("fails closed when SDK resource identity differs from the envelope", () => {

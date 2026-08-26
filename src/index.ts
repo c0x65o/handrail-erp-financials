@@ -77,6 +77,7 @@ export { normalizeCommercialDocumentLine } from "./commercial-lines.js";
 export { createReportingBookService } from "./reporting-books.js";
 export {
   persistQuickBooksSubledgerResources,
+  QUICKBOOKS_SUBLEDGER_PROJECTION_DIAGNOSTIC_LIMIT,
   QuickBooksSubledgerProjectionError,
   type QuickBooksSubledgerProjectionDiagnostic
 } from "./quickbooks-subledger-import.js";

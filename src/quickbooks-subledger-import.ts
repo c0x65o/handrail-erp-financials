@@ -82,19 +82,42 @@ export type QuickBooksSubledgerProjectionDiagnostic = {
   readonly memoIndicatesVoid: boolean;
 };
 
+export const QUICKBOOKS_SUBLEDGER_PROJECTION_DIAGNOSTIC_LIMIT = 100;
+
 export class QuickBooksSubledgerProjectionError extends Error {
   readonly code = "quickbooks_subledger_projection_invalid";
   readonly diagnostic: QuickBooksSubledgerProjectionDiagnostic;
+  readonly diagnostics: readonly QuickBooksSubledgerProjectionDiagnostic[];
+  readonly diagnosticCount: number;
+  readonly diagnosticsTruncated: boolean;
 
-  constructor(diagnostic: QuickBooksSubledgerProjectionDiagnostic) {
+  constructor(
+    diagnosticOrDiagnostics:
+      | QuickBooksSubledgerProjectionDiagnostic
+      | readonly QuickBooksSubledgerProjectionDiagnostic[],
+    diagnosticCount?: number
+  ) {
+    const diagnosticArray = Array.isArray(diagnosticOrDiagnostics)
+      ? diagnosticOrDiagnostics as readonly QuickBooksSubledgerProjectionDiagnostic[]
+      : [diagnosticOrDiagnostics as QuickBooksSubledgerProjectionDiagnostic];
+    const diagnostics = diagnosticArray.slice(0, QUICKBOOKS_SUBLEDGER_PROJECTION_DIAGNOSTIC_LIMIT);
+    const diagnostic = diagnostics[0];
+    if (diagnostic === undefined) {
+      throw new Error("QuickBooks subledger projection errors require at least one diagnostic.");
+    }
+    const totalCount = Math.max(diagnosticCount ?? diagnostics.length, diagnostics.length);
     const reasons = diagnostic.rejectionReasons.length === 0
       ? "the provider evidence is not projectable"
       : diagnostic.rejectionReasons.join(", ");
     super(
-      `QuickBooks ${diagnostic.sourceTransactionType} ${diagnostic.sourceTransactionId} cannot be projected into the canonical subledger: ${reasons}`
+      `QuickBooks ${diagnostic.sourceTransactionType} ${diagnostic.sourceTransactionId} cannot be projected into the canonical subledger: ${reasons}` +
+      (totalCount > 1 ? `; ${String(totalCount - 1)} additional provider record${totalCount === 2 ? "" : "s"} failed projection preflight` : "")
     );
     this.name = "QuickBooksSubledgerProjectionError";
     this.diagnostic = diagnostic;
+    this.diagnostics = diagnostics;
+    this.diagnosticCount = totalCount;
+    this.diagnosticsTruncated = totalCount > diagnostics.length;
   }
 }
 
@@ -179,6 +202,14 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
     }
   }
 
+  const projectionDiagnostics: QuickBooksSubledgerProjectionDiagnostic[] = [];
+  let projectionDiagnosticCount = 0;
+  const recordProjectionDiagnostic = (diagnostic: QuickBooksSubledgerProjectionDiagnostic): void => {
+    projectionDiagnosticCount += 1;
+    if (projectionDiagnostics.length < QUICKBOOKS_SUBLEDGER_PROJECTION_DIAGNOSTIC_LIMIT) {
+      projectionDiagnostics.push(diagnostic);
+    }
+  };
   for (const resource of operationalDocuments) {
     if (resource.syncAction === "voided" || resource.syncAction === "deleted" || resource.syncAction === "skipped") continue;
     const normalized = resource.resource;
@@ -186,6 +217,79 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
     if (documentType === undefined) continue;
     const transaction = transactionBySourceId.get(normalized.sourceTransactionId);
     const originalAmount = positiveAmount(normalized.totalAmount);
+    if (
+      transaction !== undefined &&
+      zeroAmount(normalized.totalAmount) &&
+      importedApplicationType(normalized.sourceTransactionType) === undefined
+    ) {
+      continue;
+    }
+    if (transaction === undefined || originalAmount === undefined) {
+      if (quickBooksZeroTotalProviderOffsetBillPayment(
+        normalized,
+        transaction === undefined,
+        projectableDocumentSourceIds
+      )) {
+        continue;
+      }
+      const applicationOnly = quickBooksZeroTotalBillPaymentProjection(
+        normalized,
+        transaction === undefined,
+        projectableDocumentSourceIds
+      ) ?? quickBooksZeroTotalCustomerCreditProjection(
+        normalized,
+        transaction === undefined,
+        projectableDocumentSourceIds
+      );
+      if (applicationOnly?.eligible === true) continue;
+      recordProjectionDiagnostic(
+        applicationOnly?.diagnostic ?? quickBooksSubledgerProjectionDiagnostic(
+          normalized,
+          transaction === undefined
+        )
+      );
+      continue;
+    }
+
+    const rejectionReasons = quickBooksDocumentProjectionRejectionReasons(
+      documentType,
+      normalized,
+      originalAmount,
+      accountIdBySourceId,
+      itemBySourceId
+    );
+    if (rejectionReasons.length > 0) {
+      recordProjectionDiagnostic({
+        ...quickBooksSubledgerProjectionDiagnostic(normalized, false),
+        rejectionReasons
+      });
+    }
+  }
+  if (projectionDiagnosticCount > 0) {
+    throw new QuickBooksSubledgerProjectionError(
+      projectionDiagnostics,
+      projectionDiagnosticCount
+    );
+  }
+
+  for (const resource of operationalDocuments) {
+    if (resource.syncAction === "voided" || resource.syncAction === "deleted" || resource.syncAction === "skipped") continue;
+    const normalized = resource.resource;
+    const documentType = importedDocumentType(normalized.sourceTransactionType);
+    if (documentType === undefined) continue;
+    const transaction = transactionBySourceId.get(normalized.sourceTransactionId);
+    const originalAmount = positiveAmount(normalized.totalAmount);
+    if (
+      transaction !== undefined &&
+      zeroAmount(normalized.totalAmount) &&
+      importedApplicationType(normalized.sourceTransactionType) === undefined
+    ) {
+      // A zero-net provider document can still own a balanced canonical journal
+      // (for example revenue offset by a discount). Keep that accounting
+      // activity while omitting a meaningless zero-value subledger header.
+      skippedTransactions += 1;
+      continue;
+    }
     if (transaction === undefined || originalAmount === undefined) {
       if (quickBooksZeroTotalProviderOffsetBillPayment(
         normalized,
@@ -1129,6 +1233,61 @@ function positiveAmount(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
   const amount = Math.abs(Number(value));
   return Number.isFinite(amount) && amount > 0 ? amount.toFixed(2) : undefined;
+}
+
+function zeroAmount(value: string | undefined): boolean {
+  if (value === undefined) return false;
+  const amount = Number(value);
+  return Number.isFinite(amount) && amount === 0;
+}
+
+function quickBooksDocumentProjectionRejectionReasons(
+  documentType: ImportedDocumentType,
+  normalized: NormalizedQuickBooksLedgerTransaction,
+  originalAmount: string,
+  accountIdBySourceId: ReadonlyMap<string, string>,
+  itemBySourceId: ReadonlyMap<string, CanonicalAccountingFactSet["items"][number]>
+): string[] {
+  const rejectionReasons = new Set<string>();
+  if (importsCommercialDocumentLines(documentType)) {
+    for (const line of normalized.lines) {
+      if (isQuickBooksProviderOnlyNonPostingLine(line.detailType)) continue;
+      const amount = positiveAmount(line.sourceAmount);
+      if (amount === undefined) continue;
+      const item = line.itemRef === undefined ? undefined : itemBySourceId.get(line.itemRef.sourceObjectId);
+      const accountId = line.accountRef === undefined
+        ? documentLineItemAccount(documentType, item)
+        : accountIdBySourceId.get(line.accountRef.sourceObjectId);
+      if (accountId === undefined) rejectionReasons.add("missing_canonical_line_account");
+    }
+  }
+  if (
+    importedApplicationType(normalized.sourceTransactionType) !== undefined &&
+    normalized.lines.some((line) => (line.linkedTransactions?.length ?? 0) > 1)
+  ) {
+    rejectionReasons.add("multi_link_amount_ambiguous");
+  }
+
+  const openAmountValue = documentType === "customer_payment"
+    ? normalized.unappliedAmount
+    : documentType === "invoice"
+      ? normalized.openAmount
+      : documentType === "bill_payment"
+        ? normalized.unappliedAmount ?? normalized.openAmount
+        : normalized.openAmount ?? normalized.unappliedAmount;
+  if (
+    openAmountValue === undefined &&
+    (documentType === "invoice" || documentType === "customer_payment")
+  ) {
+    rejectionReasons.add("missing_authoritative_open_amount");
+  } else if (openAmountValue !== undefined) {
+    const openAmount = Math.abs(Number(openAmountValue));
+    const original = Number(originalAmount);
+    if (!Number.isFinite(openAmount) || openAmount < 0 || openAmount > original) {
+      rejectionReasons.add("invalid_authoritative_open_amount");
+    }
+  }
+  return [...rejectionReasons];
 }
 
 type ApplicationOnlyAllocation = {
