@@ -1,8 +1,8 @@
 # Source record disposition contract
 
-ERP Financials v0.3.40 consumes the optional per-record disposition evidence
-carried by Handrail QuickBooks Integrations v0.1.100 and
-`@handrail/quickbooks-node-sdk` v0.1.31. The SDK boundary converts the upstream
+ERP Financials v0.3.43 consumes the optional per-record disposition evidence
+carried by Handrail QuickBooks Integrations v0.1.102 and
+`@handrail/quickbooks-node-sdk` v0.1.32. The SDK boundary converts the upstream
 field names into this provider-neutral record:
 
 ```ts
@@ -37,11 +37,14 @@ same idempotency keys, canonical identities, warnings, and evidence.
 
 Consumers that must fit the warning summary inside the canonical 4 KiB JSON
 boundary use `compactSourceRecordDispositionWarningSummary`. It validates the
-uncompacted reconciliation first, reconstructs every disposition warning from
-the authoritative provider-neutral evidence with its complete identity and
-safe payload reference, and only then retains other warnings as space permits.
-If the disposition evidence itself cannot fit, compaction fails closed instead
-of silently separating a disposition from its provenance.
+uncompacted reconciliation first and reconstructs every disposition warning
+from the authoritative provider-neutral evidence. When those individual
+warnings fit, it retains their complete identity and safe payload reference.
+For a larger batch it stores one deterministic SHA-256 commitment over every
+disposition, reason, composite source identity, and safe storage reference;
+the separate `recordDispositions` contract remains the drilldown evidence.
+Canonical mapping recomputes and verifies that commitment before persistence,
+so compaction cannot silently separate or alter disposition provenance.
 
 This release does not change schema migrations, credentials, connection mode,
 runtime targets, or provider synchronization behavior.

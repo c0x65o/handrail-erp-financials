@@ -78,11 +78,117 @@ describe("provider-neutral source record dispositions", () => {
         sourcePayloadRef: disposition.sourcePayloadRef
       }));
     }
-    expect(() => compactSourceRecordDispositionWarningSummary({
+    const summarized = compactSourceRecordDispositionWarningSummary({
       dispositions,
       maximumBytes: 1_000,
       warningSummary
+    });
+    expect(summarized.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "source_record_disposition_batch" })
+    ]));
+    expect(() => compactSourceRecordDispositionWarningSummary({
+      dispositions,
+      maximumBytes: 100,
+      warningSummary
     })).toThrow("provenance exceeds the canonical JSON boundary");
+  });
+
+  it("commits a high-cardinality disposition batch inside the canonical JSON boundary", () => {
+    const objectTypes = [
+      "Bill",
+      "Invoice",
+      "Invoice",
+      "Invoice",
+      "Purchase",
+      "Purchase",
+      "Purchase",
+      "Payment",
+      "Payment",
+      "Payment",
+      "BillPayment",
+      "BillPayment",
+      "Deposit"
+    ] as const;
+    const dispositions = objectTypes.map((type, index) => {
+      const id = index === 0 ? "3544" : `arbitrary-${String(10_000 + index)}`;
+      const reason = index % 3 === 0 ? "zero_effect_empty_transaction" : "zero_effect_voided";
+      return {
+        disposition: index % 3 === 0 ? "skipped" as const : "voided" as const,
+        reason,
+        sourceRecordType: type,
+        sourceRecordId: id,
+        sourcePayloadRef: {
+          sourceObjectType: type,
+          sourceObjectId: id,
+          storageRef: `raw://${importBatchId}/objects/${type}/sync-jobs/sync_20260826031444_4521003d84321dab/records/${id}`
+        }
+      };
+    });
+    const warningSummary = {
+      count: 18,
+      items: [
+        ...Array.from({ length: 5 }, (_, index) => ({
+          code: "quickbooks_normalization_warning",
+          message: `Provider warning ${String(index + 1)}`,
+          severity: "warning" as const,
+          resourceType: "Bill",
+          resourceId: String(3_544 + index)
+        })),
+        ...dispositions.map((disposition) => ({
+          code: "source_record_disposition",
+          message: disposition.reason,
+          severity: "warning" as const,
+          resourceType: disposition.sourceRecordType,
+          resourceId: disposition.sourceRecordId,
+          sourcePayloadRef: disposition.sourcePayloadRef
+        }))
+      ]
+    };
+
+    expect(Buffer.byteLength(JSON.stringify(warningSummary), "utf8")).toBeGreaterThan(3_600);
+    const compacted = compactSourceRecordDispositionWarningSummary({
+      dispositions,
+      maximumBytes: 3_600,
+      warningSummary
+    });
+    expect(Buffer.byteLength(JSON.stringify(compacted), "utf8")).toBeLessThanOrEqual(3_600);
+    expect(compacted.count).toBe(18);
+    const batchWarning = compacted.items?.find((item) => item.code === "source_record_disposition_batch");
+    expect(batchWarning).toMatchObject({
+      code: "source_record_disposition_batch",
+      resourceType: "SourceRecordDispositionBatch"
+    });
+    expect(batchWarning?.message).toMatch(/^13 source record dispositions committed by sha256:[a-f0-9]{64}\.$/u);
+    expect(batchWarning?.resourceId).toMatch(/^sha256:[a-f0-9]{64}$/u);
+    expect(compacted.items?.filter((item) => item.code === "source_record_disposition")).toHaveLength(0);
+
+    const full = adaptHandrailQuickBooksSdkFullSyncEnvelope(dispositionEnvelope("full"), adapterOptions());
+    const boundedEnvelope = {
+      ...full,
+      recordDispositions: dispositions,
+      warningSummary: compacted,
+      importBatch: { ...full.importBatch, warningSummary: compacted },
+      resources: {
+        ...full.resources,
+        importBatch: { ...full.resources.importBatch, warningSummary: compacted }
+      }
+    };
+    expect(() => mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(boundedEnvelope, {
+      companyId: "company_disposition_contract",
+      accountingBasis: "accrual",
+      currencyCode: "USD"
+    })).not.toThrow();
+
+    const reversed = compactSourceRecordDispositionWarningSummary({
+      dispositions: [...dispositions].reverse(),
+      maximumBytes: 3_600,
+      warningSummary: {
+        ...warningSummary,
+        items: [...warningSummary.items].reverse()
+      }
+    });
+    expect(reversed.items?.find((item) => item.code === "source_record_disposition_batch")?.resourceId)
+      .toBe(compacted.items?.find((item) => item.code === "source_record_disposition_batch")?.resourceId);
   });
 
   it("applies the same arbitrary-ID contract to full and incremental envelopes and retries deterministically", () => {

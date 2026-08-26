@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { assertNoCredentialKeys, assertSafeSourcePayloadRef } from "./canonical-model.js";
 import type { SafeSourcePayloadRef } from "./canonical-model.js";
 import type {
@@ -9,6 +11,8 @@ const MAX_DISPOSITION_REASON_LENGTH = 128;
 const MAX_SOURCE_IDENTITY_LENGTH = 256;
 const MAX_SOURCE_PAYLOAD_REF_BYTES = 512;
 const DISPOSITION_REASON_PATTERN = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/u;
+const DISPOSITION_BATCH_WARNING_CODE = "source_record_disposition_batch";
+const DISPOSITION_BATCH_RESOURCE_TYPE = "SourceRecordDispositionBatch";
 const SENSITIVE_REF_PATTERN =
   /access[_-]?token|refresh[_-]?token|client[_-]?secret|authorization|bearer|api[_-]?key|password|credential/i;
 const ALLOWED_DISPOSITION_FIELDS = [
@@ -81,7 +85,7 @@ export function compactSourceRecordDispositionWarningSummary(
   const dispositions = input.dispositions ?? [];
   assertSourceRecordDispositionAdvisories(input.warningSummary, dispositions);
 
-  const items: NormalizedAccountingSyncIssue[] = dispositions.map((disposition) => ({
+  const individualDispositionItems: NormalizedAccountingSyncIssue[] = dispositions.map((disposition) => ({
     code: "source_record_disposition",
     message: disposition.reason,
     severity: "warning" as const,
@@ -89,16 +93,24 @@ export function compactSourceRecordDispositionWarningSummary(
     resourceId: disposition.sourceRecordId,
     sourcePayloadRef: disposition.sourcePayloadRef
   }));
-  const compacted: NormalizedAccountingSyncIssueSummary = {
+  let items = individualDispositionItems;
+  let compacted: NormalizedAccountingSyncIssueSummary = {
     count: input.warningSummary.count,
     ...(items.length === 0 ? {} : { items })
   };
   if (serializedBytes(compacted) > maximumBytes) {
-    throw new Error("Source record disposition warning-summary provenance exceeds the canonical JSON boundary.");
+    items = [sourceRecordDispositionBatchWarning(dispositions)];
+    compacted = {
+      count: input.warningSummary.count,
+      items
+    };
+    if (serializedBytes(compacted) > maximumBytes) {
+      throw new Error("Source record disposition warning-summary provenance exceeds the canonical JSON boundary.");
+    }
   }
 
   for (const item of input.warningSummary.items ?? []) {
-    if (item.code === "source_record_disposition") continue;
+    if (item.code === "source_record_disposition" || item.code === DISPOSITION_BATCH_WARNING_CODE) continue;
     const candidate: NormalizedAccountingSyncIssueSummary = {
       count: input.warningSummary.count,
       items: [...items, item]
@@ -190,8 +202,9 @@ export function assertSourceRecordDispositionAdvisories(
   if (!Array.isArray(summary.items)) {
     throw new Error("Disposed source records require warning-summary reconciliation evidence.");
   }
-  for (const disposition of dispositions) {
-    const match = summary.items.some((value) => {
+  const summaryItems: readonly unknown[] = summary.items;
+  const everyDispositionHasAdvisory = dispositions.every((disposition) => {
+    const match = summaryItems.some((value) => {
       const item = optionalRecord(value);
       const sourcePayloadRef = optionalRecord(item.sourcePayloadRef);
       return item.code === "source_record_disposition" &&
@@ -203,10 +216,48 @@ export function assertSourceRecordDispositionAdvisories(
         sourcePayloadRef.sourceObjectId === disposition.sourceRecordId &&
         sourcePayloadRef.storageRef === disposition.sourcePayloadRef.storageRef;
     });
-    if (!match) {
-      throw new Error("Disposed source record is missing matching warning-summary reconciliation evidence.");
-    }
+    return match;
+  });
+  if (everyDispositionHasAdvisory) return;
+
+  const expectedBatchWarning = sourceRecordDispositionBatchWarning(dispositions);
+  const batchMatch = summaryItems.some((value) => {
+    const item = optionalRecord(value);
+    return item.code === expectedBatchWarning.code &&
+      item.message === expectedBatchWarning.message &&
+      item.severity === expectedBatchWarning.severity &&
+      item.resourceType === expectedBatchWarning.resourceType &&
+      item.resourceId === expectedBatchWarning.resourceId;
+  });
+  if (!batchMatch) {
+    throw new Error("Disposed source record is missing matching warning-summary reconciliation evidence.");
   }
+}
+
+function sourceRecordDispositionBatchWarning(
+  dispositions: readonly SourceRecordDisposition[]
+): NormalizedAccountingSyncIssue {
+  const digest = sourceRecordDispositionBatchDigest(dispositions);
+  return {
+    code: DISPOSITION_BATCH_WARNING_CODE,
+    message: `${String(dispositions.length)} source record dispositions committed by sha256:${digest}.`,
+    severity: "warning",
+    resourceType: DISPOSITION_BATCH_RESOURCE_TYPE,
+    resourceId: `sha256:${digest}`
+  };
+}
+
+function sourceRecordDispositionBatchDigest(dispositions: readonly SourceRecordDisposition[]): string {
+  const records = dispositions.map((disposition) => [
+    disposition.sourceRecordType,
+    disposition.sourceRecordId,
+    disposition.disposition,
+    disposition.reason,
+    disposition.sourcePayloadRef.sourceObjectType,
+    disposition.sourcePayloadRef.sourceObjectId,
+    disposition.sourcePayloadRef.storageRef
+  ]).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  return createHash("sha256").update(JSON.stringify(records), "utf8").digest("hex");
 }
 
 function parseDispositionArray(value: unknown, path: string): readonly SourceRecordDisposition[] {
