@@ -148,8 +148,9 @@ export async function persistQuickBooksSubledgerResources(
     source_transaction_id: string;
     subledger_document_id: string;
     status: string;
+    party_id: string | null;
   }>(
-    `select "metadata" ->> 'sourceTransactionId' as "source_transaction_id", "subledger_document_id", "status"
+    `select "metadata" ->> 'sourceTransactionId' as "source_transaction_id", "subledger_document_id", "status", "party_id"
 from "erp_financials"."subledger_documents"
 where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
   and "metadata" ->> 'provider' = 'quickbooks'`,
@@ -186,6 +187,8 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
   const applicationOnlyProjections = new Map<string, ApplicationOnlyProjection>();
   const providerOffsetBillPayments = new Set<string>();
   const customerDepositApplicationSourceIds = new Set<string>();
+  const customerDepositPartyIdBySourceId = new Map<string, string>();
+  const conflictingCustomerDepositPartySourceIds = new Set<string>();
 
   for (const resource of operationalDocuments) {
     if (resource.syncAction === "voided" || resource.syncAction === "deleted" || resource.syncAction === "skipped") continue;
@@ -196,11 +199,62 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
       projectableDocumentSourceIds
     );
     if (projection?.eligible === true && projection.projectionKind === "customer_deposit_application") {
+      const applicationPartyId = normalized.partyRef?.partyType === "customer"
+        ? partyIdBySourceId.get(normalized.partyRef.sourceObjectId)
+        : undefined;
       for (const allocation of projection.allocations) {
         customerDepositApplicationSourceIds.add(allocation.sourceDocumentSourceTransactionId);
+        if (applicationPartyId === undefined) continue;
+        const existingPartyId = customerDepositPartyIdBySourceId.get(allocation.sourceDocumentSourceTransactionId);
+        if (existingPartyId !== undefined && existingPartyId !== applicationPartyId) {
+          conflictingCustomerDepositPartySourceIds.add(allocation.sourceDocumentSourceTransactionId);
+        } else {
+          customerDepositPartyIdBySourceId.set(
+            allocation.sourceDocumentSourceTransactionId,
+            applicationPartyId
+          );
+        }
       }
     }
   }
+
+  const existingDocumentPartyIdBySourceId = new Map(
+    existingDocuments.rows.map((row) => [row.source_transaction_id, row.party_id ?? undefined])
+  );
+  const projectedDocumentPartyId = (sourceTransactionId: string): string | undefined =>
+    transactionBySourceId.get(sourceTransactionId)?.partyId ??
+    existingDocumentPartyIdBySourceId.get(sourceTransactionId);
+  const applicationOnlyPartyRejectionReasons = (
+    normalized: NormalizedQuickBooksLedgerTransaction,
+    projection: ApplicationOnlyProjection
+  ): string[] => {
+    const expectedPartyType = projection.sourceTransactionType === "Payment" ? "customer" : "vendor";
+    const applicationPartyId = normalized.partyRef?.partyType === expectedPartyType
+      ? partyIdBySourceId.get(normalized.partyRef.sourceObjectId)
+      : undefined;
+    const reasons = new Set<string>();
+    if (applicationPartyId === undefined) reasons.add("missing_application_party");
+
+    for (const allocation of projection.allocations) {
+      if (conflictingCustomerDepositPartySourceIds.has(allocation.sourceDocumentSourceTransactionId)) {
+        reasons.add("conflicting_application_party");
+      }
+      const sourcePartyId = projection.projectionKind === "customer_deposit_application"
+        ? customerDepositPartyIdBySourceId.get(allocation.sourceDocumentSourceTransactionId)
+        : projectedDocumentPartyId(allocation.sourceDocumentSourceTransactionId);
+      const targetPartyId = projectedDocumentPartyId(allocation.targetDocumentSourceTransactionId);
+      if (sourcePartyId === undefined || targetPartyId === undefined) {
+        reasons.add("missing_application_party");
+      } else if (
+        applicationPartyId === undefined ||
+        sourcePartyId !== applicationPartyId ||
+        targetPartyId !== applicationPartyId
+      ) {
+        reasons.add("application_party_mismatch");
+      }
+    }
+    return [...reasons];
+  };
 
   const projectionDiagnostics: QuickBooksSubledgerProjectionDiagnostic[] = [];
   let projectionDiagnosticCount = 0;
@@ -241,7 +295,15 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
         transaction === undefined,
         projectableDocumentSourceIds
       );
-      if (applicationOnly?.eligible === true) continue;
+      if (applicationOnly?.eligible === true) {
+        const partyRejectionReasons = applicationOnlyPartyRejectionReasons(normalized, applicationOnly);
+        if (partyRejectionReasons.length === 0) continue;
+        recordProjectionDiagnostic({
+          ...applicationOnly.diagnostic,
+          rejectionReasons: partyRejectionReasons
+        });
+        continue;
+      }
       recordProjectionDiagnostic(
         applicationOnly?.diagnostic ?? quickBooksSubledgerProjectionDiagnostic(
           normalized,
@@ -398,7 +460,7 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
         input.facts.source.sourceId,
         documentType,
         transaction.transactionId,
-        transaction.partyId ?? null,
+        customerDepositPartyIdBySourceId.get(normalized.sourceTransactionId) ?? transaction.partyId ?? null,
         normalized.transactionNumber ?? null,
         normalized.transactionDate,
         normalized.dueDate ?? normalized.transactionDate,

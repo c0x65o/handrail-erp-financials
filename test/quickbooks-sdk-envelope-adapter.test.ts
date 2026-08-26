@@ -374,6 +374,21 @@ describe("QuickBooks SDK envelope adapter", () => {
     if (resourceTemplate === undefined || transactionTemplate === undefined) {
       throw new Error("QuickBooks application-only projection fixture requires a document and transaction template.");
     }
+    const partyTemplate = mapped.facts.parties[0];
+    if (partyTemplate === undefined) {
+      throw new Error("QuickBooks application-only projection fixture requires a canonical party template.");
+    }
+    const vendorParty = {
+      ...partyTemplate,
+      partyId: "party_vendor_arbitrary_73",
+      sourcePartyId: "vendor_arbitrary_73",
+      partyType: "vendor" as const,
+      displayName: "Vendor fixture"
+    };
+    const vendorPartyRef = {
+      sourceObjectId: vendorParty.sourcePartyId,
+      partyType: "vendor" as const
+    };
     const bill = {
       ...resourceTemplate,
       resourceId: "bill_1822",
@@ -381,6 +396,7 @@ describe("QuickBooks SDK envelope adapter", () => {
         ...resourceTemplate.resource,
         sourceTransactionId: "bill_1822",
         sourceTransactionType: "Bill",
+        partyRef: vendorPartyRef,
         totalAmount: "125.00",
         openAmount: "0.00",
         unappliedAmount: "0.00",
@@ -394,6 +410,7 @@ describe("QuickBooks SDK envelope adapter", () => {
         ...resourceTemplate.resource,
         sourceTransactionId: "vendor_credit_1822",
         sourceTransactionType: "VendorCredit",
+        partyRef: vendorPartyRef,
         totalAmount: "125.00",
         openAmount: "0.00",
         unappliedAmount: "0.00",
@@ -407,6 +424,7 @@ describe("QuickBooks SDK envelope adapter", () => {
         ...resourceTemplate.resource,
         sourceTransactionId: "1822",
         sourceTransactionType: "BillPayment",
+        partyRef: vendorPartyRef,
         totalAmount: "0.00",
         openAmount: "0.00",
         unappliedAmount: "0.00",
@@ -445,18 +463,21 @@ describe("QuickBooks SDK envelope adapter", () => {
       importedAt: "2026-08-13T12:46:00.000Z",
       facts: {
         ...mapped.facts,
+        parties: [...mapped.facts.parties, vendorParty],
         transactions: [
           {
             ...transactionTemplate,
             transactionId: "transaction_bill_1822",
             sourceTransactionId: "bill_1822",
-            sourceTransactionType: "Bill"
+            sourceTransactionType: "Bill",
+            partyId: vendorParty.partyId
           },
           {
             ...transactionTemplate,
             transactionId: "transaction_vendor_credit_1822",
             sourceTransactionId: "vendor_credit_1822",
-            sourceTransactionType: "VendorCredit"
+            sourceTransactionType: "VendorCredit",
+            partyId: vendorParty.partyId
           }
         ]
       },
@@ -766,7 +787,7 @@ describe("QuickBooks SDK envelope adapter", () => {
     )).toBe(false);
   });
 
-  it("projects a zero-cash Deposit-to-Invoice Payment as a strict customer credit application", async () => {
+  it("projects a zero-cash Deposit-to-Invoice Payment with its authoritative Payment customer", async () => {
     const adapted = adaptHandrailQuickBooksSdkFullSyncEnvelope(fullSyncEnvelope(), adapterOptions());
     const mapped = mapNormalizedQuickBooksFullSyncResponseToCanonicalFacts(adapted, {
       companyId: "company_spartan",
@@ -779,6 +800,10 @@ describe("QuickBooks SDK envelope adapter", () => {
     if (resourceTemplate === undefined || transactionTemplate === undefined || lineTemplate === undefined) {
       throw new Error("Customer-deposit application fixture requires document, transaction, and line templates.");
     }
+    const customerPartyId = transactionTemplate.partyId;
+    if (customerPartyId === undefined) {
+      throw new Error("Customer-deposit application fixture requires a canonical Payment customer.");
+    }
     const document = (sourceTransactionId: string, sourceTransactionType: "Deposit" | "Invoice") => ({
       ...resourceTemplate,
       resourceId: sourceTransactionId,
@@ -786,6 +811,7 @@ describe("QuickBooks SDK envelope adapter", () => {
         ...resourceTemplate.resource,
         sourceTransactionId,
         sourceTransactionType,
+        ...(sourceTransactionType === "Deposit" ? { partyRef: undefined } : {}),
         totalAmount: "1.00",
         openAmount: "0.00",
         unappliedAmount: "0.00",
@@ -836,7 +862,7 @@ describe("QuickBooks SDK envelope adapter", () => {
       facts: {
         ...mapped.facts,
         transactions: [
-          { ...transactionTemplate, transactionId: "transaction_deposit_380", sourceTransactionId: "deposit_380", sourceTransactionType: "Deposit" },
+          { ...transactionTemplate, transactionId: "transaction_deposit_380", sourceTransactionId: "deposit_380", sourceTransactionType: "Deposit", partyId: undefined },
           { ...transactionTemplate, transactionId: "transaction_invoice_379", sourceTransactionId: "invoice_379", sourceTransactionType: "Invoice" }
         ],
         postings: []
@@ -852,6 +878,7 @@ describe("QuickBooks SDK envelope adapter", () => {
       call.sql.includes('insert into "erp_financials"."subledger_documents"') && call.params[4] === "deposit"
     );
     expect(depositInsert?.params.slice(11, 14)).toEqual(["1.00", "1.00", "open"]);
+    expect(depositInsert?.params[6]).toBe(customerPartyId);
     const applicationInsert = calls.find((call) =>
       call.sql.includes('insert into "erp_financials"."subledger_applications"')
     );
@@ -868,6 +895,32 @@ describe("QuickBooks SDK envelope adapter", () => {
       call.sql.includes('insert into "erp_financials"."subledger_documents"') &&
       call.params[14]?.toString().includes("Payment:381")
     )).toBe(false);
+
+    try {
+      await persistQuickBooksSubledgerResources({
+        client: { query: () => Promise.resolve({ rows: [], rowCount: 1 }) },
+        companyId: "company_spartan",
+        importedAt: "2026-08-26T01:11:43.185Z",
+        facts: {
+          ...mapped.facts,
+          transactions: [
+            { ...transactionTemplate, transactionId: "transaction_deposit_380", sourceTransactionId: "deposit_380", sourceTransactionType: "Deposit", partyId: undefined },
+            { ...transactionTemplate, transactionId: "transaction_invoice_379", sourceTransactionId: "invoice_379", sourceTransactionType: "Invoice", partyId: "canonical_other_customer" }
+          ],
+          postings: []
+        },
+        resources: {
+          ...adapted.resources,
+          operationalDocuments: [document("deposit_380", "Deposit"), document("invoice_379", "Invoice"), payment]
+        }
+      });
+      throw new Error("Expected a mismatched Deposit-to-Invoice customer to fail closed.");
+    } catch (error: unknown) {
+      if (!(error instanceof QuickBooksSubledgerProjectionError)) throw error;
+      expect(error.code).toBe("quickbooks_subledger_projection_invalid");
+      expect(error.diagnostic.projectionKind).toBe("customer_deposit_application");
+      expect(error.diagnostic.rejectionReasons).toEqual(["application_party_mismatch"]);
+    }
   });
 
   it("fails closed for incomplete, mismatched, ambiguous, and unsupported zero-total Payment applications", async () => {
