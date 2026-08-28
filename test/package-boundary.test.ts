@@ -67,6 +67,7 @@ describe("package boundary", () => {
     expect(PACKAGE_BOUNDARY.owns).toContain("immutable financial lifecycle evidence");
     expect(PACKAGE_BOUNDARY.owns).toContain("fiscal periods, posting locks, and close controls");
     expect(PACKAGE_BOUNDARY.owns).toContain("receivable, payable, cash, and payment-application subledgers");
+    expect(PACKAGE_BOUNDARY.owns).toContain("deterministic recurring financial occurrence planning and command materialization");
     expect(PACKAGE_BOUNDARY.owns).toContain("issued credit and refund void and replacement workflows");
     expect(PACKAGE_BOUNDARY.owns).toContain("transaction matching and posting rule evaluation");
     expect(PACKAGE_BOUNDARY.owns).toContain("rollup and snapshot jobs");

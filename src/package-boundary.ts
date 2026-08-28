@@ -17,6 +17,7 @@ export const PACKAGE_BOUNDARY = {
     "fiscal periods, posting locks, and close controls",
     "journal reversal, correction, void, and replacement workflows",
     "receivable, payable, cash, and payment-application subledgers",
+    "deterministic recurring financial occurrence planning and command materialization",
     "issued credit and refund void and replacement workflows",
     "transaction matching and posting rule evaluation",
     "reporting books, cross-source chart continuity, and effective source cutovers",

@@ -240,6 +240,13 @@ that the package records as an immutable lifecycle event. Snapshot
 invalidation is part of the atomic write. The host scheduler should run the
 normal rollup and snapshot-refresh workers after a successful result.
 
+Recurring financial intent is available through `sdk.recurring`. It plans
+bounded monthly, quarterly, or annual occurrences and materializes typed,
+replay-safe commands for invoice drafts, exact-bill payment schedules, and
+non-A/P cash-disbursement journals. The host retains recurrence-template
+storage, scheduler registration, approvals, and occurrence checkpoints; the
+package does not transmit ACH or other payment-provider instructions.
+
 `accountKey` is the recommended app-facing reference: the package derives a
 tenant/source-scoped canonical `accountId` from it. Existing integrations may
 pass an explicit canonical `accountId` instead.

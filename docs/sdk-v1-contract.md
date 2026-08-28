@@ -232,6 +232,35 @@ voided, and emits lifecycle/outbox evidence in one transaction. Retrying the
 same completed command returns `already_voided` and never posts a second
 reversal.
 
+## Recurring financial occurrence planning
+
+`sdk.recurring` provides deterministic, non-posting recurrence planning for
+monthly, quarterly, and annual instructions. The calendar anchor is preserved
+across short months and leap years, and every occurrence receives a stable ID
+and idempotency key. Hosts checkpoint the last materialized date and request a
+bounded catch-up window; the planner fails closed rather than silently dropping
+an occurrence when that window exceeds its limit.
+
+The typed materializers deliberately preserve the canonical write boundaries:
+
+- `recurring.invoiceDraft(...)` produces a replay-safe `invoices.createDraft`
+  command with deterministic document dates, terms, and recurrence provenance.
+- `recurring.billPayment(...)` produces a replay-safe
+  `commands.billPayments.schedule` command only after the host supplies the
+  exact current bill IDs, amounts, and optimistic versions. Recurrence never
+  guesses which payable balance to reduce.
+- `recurring.cashDisbursement(...)` produces a balanced journal command for
+  approved non-A/P cash movement such as a shareholder distribution. The host
+  must choose the debit account; the package does not infer that a distribution
+  is an expense or turn a shareholder into a vendor.
+
+These helpers do not register a cron or queue, persist host recurrence settings,
+approve a payment, clear a scheduled bill payment, or transmit ACH/card/check
+instructions. The host owns template storage, authorization, scheduler
+registration, bill resolution, occurrence checkpointing, and execution of the
+materialized canonical command. Bank/payment-provider transmission remains a
+separate integration boundary.
+
 Write-offs accept bounded reason, related-invoice, balance-account, and
 write-off-account provenance. `queries.listWriteOffs(...)` and
 `queries.getWriteOff(...)` expose that provenance with durable actor/approver

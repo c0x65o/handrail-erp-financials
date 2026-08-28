@@ -87,7 +87,27 @@ export { createFinancialReadModels } from "./sdk-read-models.js";
 export { createInvoiceWorkflow } from "./invoice-workflow.js";
 export { createPaymentMatchingService } from "./payment-matching.js";
 export { createBankReconciliationService } from "./bank-reconciliation.js";
+export {
+  createRecurringFinancials,
+  materializeRecurringBillPayment,
+  materializeRecurringCashDisbursement,
+  materializeRecurringInvoiceDraft,
+  planRecurringOccurrences
+} from "./recurring-financials.js";
 export { ERP_FINANCIALS_SDK_ACCEPTANCE_FIXTURE } from "./sdk-fixtures.js";
+export type {
+  MaterializeRecurringBillPaymentInput,
+  MaterializeRecurringCashDisbursementInput,
+  MaterializeRecurringInvoiceDraftInput,
+  PlanRecurringOccurrencesInput,
+  RecurrenceFrequency,
+  RecurrenceRule,
+  RecurringBillPaymentTemplate,
+  RecurringCashDisbursementTemplate,
+  RecurringFinancials,
+  RecurringInvoiceDraftTemplate,
+  RecurringOccurrence
+} from "./recurring-financials.js";
 export {
   FinancialLifecycleIdempotencyConflictError,
   appendFinancialLifecycleEvent,

@@ -2,6 +2,7 @@ import {
   CORE_ERP_CANONICAL_REPORT_NAMES,
   buildCoreErpReportFromCanonicalReadModel,
   buildCoreErpPersistenceEvidence,
+  createRecurringFinancials,
   createQuickBooksFullSyncWorker,
   createQuickBooksIncrementalSyncWorker
 } from "@handrail/erp-financials";
@@ -65,6 +66,10 @@ import type {
   QuickBooksIncrementalSyncWorker,
   PostedVendorBillLifecycleResult,
   PostedBillPaymentLifecycleResult,
+  RecurringBillPaymentTemplate,
+  RecurringCashDisbursementTemplate,
+  RecurringInvoiceDraftTemplate,
+  RecurringOccurrence,
   RecordAndApplyBillPaymentInput,
   ReplaceIssuedVendorBillInput,
   ReplacePostedVendorBillInput,
@@ -93,6 +98,7 @@ export const coreErpPersistenceEvidenceImports = {
   CORE_ERP_CANONICAL_REPORT_NAMES,
   buildCoreErpReportFromCanonicalReadModel,
   buildCoreErpPersistenceEvidence,
+  createRecurringFinancials,
   createQuickBooksFullSyncWorker,
   createQuickBooksIncrementalSyncWorker
 };
@@ -154,6 +160,10 @@ export type CoreErpPersistenceEvidenceImports = {
   readonly voidPostedBillPaymentInput: VoidPostedBillPaymentInput;
   readonly voidIssuedBillPaymentInput: VoidIssuedBillPaymentInput;
   readonly postedBillPaymentLifecycleResult: PostedBillPaymentLifecycleResult;
+  readonly recurringOccurrence: RecurringOccurrence;
+  readonly recurringInvoiceDraft: RecurringInvoiceDraftTemplate;
+  readonly recurringBillPayment: RecurringBillPaymentTemplate;
+  readonly recurringCashDisbursement: RecurringCashDisbursementTemplate;
   readonly invoiceDelivery: InvoiceDeliveryEvent;
   readonly customerPayment: CustomerPaymentDetail;
   readonly customerPaymentProvenance: CustomerPaymentProvenance;

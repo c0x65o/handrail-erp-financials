@@ -4,6 +4,7 @@ import { createFinancialOutboxService } from "./financial-outbox.js";
 import { createFinancialRuntime } from "./financial-runtime.js";
 import { createInvoiceWorkflow } from "./invoice-workflow.js";
 import { createPaymentMatchingService } from "./payment-matching.js";
+import { createRecurringFinancials } from "./recurring-financials.js";
 import { createReportingBookService } from "./reporting-books.js";
 import { createFinancialReadModels } from "./sdk-read-models.js";
 
@@ -14,6 +15,7 @@ import type { FinancialOutboxService } from "./financial-outbox.js";
 import type { FinancialRuntime, FinancialRuntimeHandlers } from "./financial-runtime.js";
 import type { InvoiceWorkflow } from "./invoice-workflow.js";
 import type { PaymentMatchingService } from "./payment-matching.js";
+import type { RecurringFinancials } from "./recurring-financials.js";
 import type { ReportingBookService } from "./reporting-books.js";
 import type { FinancialReadModels } from "./sdk-read-models.js";
 import type { PostgresQueryClient } from "./postgres-storage.js";
@@ -29,6 +31,8 @@ export type ErpFinancialsSdk = {
   readonly books: ReportingBookService;
   readonly invoices: InvoiceWorkflow;
   readonly paymentMatching: PaymentMatchingService;
+  /** Deterministic, non-posting recurrence planning and command materialization. */
+  readonly recurring: RecurringFinancials;
   readonly bankReconciliation: BankReconciliationService;
   readonly queries: FinancialReadModels;
   readonly outbox: FinancialOutboxService;
@@ -89,6 +93,7 @@ export function createErpFinancialsSdk(input: CreateErpFinancialsSdkInput): ErpF
     }),
     invoices: createInvoiceWorkflow(shared),
     paymentMatching: createPaymentMatchingService(shared),
+    recurring: createRecurringFinancials(),
     bankReconciliation: createBankReconciliationService(shared),
     queries: createFinancialReadModels({
       database,
@@ -132,10 +137,30 @@ export { ErpFinancialsError, erpFinancialsError, isErpFinancialsError } from "./
 export { normalizeCommercialDocumentLine } from "./commercial-lines.js";
 export { ERP_FINANCIALS_SDK_ACCEPTANCE_FIXTURE } from "./sdk-fixtures.js";
 export { SOURCE_RESET_COUNT_LIMIT, resetSourceImportState } from "./source-import-reset.js";
+export {
+  createRecurringFinancials,
+  materializeRecurringBillPayment,
+  materializeRecurringCashDisbursement,
+  materializeRecurringInvoiceDraft,
+  planRecurringOccurrences
+} from "./recurring-financials.js";
 
 export type { ErpFinancialsErrorCode, ErpFinancialsErrorDetails } from "./sdk-errors.js";
 export type { ResetSourceImportStateInput, SanitizedSourceResetCounts } from "./source-import-reset.js";
 export type { CommercialDocumentLineInput, NormalizedCommercialDocumentLine } from "./commercial-lines.js";
+export type {
+  MaterializeRecurringBillPaymentInput,
+  MaterializeRecurringCashDisbursementInput,
+  MaterializeRecurringInvoiceDraftInput,
+  PlanRecurringOccurrencesInput,
+  RecurrenceFrequency,
+  RecurrenceRule,
+  RecurringBillPaymentTemplate,
+  RecurringCashDisbursementTemplate,
+  RecurringFinancials,
+  RecurringInvoiceDraftTemplate,
+  RecurringOccurrence
+} from "./recurring-financials.js";
 export type {
   AgingReport,
   AgingRow,
