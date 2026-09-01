@@ -7,9 +7,11 @@ import {
   buildAccountHierarchyRollupLines,
   buildStandardReportPresentationFromReadModel,
   buildProfitAndLossReport,
+  createPostgresQuickBooksDualBasisBackfillPersistence,
   createPostgresStorageAdapter,
   createCompactDrilldownRef,
   installPostgresSchema,
+  materializeQuickBooksBasisBackfill,
   validatePostgresSchema
 } from "../src/index.js";
 import { rollupPresentationAccountRowFromRow } from "../src/postgres-storage.js";
@@ -53,8 +55,8 @@ describe("Postgres storage adapter", () => {
     const result = await installPostgresSchema(client, POSTGRES_CANONICAL_SCHEMA_MANIFEST, { dryRun: true });
 
     expect(result.executed).toBe(false);
-    expect(result.manifestVersion).toBe("2026-08-15.write-off-invoice-applications");
-    expect(result.schemaVersion).toBe(17);
+    expect(result.manifestVersion).toBe("2026-08-26.customer-deposit-invoice-applications");
+    expect(result.schemaVersion).toBe(23);
     expect(result.statements[0]).toBe('create schema if not exists "erp_financials";');
     expect(result.statements.some((statement) => statement.includes('"rollup_buckets"'))).toBe(true);
     expect(result.statements.some((statement) => statement.includes('"report_freshness"'))).toBe(true);
@@ -190,6 +192,47 @@ describe("Postgres storage adapter", () => {
     expect(client.calls).toHaveLength(2);
     expect(client.calls[1]?.sql).toBe(client.calls[0]?.sql);
     expect(client.calls[1]?.params).toEqual(expect.arrayContaining(["50001.00"]));
+  });
+
+  it("atomically scopes QuickBooks dual-basis backfill replacement by owner, range, and basis", async () => {
+    const client = new RecordingClient();
+    let transactionCount = 0;
+    const persistence = createPostgresQuickBooksDualBasisBackfillPersistence({
+      transaction: async (work) => {
+        transactionCount += 1;
+        return work(client);
+      }
+    });
+    const accounts: readonly Account[] = [
+      { tenantId: "tenant_qbo", sourceId: "source_qbo", accountId: "account_cash", sourceAccountId: "cash", name: "Cash", type: "Bank", classification: "asset", status: "active" },
+      { tenantId: "tenant_qbo", sourceId: "source_qbo", accountId: "account_revenue", sourceAccountId: "revenue", name: "Revenue", type: "Income", classification: "income", status: "active" }
+    ];
+    const base = {
+      tenantId: "tenant_qbo", companyId: "company_qbo", sourceId: "source_qbo", currencyCode: "USD",
+      periodStart: "2026-01-01", periodEnd: "2026-12-31", requestedAt: "2027-01-01T00:00:00.000Z", accounts
+    } as const;
+    const projection = (accountingBasis: "cash" | "accrual") => materializeQuickBooksBasisBackfill(base, {
+      reportName: "general_ledger", accountingBasis, supportStatus: "supported", currencyCode: "USD",
+      generatedAt: "2027-01-01T00:01:00.000Z",
+      providerReportRef: { sourceObjectType: "quickbooks_report_general_ledger", sourceObjectId: `realm:${accountingBasis}` },
+      ledgerRows: [
+        { accountSourceId: "cash", transactionId: "1", transactionType: "Payment", transactionDate: "2026-02-01", debitAmount: "10.00", creditAmount: "0.00" },
+        { accountSourceId: "revenue", transactionId: "1", transactionType: "Payment", transactionDate: "2026-02-01", debitAmount: "0.00", creditAmount: "10.00" }
+      ]
+    });
+
+    await persistence.replaceDualBasisRange({
+      tenantId: base.tenantId, companyId: base.companyId, sourceId: base.sourceId,
+      periodStart: base.periodStart, periodEnd: base.periodEnd,
+      projections: [projection("accrual"), projection("cash")]
+    });
+
+    expect(client.calls[0]?.sql).toContain("QuickBooksGeneralLedger:%");
+    expect(client.calls[0]?.sql).toContain('posting."accounting_basis" = any');
+    expect(client.calls[0]?.params).toEqual(["tenant_qbo", "source_qbo", ["accrual", "cash"], "2026-01-01", "2026-12-31"]);
+    expect(client.calls.filter((call) => call.sql.includes('insert into "erp_financials"."ledger_postings"'))).toHaveLength(2);
+    expect(client.calls.filter((call) => call.sql.includes('update "erp_financials"."report_snapshots"'))).toHaveLength(2);
+    expect(transactionCount).toBe(1);
   });
 
   it("chunks large canonical upserts below the PostgreSQL client bind-parameter limit", async () => {
@@ -594,6 +637,67 @@ describe("Postgres storage adapter", () => {
     expect(client.calls.some((call) => call.sql.includes('"ledger_postings"'))).toBe(false);
     expect(client.calls.some((call) => call.sql.includes('from "erp_financials"."accounts"'))).toBe(false);
     expect(client.calls.every((call) => call.sql.includes('"report_snapshots"') || call.sql.includes('"report_snapshot_'))).toBe(true);
+  });
+
+  it.each([
+    {
+      reportName: "balance_sheet" as const,
+      section: "asset",
+      accountId: "acct_cash",
+      lineLabel: "1000 Cash",
+      lineAmount: "425.00",
+      totalKey: "total_assets",
+      totalLabel: "Total Assets",
+      totalAmount: "425.00"
+    },
+    {
+      reportName: "trial_balance" as const,
+      section: "asset",
+      accountId: "acct_cash",
+      lineLabel: "1000 Cash",
+      lineAmount: "425.00",
+      totalKey: "total_debits",
+      totalLabel: "Total Debits",
+      totalAmount: "425.00"
+    }
+  ])("serves a cash-basis $reportName standard presentation from snapshots", async (fixture) => {
+    const request = {
+      tenantId: "tenant_1",
+      companyId: "company_1",
+      sourceId: "source_native",
+      reportName: fixture.reportName,
+      accountingMethod: "cash",
+      periodStart: "2026-01-01",
+      periodEnd: "2026-03-31",
+      asOfDate: "2026-03-31",
+      currencyCode: "USD",
+      displayColumnsBy: "none"
+    } satisfies StandardReportPresentationReadModelRequest;
+    const client = new SnapshotPresentationClient([standardStatementSnapshot(request, fixture)]);
+    const adapter = createPostgresStorageAdapter(client);
+
+    const presentation = await buildStandardReportPresentationFromReadModel(adapter, request);
+
+    expect(presentation).toMatchObject({
+      reportName: fixture.reportName,
+      accountingMethod: "cash",
+      displayColumnsBy: "none"
+    });
+    expect(rowCell(presentation, `line:account:${fixture.accountId}`, "actual:none:total")?.amount).toBe(
+      fixture.lineAmount
+    );
+    expect(rowCell(presentation, `total:${fixture.totalKey}`, "actual:none:total")?.amount).toBe(fixture.totalAmount);
+    expect(presentation.primaryReport.snapshot).toMatchObject({
+      reportName: fixture.reportName,
+      accountingBasis: "cash",
+      freshness: { status: "fresh" }
+    });
+    expect(presentation.primaryReport.lines[0]?.drilldownRef.query).toMatchObject({
+      accountingBasis: "cash",
+      periodStart: request.periodStart,
+      periodEnd: request.periodEnd
+    });
+    expect(client.calls.some((call) => call.sql.includes('"ledger_postings"'))).toBe(false);
   });
 
   it.each([
@@ -1696,6 +1800,80 @@ class SnapshotPresentationClient implements PostgresQueryClient {
   }
 }
 
+function standardStatementSnapshot(
+  request: StandardReportPresentationReadModelRequest,
+  fixture: {
+    readonly section: string;
+    readonly accountId: string;
+    readonly lineLabel: string;
+    readonly lineAmount: string;
+    readonly totalKey: string;
+    readonly totalLabel: string;
+    readonly totalAmount: string;
+  }
+): SnapshotBundle {
+  const reportSnapshotId = [
+    "snapshot",
+    request.tenantId,
+    request.companyId,
+    request.sourceId,
+    request.reportName,
+    request.accountingMethod ?? "accrual",
+    request.periodStart,
+    request.periodEnd
+  ].join(":");
+  const reportLineId = `${reportSnapshotId}:line:account:${fixture.accountId}`;
+
+  return {
+    snapshot: {
+      report_snapshot_id: reportSnapshotId,
+      tenant_id: request.tenantId,
+      company_id: request.companyId,
+      source_id: request.sourceId,
+      report_name: request.reportName,
+      snapshot_source: "rollup",
+      accounting_basis: request.accountingMethod ?? "accrual",
+      period_start: request.periodStart,
+      period_end: request.periodEnd,
+      as_of_date: request.asOfDate ?? request.periodEnd,
+      currency_code: request.currencyCode,
+      generated_at: `${request.periodEnd}T12:00:00.000Z`,
+      freshness: { status: "fresh", sourceId: request.sourceId },
+      reconciliation_status: "balanced",
+      reconciliation_difference: "0.00"
+    },
+    lines: [{
+      report_line_id: reportLineId,
+      tenant_id: request.tenantId,
+      report_snapshot_id: reportSnapshotId,
+      parent_report_line_id: null,
+      section: fixture.section,
+      label: fixture.lineLabel,
+      account_id: fixture.accountId,
+      amount: fixture.lineAmount,
+      sort_order: 10,
+      drilldown_ref: drilldownRef(
+        request,
+        request.periodStart,
+        request.periodEnd,
+        fixture.accountId,
+        `${request.reportName}:${fixture.accountId}`
+      )
+    }],
+    totals: [
+      totalRow(
+        request,
+        reportSnapshotId,
+        request.periodStart,
+        request.periodEnd,
+        fixture.totalKey,
+        fixture.totalLabel,
+        fixture.totalAmount
+      )
+    ]
+  };
+}
+
 function monthlyProfitAndLossSnapshots(request: StandardReportPresentationReadModelRequest): readonly SnapshotBundle[] {
   const snapshots: SnapshotBundle[] = [];
   let cursor = parseIsoDate(request.periodStart);
@@ -1944,9 +2122,9 @@ function totalRow(
     amount,
     drilldown_ref:
       drilldownScope === undefined
-        ? drilldownRef(request, periodStart, periodEnd, undefined, `profit_and_loss:${totalKey}`)
+        ? drilldownRef(request, periodStart, periodEnd, undefined, `${request.reportName}:${totalKey}`)
         : createCompactDrilldownRef({
-            token: `profit_and_loss:${totalKey}`,
+            token: `${request.reportName}:${totalKey}`,
             postingIds: drilldownScope.postingIds ?? [],
             ...(drilldownScope.accountIds === undefined ? {} : { accountIds: drilldownScope.accountIds }),
             query: {

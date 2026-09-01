@@ -23,6 +23,9 @@ same canonical model.
 - [sdk-v1-contract.md](sdk-v1-contract.md): Preferred pre-v1 host integration,
   reporting-book/source identity, book chart, invoice lifecycle, matching,
   currency, read models, errors, outbox runtime, and compatibility contract.
+- [cash-accrual-reporting.md](cash-accrual-reporting.md): Report-time method
+  switching, native dual-basis projections, manual-journal policy, basis-aware
+  invalidation/drilldown, and historical QuickBooks backfill.
 - [architecture.md](architecture.md): System boundaries and package ownership.
 - [canonical-data-model.md](canonical-data-model.md): Tables and domain facts
   this package should standardize.

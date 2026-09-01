@@ -147,7 +147,8 @@ describe("pre-v1 SDK foundation", () => {
     const report = await queries.getFinancialStatement({
       reportName: "profit_and_loss",
       periodStart: "2026-01-01",
-      periodEnd: "2026-08-12"
+      periodEnd: "2026-08-12",
+      accountingMethod: "cash"
     });
 
     expect(report.lines).toEqual([
@@ -156,6 +157,14 @@ describe("pre-v1 SDK foundation", () => {
       expect.objectContaining({ bookAccountKey: "expenses", amount: "20.00" })
     ]);
     expect(report.totals).toMatchObject({ income: "150.00", expenses: "20.00", netIncome: "130.00" });
+    expect(report.accountingBasis).toBe("cash");
+    expect(client.statementAccountingBasis).toBe("cash");
+    expect(report.lines[1]?.drilldown).toEqual({
+      periodStart: "2026-01-01",
+      periodEnd: "2026-08-12",
+      accountingMethod: "cash",
+      accountKey: "services"
+    });
   });
 
   it("rolls historical and current earnings into balance-sheet equity", async () => {
@@ -183,6 +192,38 @@ describe("pre-v1 SDK foundation", () => {
       equity: "630.00",
       difference: "0.00"
     });
+    expect(report.accountingBasis).toBe("accrual");
+    expect(report.lines[0]?.drilldown).toMatchObject({
+      periodStart: "0001-01-01",
+      periodEnd: "2026-08-12",
+      accountingMethod: "accrual"
+    });
+    expect(report.lines.find((line) => line.name === "Retained Earnings")?.drilldown).toBeUndefined();
+    expect(report.lines.find((line) => line.name === "Net Income")?.drilldown).toBeUndefined();
+  });
+
+  it("defaults dashboard reporting to the book basis and accepts a cash override", async () => {
+    const client = new DashboardClient();
+    const queries = createFinancialReadModels({
+      database: { transaction: async (work) => work(client) },
+      tenantId: "tenant_1",
+      companyId: "company_1",
+      bookId: "book_1"
+    });
+
+    const defaultSummary = await queries.getDashboardSummary({
+      periodStart: "2026-01-01",
+      asOfDate: "2026-08-12"
+    });
+    const cashSummary = await queries.getDashboardSummary({
+      periodStart: "2026-01-01",
+      asOfDate: "2026-08-12",
+      accountingMethod: "cash"
+    });
+
+    expect(defaultSummary).toMatchObject({ accountingBasis: "accrual", netIncome: "130.00" });
+    expect(cashSummary).toMatchObject({ accountingBasis: "cash", netIncome: "130.00" });
+    expect(client.requestedAccountingBases).toEqual(["accrual", "cash"]);
   });
 
   it("exposes canonical credit/refund register and adjustment detail models", async () => {
@@ -481,8 +522,11 @@ describe("pre-v1 SDK foundation", () => {
 });
 
 class StatementClient implements PostgresQueryClient {
+  statementAccountingBasis: unknown;
+
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
-    sql: string
+    sql: string,
+    params: readonly unknown[] = []
   ): Promise<PostgresQueryResult<Row>> {
     if (sql.includes('from "erp_financials"."reporting_books"')) {
       return Promise.resolve({
@@ -490,6 +534,7 @@ class StatementClient implements PostgresQueryClient {
       });
     }
     if (sql.includes('from "erp_financials"."accounts"')) {
+      this.statementAccountingBasis = params[3];
       return Promise.resolve({ rows: [
         {
           book_account_key: "services",
@@ -584,6 +629,36 @@ class BalanceSheetStatementClient implements PostgresQueryClient {
       return Promise.resolve({ rows: [] });
     }
     throw new Error(`Unexpected balance-sheet statement query: ${sql}`);
+  }
+}
+
+class DashboardClient implements PostgresQueryClient {
+  readonly requestedAccountingBases: unknown[] = [];
+
+  query<Row extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string,
+    params: readonly unknown[] = []
+  ): Promise<PostgresQueryResult<Row>> {
+    if (sql.includes('from "erp_financials"."reporting_books"')) {
+      return Promise.resolve({
+        rows: [{ base_currency_code: "USD", accounting_basis: "accrual", status: "active" } as unknown as Row]
+      });
+    }
+    if (sql.includes("with scoped_postings as")) {
+      this.requestedAccountingBases.push(params[3]);
+      return Promise.resolve({ rows: [{
+        assets: "680",
+        liabilities: "50",
+        equity: "630",
+        revenue: "150",
+        expenses: "20",
+        receivables: "75",
+        payables: "25",
+        overdue_receivables: "10",
+        overdue_payables: "5"
+      } as unknown as Row] });
+    }
+    throw new Error(`Unexpected dashboard query: ${sql}`);
   }
 }
 

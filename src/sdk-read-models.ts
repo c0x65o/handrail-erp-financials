@@ -675,6 +675,7 @@ export type PaymentSummary = {
 export type GeneralLedgerSummary = {
   readonly periodStart: IsoDate;
   readonly periodEnd: IsoDate;
+  readonly accountingBasis: AccountingBasis;
   readonly currencyCode: IsoCurrencyCode;
   readonly postingCount: number;
   readonly totalDebits: DecimalString;
@@ -684,6 +685,9 @@ export type GeneralLedgerSummary = {
 
 export type GeneralLedgerPolarity = "debit" | "credit";
 
+/** A report-time override; omission preserves the reporting book default. */
+export type ReportAccountingMethod = Extract<AccountingBasis, "cash" | "accrual">;
+
 /**
  * One validated filter contract is deliberately shared by the ledger page and
  * its summary cards so a host cannot accidentally summarize a different set of
@@ -692,6 +696,7 @@ export type GeneralLedgerPolarity = "debit" | "credit";
 export type GeneralLedgerFilters = {
   readonly periodStart: IsoDate;
   readonly periodEnd: IsoDate;
+  readonly accountingMethod?: ReportAccountingMethod;
   readonly accountKey?: string;
   readonly sourceId?: string;
   readonly transactionType?: string;
@@ -733,6 +738,7 @@ export type GeneralLedgerLine = {
   readonly transactionNumber?: string;
   readonly transactionDate: IsoDate;
   readonly postingDate: IsoDate;
+  readonly accountingBasis: AccountingBasis;
   readonly transactionType: string;
   readonly accountId: string;
   readonly bookAccountKey: string;
@@ -775,6 +781,7 @@ export type ChartOfAccountsItem = {
 export type FinancialDashboardSummary = {
   readonly asOfDate: IsoDate;
   readonly periodStart: IsoDate;
+  readonly accountingBasis: AccountingBasis;
   readonly currencyCode: IsoCurrencyCode;
   readonly assets: DecimalString;
   readonly liabilities: DecimalString;
@@ -802,6 +809,8 @@ export type FinancialStatementLine = {
   readonly amount: DecimalString;
   readonly debitAmount: DecimalString;
   readonly creditAmount: DecimalString;
+  /** Basis-locked filter that opens the exact canonical postings behind this line (including descendants). */
+  readonly drilldown?: GeneralLedgerFilters;
 };
 
 export type FinancialStatement = {
@@ -1099,8 +1108,8 @@ export type FinancialReadModels = {
   listGeneralLedger(input: PageRequest & GeneralLedgerFilters): Promise<Page<GeneralLedgerLine>>;
   getGeneralLedgerSummary(input: GeneralLedgerFilters): Promise<GeneralLedgerSummary>;
   listChartOfAccounts(input?: { readonly asOfDate?: IsoDate; readonly includeInactive?: boolean }): Promise<readonly ChartOfAccountsItem[]>;
-  getDashboardSummary(input: { readonly periodStart: IsoDate; readonly asOfDate: IsoDate }): Promise<FinancialDashboardSummary>;
-  getFinancialStatement(input: { readonly reportName: FinancialStatementName; readonly periodStart: IsoDate; readonly periodEnd: IsoDate; readonly asOfDate?: IsoDate }): Promise<FinancialStatement>;
+  getDashboardSummary(input: { readonly periodStart: IsoDate; readonly asOfDate: IsoDate; readonly accountingMethod?: ReportAccountingMethod }): Promise<FinancialDashboardSummary>;
+  getFinancialStatement(input: { readonly reportName: FinancialStatementName; readonly periodStart: IsoDate; readonly periodEnd: IsoDate; readonly asOfDate?: IsoDate; readonly accountingMethod?: ReportAccountingMethod }): Promise<FinancialStatement>;
   getAging(input: { readonly kind: "receivables" | "payables"; readonly asOfDate: IsoDate }): Promise<AgingReport>;
   listBankReconciliation(input?: PageRequest & { readonly status?: BankReconciliationListItem["status"] }): Promise<Page<BankReconciliationListItem>>;
   getBankReconciliationSummary(): Promise<BankReconciliationSummary>;
@@ -4272,6 +4281,7 @@ async function listGeneralLedger(
   const page = pageInput(input, pageKind, scope.bookId);
   return scope.database.transaction(async (client) => {
     const book = await resolveBook(client, scope);
+    const accountingBasis = filters.accountingMethod ?? book.accountingBasis;
     const result = await client.query(
       `with recursive effective_accounts as (
   select account."tenant_id", account."source_id", account."account_id",
@@ -4308,7 +4318,7 @@ async function listGeneralLedger(
 )
 select posting."posting_id", posting."source_id", posting."source_posting_id", posting."transaction_id",
   transaction."source_transaction_id", transaction."source_transaction_type", transaction."transaction_number",
-  transaction."transaction_date", posting."posting_date", posting."account_id",
+  transaction."transaction_date", posting."posting_date", posting."accounting_basis", posting."account_id",
   coalesce(mapping."book_account_key", posting."source_id" || ':' || posting."account_id") as "book_account_key",
   account."account_number", account."name" as "account_name", posting."party_id", posting."item_id",
   line."description", posting."debit_amount", posting."credit_amount", posting."net_amount", posting."currency_code",
@@ -4357,7 +4367,7 @@ where posting."tenant_id" = $1 and posting."accounting_basis" = $4 and posting."
   and ($16::date is null or (posting."posting_date", posting."posting_id") < ($16::date, $17::text))
 order by posting."posting_date" desc, posting."posting_id" desc
 limit $18`,
-      [scope.tenantId, scope.companyId, scope.bookId, book.accountingBasis, book.currencyCode,
+      [scope.tenantId, scope.companyId, scope.bookId, accountingBasis, book.currencyCode,
         filters.periodStart, filters.periodEnd, filters.accountKey, filters.sourceId, filters.transactionType,
         filters.classId, filters.dimensionKind, filters.dimensionId, filters.polarity, filters.search,
         page.date, page.id, page.limit + 1]
@@ -4376,6 +4386,7 @@ async function getGeneralLedgerSummary(
   const filters = generalLedgerFilters(input);
   return scope.database.transaction(async (client) => {
     const book = await resolveBook(client, scope);
+    const accountingBasis = filters.accountingMethod ?? book.accountingBasis;
     const result = await client.query(
       `with recursive effective_accounts as (
   select account."tenant_id", account."source_id", account."account_id",
@@ -4449,7 +4460,7 @@ where posting."tenant_id" = $1 and posting."accounting_basis" = $4 and posting."
   and ($15::text is null or strpos(lower(concat_ws(' ', transaction."transaction_number", transaction."memo",
     line."description", account."account_number", account."name", party."display_name", posting."posting_id",
     transaction."transaction_id")), lower($15)) > 0)`,
-      [scope.tenantId, scope.companyId, scope.bookId, book.accountingBasis, book.currencyCode,
+      [scope.tenantId, scope.companyId, scope.bookId, accountingBasis, book.currencyCode,
         filters.periodStart, filters.periodEnd, filters.accountKey, filters.sourceId, filters.transactionType,
         filters.classId, filters.dimensionKind, filters.dimensionId, filters.polarity, filters.search]
     );
@@ -4459,6 +4470,7 @@ where posting."tenant_id" = $1 and posting."accounting_basis" = $4 and posting."
     return {
       periodStart: filters.periodStart,
       periodEnd: filters.periodEnd,
+      accountingBasis,
       currencyCode: book.currencyCode,
       postingCount: integer(row.posting_count, "posting_count"),
       totalDebits,
@@ -4538,11 +4550,13 @@ order by "account_number" nulls last, "name", "book_account_key"`,
 
 async function getDashboardSummary(
   scope: Scope,
-  input: { readonly periodStart: IsoDate; readonly asOfDate: IsoDate }
+  input: { readonly periodStart: IsoDate; readonly asOfDate: IsoDate; readonly accountingMethod?: ReportAccountingMethod }
 ): Promise<FinancialDashboardSummary> {
   assertWindow(input.periodStart, input.asOfDate);
+  assertReportAccountingMethod(input.accountingMethod);
   return scope.database.transaction(async (client) => {
     const book = await resolveBook(client, scope);
+    const accountingBasis = input.accountingMethod ?? book.accountingBasis;
     const result = await client.query(
       `with scoped_postings as (
   select account."classification", posting."net_amount", posting."posting_date"
@@ -4577,7 +4591,7 @@ select
   coalesce((select sum("open_amount") from scoped_documents where "document_type" = 'invoice' and "due_date" < $6::date), 0) as "overdue_receivables",
   coalesce((select sum("open_amount") from scoped_documents where "document_type" = 'vendor_bill' and "due_date" < $6::date), 0) as "overdue_payables"
 from scoped_postings`,
-      [scope.tenantId, scope.companyId, scope.bookId, book.accountingBasis, book.currencyCode, input.asOfDate, input.periodStart]
+      [scope.tenantId, scope.companyId, scope.bookId, accountingBasis, book.currencyCode, input.asOfDate, input.periodStart]
     );
     const row = requiredRow(result.rows[0], "dashboard summary");
     const revenue = money(row.revenue, "revenue");
@@ -4585,6 +4599,7 @@ from scoped_postings`,
     return {
       asOfDate: input.asOfDate,
       periodStart: input.periodStart,
+      accountingBasis,
       currencyCode: book.currencyCode,
       assets: money(row.assets, "assets"),
       liabilities: money(row.liabilities, "liabilities"),
@@ -4602,9 +4617,10 @@ from scoped_postings`,
 
 async function getFinancialStatement(
   scope: Scope,
-  input: { readonly reportName: FinancialStatementName; readonly periodStart: IsoDate; readonly periodEnd: IsoDate; readonly asOfDate?: IsoDate }
+  input: { readonly reportName: FinancialStatementName; readonly periodStart: IsoDate; readonly periodEnd: IsoDate; readonly asOfDate?: IsoDate; readonly accountingMethod?: ReportAccountingMethod }
 ): Promise<FinancialStatement> {
   assertWindow(input.periodStart, input.periodEnd);
+  assertReportAccountingMethod(input.accountingMethod);
   const asOfDate = input.asOfDate ?? input.periodEnd;
   assertDate(asOfDate, "asOfDate");
   if (!["profit_and_loss", "balance_sheet", "trial_balance"].includes(input.reportName)) {
@@ -4612,6 +4628,7 @@ async function getFinancialStatement(
   }
   return scope.database.transaction(async (client) => {
     const book = await resolveBook(client, scope);
+    const accountingBasis = input.accountingMethod ?? book.accountingBasis;
     const result = await client.query(
       `select coalesce(mapping."book_account_key", account."source_id" || ':' || account."account_id") as "book_account_key",
   case when count(mapping."book_account_key") > 0
@@ -4655,7 +4672,7 @@ where account."tenant_id" = $1 and (mapping."book_account_key" is null or book_a
 group by coalesce(mapping."book_account_key", account."source_id" || ':' || account."account_id")
 order by coalesce(min(book_account."account_number"), min(account."account_number")) nulls last,
   coalesce(min(book_account."name"), min(account."name")), "book_account_key"`,
-      [scope.tenantId, scope.companyId, scope.bookId, book.accountingBasis, book.currencyCode,
+      [scope.tenantId, scope.companyId, scope.bookId, accountingBasis, book.currencyCode,
         input.periodStart, input.periodEnd, input.reportName, asOfDate]
     );
     const defined = await client.query(
@@ -4692,7 +4709,7 @@ join "erp_financials"."ledger_postings" posting
 where account."tenant_id" = $1 and (mapping."book_account_key" is null or book_account."active")
   and coalesce(book_account."classification", account."classification") in
     ('income', 'cost_of_goods_sold', 'expense', 'other_income', 'other_expense')`,
-        [scope.tenantId, scope.companyId, scope.bookId, book.accountingBasis, book.currencyCode,
+        [scope.tenantId, scope.companyId, scope.bookId, accountingBasis, book.currencyCode,
           input.periodStart, asOfDate]
       );
       const earnings = requiredRow(earningsResult.rows[0], "balance sheet earnings");
@@ -4710,13 +4727,27 @@ where account."tenant_id" = $1 and (mapping."book_account_key" is null or book_a
       ...mergeBookStatementLines(result.rows.map(statementLineFromRow), defined.rows),
       ...derivedEquityLines
     ];
-    const lines = rollupStatementLines(direct);
+    const lines = rollupStatementLines(direct).map((line): FinancialStatementLine => ({
+      ...line,
+      ...(line.bookAccountKey.startsWith("__derived_equity__:")
+        ? {}
+        : {
+            drilldown: {
+              periodStart: input.reportName === "profit_and_loss" ? input.periodStart : "0001-01-01",
+              periodEnd: input.reportName === "profit_and_loss" ? input.periodEnd : asOfDate,
+              ...(accountingBasis === "cash" || accountingBasis === "accrual"
+                ? { accountingMethod: accountingBasis }
+                : {}),
+              accountKey: line.bookAccountKey
+            }
+          })
+    }));
     return {
       reportName: input.reportName,
       periodStart: input.periodStart,
       periodEnd: input.periodEnd,
       asOfDate,
-      accountingBasis: book.accountingBasis,
+      accountingBasis,
       currencyCode: book.currencyCode,
       lines,
       totals: statementTotals(input.reportName, lines)
@@ -5526,6 +5557,7 @@ function ledgerLineFromRow(row: Readonly<Record<string, unknown>>): GeneralLedge
     ...(optionalFields.transactionNumber === undefined ? {} : { transactionNumber: optionalFields.transactionNumber }),
     transactionDate: date(row.transaction_date, "transaction_date"),
     postingDate: date(row.posting_date, "posting_date"),
+    accountingBasis: string(row.accounting_basis, "accounting_basis") as AccountingBasis,
     transactionType: boundedStoredString(row.source_transaction_type, "source_transaction_type", 200),
     accountId: string(row.account_id, "account_id"),
     bookAccountKey: string(row.book_account_key, "book_account_key"),
@@ -5562,6 +5594,7 @@ type ValidatedGeneralLedgerFilters = GeneralLedgerFilters;
 
 function generalLedgerFilters(input: GeneralLedgerFilters): ValidatedGeneralLedgerFilters {
   assertWindow(input.periodStart, input.periodEnd);
+  assertReportAccountingMethod(input.accountingMethod);
   const accountKey = ledgerFilterText(input.accountKey, "accountKey");
   const sourceId = ledgerFilterText(input.sourceId, "sourceId");
   const transactionType = ledgerFilterText(input.transactionType, "transactionType");
@@ -5578,6 +5611,7 @@ function generalLedgerFilters(input: GeneralLedgerFilters): ValidatedGeneralLedg
   return {
     periodStart: input.periodStart,
     periodEnd: input.periodEnd,
+    ...(input.accountingMethod === undefined ? {} : { accountingMethod: input.accountingMethod }),
     ...(accountKey === undefined ? {} : { accountKey }),
     ...(sourceId === undefined ? {} : { sourceId }),
     ...(transactionType === undefined ? {} : { transactionType }),
@@ -5587,6 +5621,12 @@ function generalLedgerFilters(input: GeneralLedgerFilters): ValidatedGeneralLedg
     ...(input.polarity === undefined ? {} : { polarity: input.polarity }),
     ...(search === undefined ? {} : { search })
   };
+}
+
+function assertReportAccountingMethod(value: unknown): asserts value is ReportAccountingMethod | undefined {
+  if (value !== undefined && value !== "cash" && value !== "accrual") {
+    throw new ErpFinancialsError("invalid_input", "accountingMethod must be cash or accrual");
+  }
 }
 
 function ledgerFilterText(value: string | undefined, field: string, max = GENERAL_LEDGER_MAX_FILTER_TEXT): string | undefined {

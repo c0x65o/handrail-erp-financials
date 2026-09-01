@@ -206,6 +206,12 @@ reads. Journal cursors are bound to the reporting book and complete filter set;
 fiscal-period and posting-lock reads additionally require the package-owned
 source identity so a host cannot accidentally combine controls from two books.
 
+Financial statements, dashboard summaries, General Ledger pages, and General
+Ledger summaries accept optional `accountingMethod: "cash" | "accrual"`.
+Omission retains the reporting book default. The package owns dual-basis
+materialization, snapshot invalidation, and basis-locked drilldowns; see
+[cash and accrual reporting](docs/cash-accrual-reporting.md).
+
 ```ts
 const journals = await sdk.queries.listJournalEntries({
   sourceId: "native_ledger",

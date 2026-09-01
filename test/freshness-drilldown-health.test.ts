@@ -171,7 +171,7 @@ describe("ERP Financials freshness and drilldown health", () => {
       expect.arrayContaining([
         expect.objectContaining({
           refKind: "line",
-          refId: parent.reportLineId,
+          refId: parent.reportLineId.slice(0, 160),
           refToken: parent.drilldownRef.token,
           postingCount: 4,
           inlinePostingCount: 4,
@@ -179,7 +179,7 @@ describe("ERP Financials freshness and drilldown health", () => {
         }),
         expect.objectContaining({
           refKind: "line",
-          refId: child.reportLineId,
+          refId: child.reportLineId.slice(0, 160),
           refToken: child.drilldownRef.token,
           postingCount: 2,
           inlinePostingCount: 2,
@@ -187,7 +187,7 @@ describe("ERP Financials freshness and drilldown health", () => {
         }),
         expect.objectContaining({
           refKind: "line",
-          refId: grandchild.reportLineId,
+          refId: grandchild.reportLineId.slice(0, 160),
           refToken: grandchild.drilldownRef.token,
           postingCount: 1,
           inlinePostingCount: 1,
@@ -205,6 +205,7 @@ describe("ERP Financials freshness and drilldown health", () => {
       "acct_health_income_child",
       unboundedUnscopedNestedLineDrilldownRef()
     );
+    const refId = requiredLine(report, "acct_health_income_child").reportLineId.slice(0, 160);
 
     const health = checkErpFinancialsFreshnessAndDrilldownHealth({
       reports: [report]
@@ -221,17 +222,17 @@ describe("ERP Financials freshness and drilldown health", () => {
         expect.objectContaining({
           kind: "unbounded_drilldown_ref",
           refKind: "line",
-          refId: "profit_and_loss:line:account:acct_health_income_child"
+          refId
         }),
         expect.objectContaining({
           kind: "unscoped_drilldown_ref",
           refKind: "line",
-          refId: "profit_and_loss:line:account:acct_health_income_child"
+          refId
         }),
         expect.objectContaining({
           kind: "unresolvable_drilldown_ref",
           refKind: "line",
-          refId: "profit_and_loss:line:account:acct_health_income_child"
+          refId
         })
       ])
     );

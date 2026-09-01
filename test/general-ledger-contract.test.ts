@@ -21,6 +21,7 @@ describe("general-ledger public contract", () => {
     const filters = {
       periodStart: "2026-08-01",
       periodEnd: "2026-08-31",
+      accountingMethod: "cash" as const,
       accountKey: "service_revenue",
       sourceId: "source_1",
       transactionType: "Invoice",
@@ -36,6 +37,7 @@ describe("general-ledger public contract", () => {
       expect.objectContaining({
         postingId: "posting_2",
         postingDate: "2026-08-15",
+        accountingBasis: "cash",
         transactionType: "Invoice",
         omittedDimensionCount: 1,
         sourceProvenance: {
@@ -72,6 +74,7 @@ describe("general-ledger public contract", () => {
     expect(client.listSql).toContain("join selected_account_keys selected");
 
     await expect(queries.getGeneralLedgerSummary(filters)).resolves.toMatchObject({
+      accountingBasis: "cash",
       postingCount: 2,
       totalDebits: "10.00",
       totalCredits: "25.00",
@@ -86,6 +89,17 @@ describe("general-ledger public contract", () => {
       sourceId: "source_2",
       cursor: page.nextCursor
     })).rejects.toMatchObject({ code: "invalid_input" });
+    await expect(queries.listGeneralLedger({
+      ...filters,
+      accountingMethod: "accrual",
+      cursor: page.nextCursor
+    })).rejects.toMatchObject({ code: "invalid_input" });
+
+    await expect(queries.getGeneralLedgerSummary({
+      periodStart: filters.periodStart,
+      periodEnd: filters.periodEnd
+    })).resolves.toMatchObject({ accountingBasis: "accrual" });
+    expect(client.summaryParams[3]).toBe("accrual");
   });
 
   it("rejects invalid dates, dimensions, polarity, search, and page bounds before querying", async () => {
@@ -98,6 +112,7 @@ describe("general-ledger public contract", () => {
     await expect(queries.listGeneralLedger({ ...base, periodStart: "2026-02-30" })).rejects.toMatchObject({ code: "invalid_input" });
     await expect(queries.getGeneralLedgerSummary({ ...base, dimensionKind: "class" })).rejects.toMatchObject({ code: "invalid_input" });
     await expect(queries.getGeneralLedgerSummary({ ...base, polarity: "both" as "debit" })).rejects.toMatchObject({ code: "invalid_input" });
+    await expect(queries.getGeneralLedgerSummary({ ...base, accountingMethod: "modified_cash" as "cash" })).rejects.toMatchObject({ code: "invalid_input" });
     await expect(queries.getGeneralLedgerSummary({ ...base, search: "x".repeat(101) })).rejects.toMatchObject({ code: "invalid_input" });
     await expect(queries.listGeneralLedger({ ...base, limit: 201 })).rejects.toMatchObject({ code: "invalid_input" });
     expect(client.calls).toHaveLength(0);
@@ -307,6 +322,7 @@ function ledgerRow(postingId: string): Record<string, unknown> {
     transaction_number: "INV-1001",
     transaction_date: "2026-08-15",
     posting_date: "2026-08-15",
+    accounting_basis: "cash",
     account_id: "account_income",
     book_account_key: "service_revenue",
     account_number: "4010",

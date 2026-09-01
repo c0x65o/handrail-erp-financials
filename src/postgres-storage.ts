@@ -44,6 +44,10 @@ import type {
   PersistQuickBooksSubledgerResourcesInput,
   QuickBooksSubledgerImportResult
 } from "./quickbooks-subledger-import.js";
+import type {
+  QuickBooksDualBasisBackfillPersistence,
+  QuickBooksBasisBackfillProjection
+} from "./quickbooks-dual-basis-backfill.js";
 import {
   assertPaymentApplication,
   assertPostingRule,
@@ -96,6 +100,10 @@ export type PostgresQueryClient = {
     sql: string,
     params?: readonly unknown[]
   ): Promise<PostgresQueryResult<Row>>;
+};
+
+export type PostgresTransactionRunner = {
+  transaction<Result>(work: (client: PostgresQueryClient) => Promise<Result>): Promise<Result>;
 };
 
 export type InstallPostgresSchemaOptions = {
@@ -276,7 +284,7 @@ export type FixtureLoadResult = {
   readonly postings: number;
 };
 
-export type PostgresStorageAdapter = StandardReportPresentationReadModelStorage & {
+export type PostgresStorageAdapter = StandardReportPresentationReadModelStorage & QuickBooksDualBasisBackfillPersistence & {
   readonly manifest: PostgresSchemaManifest;
   installSchema(options?: InstallPostgresSchemaOptions): Promise<InstallPostgresSchemaResult>;
   validateSchema(): Promise<PostgresSchemaValidationResult>;
@@ -517,6 +525,9 @@ export function createPostgresStorageAdapter(
     persistQuickBooksSubledgerResources(input) {
       return persistQuickBooksSubledgerResources({ client, ...input });
     },
+    replaceDualBasisRange(input) {
+      return replaceQuickBooksDualBasisBackfillRange(client, manifest, input);
+    },
     async upsertPostingRules(rules) {
       rules.forEach(assertPostingRule);
       return upsertRows(client, manifest, "posting_rules", rules.map(postingRuleRow), [
@@ -626,6 +637,26 @@ export function createPostgresStorageAdapter(
     },
     async loadStandardReportPresentation(request) {
       return loadStandardReportPresentation(client, manifest, request);
+    }
+  };
+}
+
+/**
+ * Transaction-safe persistence boundary for the dual-basis QuickBooks worker.
+ * A plain storage adapter is useful inside an existing transaction; this
+ * wrapper owns the transaction so deletion and replacement of both bases
+ * cannot be observed or committed independently.
+ */
+export function createPostgresQuickBooksDualBasisBackfillPersistence(
+  database: PostgresTransactionRunner,
+  manifest: PostgresSchemaManifest = POSTGRES_CANONICAL_SCHEMA_MANIFEST
+): QuickBooksDualBasisBackfillPersistence {
+  assertManifestHasNoCredentialColumns(manifest);
+  return {
+    replaceDualBasisRange(input) {
+      return database.transaction((client) =>
+        replaceQuickBooksDualBasisBackfillRange(client, manifest, input)
+      );
     }
   };
 }
@@ -1176,6 +1207,82 @@ where transactions."tenant_id" = $1
   };
 }
 
+async function replaceQuickBooksDualBasisBackfillRange(
+  client: PostgresQueryClient,
+  manifest: PostgresSchemaManifest,
+  input: {
+    readonly tenantId: string;
+    readonly companyId: string;
+    readonly sourceId: string;
+    readonly periodStart: IsoDate;
+    readonly periodEnd: IsoDate;
+    readonly projections: readonly [QuickBooksBasisBackfillProjection, QuickBooksBasisBackfillProjection];
+  }
+): Promise<{ readonly importBatches: number; readonly transactions: number; readonly postings: number; readonly snapshotsMarkedStale: number }> {
+  const methods = input.projections.map((projection) => projection.accountingBasis);
+  if (new Set(methods).size !== 2 || !methods.includes("cash") || !methods.includes("accrual")) {
+    throw new Error("QuickBooks dual-basis range replacement requires one cash and one accrual projection");
+  }
+  await client.query(
+    `delete from ${qualifiedTable(manifest, "ledger_postings")} posting
+using ${qualifiedTable(manifest, "transactions")} transaction
+where posting."tenant_id" = $1 and posting."source_id" = $2
+  and posting."transaction_id" = transaction."transaction_id"
+  and transaction."tenant_id" = posting."tenant_id" and transaction."source_id" = posting."source_id"
+  and transaction."source_transaction_type" like 'QuickBooksGeneralLedger:%'
+  and posting."accounting_basis" = any($3::text[])
+  and posting."posting_date" between $4::date and $5::date`,
+    [input.tenantId, input.sourceId, methods, input.periodStart, input.periodEnd]
+  );
+  await client.query(
+    `delete from ${qualifiedTable(manifest, "transactions")} transaction
+where transaction."tenant_id" = $1 and transaction."source_id" = $2
+  and transaction."source_transaction_type" like 'QuickBooksGeneralLedger:%'
+  and transaction."transaction_date" between $3::date and $4::date
+  and not exists (
+    select 1 from ${qualifiedTable(manifest, "ledger_postings")} posting
+    where posting."tenant_id" = transaction."tenant_id" and posting."source_id" = transaction."source_id"
+      and posting."transaction_id" = transaction."transaction_id"
+  )`,
+    [input.tenantId, input.sourceId, input.periodStart, input.periodEnd]
+  );
+
+  let importBatches = 0;
+  let transactions = 0;
+  let postings = 0;
+  let snapshotsMarkedStale = 0;
+  for (const projection of input.projections) {
+    importBatches += await upsertRows(client, manifest, "import_batches", [importBatchRow(projection.importBatch)], [
+      "tenant_id", "source_id", "import_batch_id"
+    ]);
+    for (const transaction of projection.transactions) {
+      if (transaction.sourcePayloadRef !== undefined) assertSafeSourcePayloadRef(transaction.sourcePayloadRef);
+    }
+    transactions += await upsertRows(client, manifest, "transactions", projection.transactions.map(transactionRow), [
+      "tenant_id", "source_id", "source_transaction_type", "source_transaction_id"
+    ]);
+    for (const posting of projection.postings) {
+      assertLedgerPostingAmounts(posting);
+      if (posting.sourcePayloadRef !== undefined) assertSafeSourcePayloadRef(posting.sourcePayloadRef);
+    }
+    postings += await upsertRows(client, manifest, "ledger_postings", projection.postings.map(ledgerPostingRow), [
+      "tenant_id", "source_id", "accounting_basis", "source_posting_id"
+    ]);
+    const projectionCurrencyCode = projection.postings[0]?.currencyCode;
+    snapshotsMarkedStale += await markReportSnapshotsStaleForPostingChanges(client, manifest, {
+      tenantId: input.tenantId,
+      companyId: input.companyId,
+      sourceId: input.sourceId,
+      affectedStart: input.periodStart,
+      affectedEnd: input.periodEnd,
+      staleReason: "quickbooks_dual_basis_backfill_replaced",
+      accountingBasis: projection.accountingBasis,
+      ...(projectionCurrencyCode === undefined ? {} : { currencyCode: projectionCurrencyCode })
+    });
+  }
+  return { importBatches, transactions, postings, snapshotsMarkedStale };
+}
+
 async function loadReportBuilderInput(
   client: PostgresQueryClient,
   manifest: PostgresSchemaManifest,
@@ -1362,9 +1469,6 @@ async function loadStandardReportPresentation(
   manifest: PostgresSchemaManifest,
   request: StandardReportPresentationReadModelRequest
 ): Promise<StandardReportPresentationReportSet> {
-  if (request.reportName !== "profit_and_loss") {
-    throw new Error(`Snapshot-backed standard presentation is not implemented for ${request.reportName}`);
-  }
   if ((request.compareTo?.periods ?? []).length > 0) {
     throw new Error("Snapshot-backed standard presentation compare-to periods require prebuilt comparison snapshots");
   }
@@ -1372,8 +1476,11 @@ async function loadStandardReportPresentation(
   const accountingMethod = request.accountingMethod ?? "accrual";
   const displayColumnsBy = request.displayColumnsBy ?? "none";
 
-  if (isRollupDimensionDisplayColumnsBy(displayColumnsBy)) {
+  if (isRollupDimensionDisplayColumnsBy(displayColumnsBy) && request.reportName === "profit_and_loss") {
     return loadDimensionStandardReportPresentationFromRollups(client, manifest, request, accountingMethod, displayColumnsBy);
+  }
+  if (isRollupDimensionDisplayColumnsBy(displayColumnsBy)) {
+    throw new Error(`Snapshot-backed ${request.reportName} presentation does not support ${displayColumnsBy} columns`);
   }
 
   const groups = presentationSnapshotGroups(request, displayColumnsBy);
@@ -1415,10 +1522,14 @@ async function loadStandardReportPresentation(
     asOfDate: request.asOfDate ?? request.periodEnd,
     currencyCode: request.currencyCode
   });
-  const primaryReport =
-    primarySnapshot === undefined
-      ? synthesizePrimaryReportFromColumns(request, accountingMethod, amountColumns)
-      : builtReportFromStoredSnapshot(primarySnapshot);
+  if (primarySnapshot === undefined && request.reportName !== "profit_and_loss") {
+    throw new Error(
+      `Missing primary report snapshot for ${request.reportName} ${accountingMethod} ${request.periodStart} through ${request.periodEnd}`
+    );
+  }
+  const primaryReport = primarySnapshot === undefined
+    ? synthesizePrimaryReportFromColumns(request, accountingMethod, amountColumns)
+    : builtReportFromStoredSnapshot(primarySnapshot);
 
   return {
     reportName: request.reportName,

@@ -10,6 +10,7 @@ import { assertPostingDateAllowed, createFiscalPeriodService } from "./fiscal-pe
 import { ErpFinancialsError } from "./sdk-errors.js";
 import { appendFinancialOutboxEvent } from "./financial-outbox.js";
 import { normalizeCommercialDocumentLine } from "./commercial-lines.js";
+import { projectCashBasisApplication } from "./accounting-basis-projection.js";
 
 import type {
   Account,
@@ -33,6 +34,7 @@ import type { FinancialOperationContext } from "./financial-lifecycle.js";
 import type { FiscalPeriodService } from "./fiscal-periods.js";
 import type { ErpFinancialsErrorCode, ErpFinancialsErrorDetails } from "./sdk-errors.js";
 import type { CommercialDocumentLineInput, NormalizedCommercialDocumentLine } from "./commercial-lines.js";
+import type { CashBasisApplicationType, ManualJournalAccountingPolicy } from "./accounting-basis-projection.js";
 
 export const JOURNAL_ENTRY_POSTED_STALE_REASON = "journal_entry_posted";
 
@@ -136,6 +138,8 @@ export type PostJournalEntryInput = {
   readonly postedAt?: IsoDateTime;
   readonly currencyCode?: IsoCurrencyCode;
   readonly accountingBasis?: AccountingBasis;
+  /** Manual journals are never converted by inference. Mirroring must be explicitly requested. */
+  readonly accountingPolicy?: ManualJournalAccountingPolicy;
   readonly adjustment?: boolean;
   readonly lines: readonly PostJournalEntryLineInput[];
   readonly staleReason?: string;
@@ -676,6 +680,7 @@ type NormalizedJournalEntry = {
   readonly postedAt?: IsoDateTime;
   readonly currencyCode: IsoCurrencyCode;
   readonly accountingBasis: AccountingBasis;
+  readonly accountingPolicy: ManualJournalAccountingPolicy;
   readonly lines: readonly NormalizedJournalLine[];
   readonly checksum: string;
   readonly staleReason: string;
@@ -914,7 +919,9 @@ async function postJournalEntry(
     );
     await assertCompanySourceScope(client, context);
 
-    return executePostJournalEntryInTransaction(client, context, input, journal, identities);
+    const posted = await executePostJournalEntryInTransaction(client, context, input, journal, identities);
+    const mirrored = await executeJournalBasisMirror(client, context, input, journal);
+    return mirrored === undefined ? posted : combineJournalResults(posted, mirrored);
   });
 }
 
@@ -2070,6 +2077,7 @@ async function createSubledgerDocument(
     ...(input.documentNumber === undefined ? {} : { transactionNumber: input.documentNumber }),
     ...(input.memo === undefined ? {} : { memo: input.memo }),
     currencyCode: input.currencyCode,
+    accountingBasis: "accrual",
     lines: input.journalLines,
     nativeTransactionType: subledgerTransactionType(input.documentType),
     lifecycleAggregateType: "subledger_document",
@@ -2088,6 +2096,21 @@ async function createSubledgerDocument(
     await assertSubledgerParty(client, context, input.partyId, input.documentType);
     await assertRelatedInvoiceReference(client, context, input.partyId, input.metadata);
     const posted = await executePostJournalEntryInTransaction(client, context, journalInput, journal, identities);
+    if (isDualBasisCashMovement(input.documentType)) {
+      const cashInput: InternalPostJournalEntryInput = {
+        ...journalInput,
+        idempotencyKey: `${input.idempotencyKey}:accounting-basis:cash`,
+        accountingBasis: "cash"
+      };
+      const cashJournal = normalizeJournalEntry(context, cashInput);
+      await executePostJournalEntryInTransaction(
+        client,
+        context,
+        cashInput,
+        cashJournal,
+        journalIdentities(context, cashJournal)
+      );
+    }
     const openAmount = input.documentStartsOpen ? input.amount : "0.00";
     const documentStatus = input.documentStartsOpen ? "open" : "settled";
     const insert = await client.query(
@@ -2124,6 +2147,7 @@ returning *`,
       if (input.documentLines !== undefined) {
         await writeSubledgerDocumentLines(client, context, documentId, input.documentLines);
       }
+      await persistRefundCashBasisProjection(client, context, input, documentId, "reverse");
       await appendSubledgerDocumentOutboxEvent(client, context, input, documentId, posted.transactionId);
       return documentResult(inserted, posted);
     }
@@ -2142,8 +2166,31 @@ returning *`,
     ) {
       throw new ErpFinancialsIdempotencyConflictError(input.idempotencyKey);
     }
+    await persistRefundCashBasisProjection(client, context, input, documentId, "reverse");
     await appendSubledgerDocumentOutboxEvent(client, context, input, documentId, posted.transactionId);
     return documentResult(existing, { ...posted, status: "already_posted" });
+  });
+}
+
+async function persistRefundCashBasisProjection(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  input: SubledgerDocumentWrite,
+  documentId: string,
+  action: "recognize" | "reverse"
+): Promise<readonly string[]> {
+  if (input.documentType !== "refund") return [];
+  const provenance = input.metadata.refundProvenance;
+  if (provenance === null || typeof provenance !== "object" || Array.isArray(provenance)) return [];
+  const relatedInvoiceId = (provenance as Readonly<Record<string, JsonValue>>).relatedInvoiceId;
+  if (typeof relatedInvoiceId !== "string") return [];
+  return persistCashBasisApplicationProjection(client, context, {
+    action,
+    applicationId: `refund:${documentId}`,
+    applicationType: "customer_refund_against_invoice",
+    appliedAmount: input.amount,
+    effectiveDate: input.date,
+    targetTransactionId: await loadSubledgerDocumentTransactionId(client, context, relatedInvoiceId)
   });
 }
 
@@ -2332,6 +2379,14 @@ returning *`,
     if (row === undefined) {
       throw new Error("Subledger application insert did not return its row");
     }
+    const cashBasisPostingIds = await persistCashBasisApplicationProjection(client, context, {
+      action: "recognize",
+      applicationId,
+      applicationType: input.applicationType,
+      appliedAmount: amount,
+      effectiveDate: input.applicationDate,
+      targetTransactionId: storedString(target.transaction_id, "target.transaction_id")
+    });
     await appendServiceOutboxEvent(client, context, {
       eventType: "subledger_application.applied",
       aggregateType: "subledger_application",
@@ -2342,7 +2397,8 @@ returning *`,
         applicationId,
         applicationType: input.applicationType,
         sourceDocumentId: input.sourceDocumentId,
-        targetDocumentId: input.targetDocumentId
+        targetDocumentId: input.targetDocumentId,
+        cashBasisPostingIds
       }
     });
     return applicationResult(row, "applied");
@@ -2431,15 +2487,133 @@ returning *`,
         details: { applicationId: input.applicationId }
       });
     }
+    const cashBasisPostingIds = await persistCashBasisApplicationProjection(client, context, {
+      action: "reverse",
+      applicationId: input.applicationId,
+      applicationType: storedString(current.application_type, "application_type") as SubledgerApplicationType,
+      appliedAmount: storedMoney(current.applied_amount, "applied_amount"),
+      effectiveDate: input.effectiveDate,
+      targetTransactionId: await loadSubledgerDocumentTransactionId(
+        client,
+        context,
+        storedString(current.target_document_id, "target_document_id")
+      )
+    });
     await appendServiceOutboxEvent(client, context, {
       eventType: `subledger_application.${status}`,
       aggregateType: "subledger_application",
       aggregateId: input.applicationId,
       idempotencyKey: `subledger-application:${input.applicationId}:outbox:${status}:v${String(currentVersion)}`,
-      payload: { applicationId: input.applicationId, effectiveDate: input.effectiveDate, priorVersion: currentVersion, status }
+      payload: { applicationId: input.applicationId, cashBasisPostingIds, effectiveDate: input.effectiveDate, priorVersion: currentVersion, status }
     });
     return applicationResult(row, status);
   });
+}
+
+async function persistCashBasisApplicationProjection(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  input: {
+    readonly action: "recognize" | "reverse";
+    readonly applicationId: string;
+    readonly applicationType: SubledgerApplicationType | "customer_refund_against_invoice";
+    readonly appliedAmount: DecimalString;
+    readonly effectiveDate: IsoDate;
+    readonly targetTransactionId: string;
+  }
+): Promise<readonly string[]> {
+  if (!["customer_payment_to_invoice", "bill_payment_to_bill", "customer_refund_against_invoice"].includes(input.applicationType)) return [];
+  const result = await client.query(
+    `select * from "erp_financials"."ledger_postings"
+where "tenant_id" = $1 and "source_id" = $2 and "transaction_id" = $3 and "accounting_basis" = 'accrual'
+order by "posting_id"
+for key share`,
+    [context.tenantId, context.sourceId, input.targetTransactionId]
+  );
+  const importBatchId = scopedRecordId(
+    context,
+    "import_batch",
+    `cash-basis-application:${input.applicationId}:${input.action}`
+  );
+  const accrualPostings = result.rows.map(storedLedgerPosting);
+  const postings = projectCashBasisApplication({
+    applicationId: input.applicationId,
+    applicationType: input.applicationType as CashBasisApplicationType,
+    action: input.action,
+    appliedAmount: input.appliedAmount,
+    effectiveDate: input.effectiveDate,
+    importBatchId,
+    accrualPostings
+  });
+  const now = context.now();
+  const storage = createPostgresStorageAdapter(client);
+  await storage.upsertImportBatch({
+    tenantId: context.tenantId,
+    sourceId: context.sourceId,
+    importBatchId,
+    mode: "delta",
+    status: "completed",
+    startedAt: now,
+    completedAt: now,
+    sourceObjectCounts: { applications: 1, postings: postings.length }
+  });
+  await storage.upsertLedgerPostings(postings);
+  const firstPosting = postings[0];
+  if (firstPosting === undefined) throw new Error("Cash-basis projection returned no postings");
+  await storage.markReportSnapshotsStaleForPostingChanges({
+    tenantId: context.tenantId,
+    companyId: context.companyId,
+    sourceId: context.sourceId,
+    affectedStart: input.effectiveDate,
+    affectedEnd: input.effectiveDate,
+    staleReason: `subledger_application_${input.action}`,
+    accountingBasis: "cash",
+    currencyCode: firstPosting.currencyCode
+  });
+  return postings.map((posting) => posting.postingId);
+}
+
+async function loadSubledgerDocumentTransactionId(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  documentId: string
+): Promise<string> {
+  const result = await client.query(
+    `select "transaction_id" from "erp_financials"."subledger_documents"
+where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3 and "subledger_document_id" = $4`,
+    [context.tenantId, context.companyId, context.sourceId, documentId]
+  );
+  const row = result.rows[0];
+  if (row === undefined) throw new ErpFinancialsValidationError(`Subledger document ${documentId} does not exist`);
+  return storedString(row.transaction_id, "transaction_id");
+}
+
+function storedLedgerPosting(row: Record<string, unknown>): LedgerPosting {
+  const transactionLineId = storedOptionalString(row.transaction_line_id);
+  const partyId = storedOptionalString(row.party_id);
+  const itemId = storedOptionalString(row.item_id);
+  const checkpointId = storedOptionalString(row.checkpoint_id);
+  return {
+    tenantId: storedString(row.tenant_id, "tenant_id"),
+    sourceId: storedString(row.source_id, "source_id"),
+    postingId: storedString(row.posting_id, "posting_id"),
+    sourcePostingId: storedString(row.source_posting_id, "source_posting_id"),
+    transactionId: storedString(row.transaction_id, "transaction_id"),
+    ...(transactionLineId === undefined ? {} : { transactionLineId }),
+    accountId: storedString(row.account_id, "account_id"),
+    ...(partyId === undefined ? {} : { partyId }),
+    ...(itemId === undefined ? {} : { itemId }),
+    postingDate: storedDate(row.posting_date, "posting_date"),
+    accountingBasis: storedString(row.accounting_basis, "accounting_basis") as AccountingBasis,
+    debitAmount: storedMoney(row.debit_amount, "debit_amount"),
+    creditAmount: storedMoney(row.credit_amount, "credit_amount"),
+    netAmount: storedMoney(row.net_amount, "net_amount"),
+    currencyCode: storedString(row.currency_code, "currency_code"),
+    dimensionHash: storedString(row.dimension_hash, "dimension_hash"),
+    dimensionRefs: storedDimensionRefs(row.dimension_refs),
+    importBatchId: storedString(row.import_batch_id, "import_batch_id"),
+    ...(checkpointId === undefined ? {} : { checkpointId })
+  };
 }
 
 async function assertSubledgerParty(
@@ -2905,6 +3079,7 @@ type LoadedPostedJournal = {
   readonly memo?: string;
   readonly currencyCode: IsoCurrencyCode;
   readonly accountingBasis: AccountingBasis;
+  readonly accountingPolicy: ManualJournalAccountingPolicy;
   readonly lines: readonly PostJournalEntryLineInput[];
   readonly postedLifecycleEventId?: string;
 };
@@ -3414,6 +3589,7 @@ async function runPostedBillPaymentVoid(
       memo: input.memo ?? `voided bill payment ${original.documentId}`,
       currencyCode: original.currencyCode,
       accountingBasis: original.journal.accountingBasis,
+      accountingPolicy: "mirror_cash_and_accrual",
       adjustment: true,
       lines: original.journal.lines
     };
@@ -3431,13 +3607,15 @@ async function runPostedBillPaymentVoid(
       client,
       `journal-entry:${context.tenantId}:${context.sourceId}:${reversalJournal.idempotencyKey}`
     );
-    const reversal = await executePostJournalEntryInTransaction(
+    const primaryReversal = await executePostJournalEntryInTransaction(
       client,
       context,
       reversalInput,
       reversalJournal,
       reversalIdentities
     );
+    const mirroredReversal = await executeJournalBasisMirror(client, context, reversalInput, reversalJournal);
+    const reversal = mirroredReversal === undefined ? primaryReversal : combineJournalResults(primaryReversal, mirroredReversal);
     const reversalLink = await appendJournalEntryLink(client, context, {
       originalTransactionId: original.transactionId,
       relatedTransactionId: reversal.transactionId,
@@ -3611,6 +3789,7 @@ type LoadedIssuedAdjustment = {
   readonly openAmount: DecimalString;
   readonly status: SubledgerDocumentResult["documentStatus"];
   readonly version: number;
+  readonly relatedInvoiceId?: string;
   readonly journal: LoadedPostedJournal;
 };
 
@@ -3644,6 +3823,7 @@ async function runIssuedAdjustmentLifecycle(
       memo: input.memo ?? `${outcome} ${original.documentId}`,
       currencyCode: original.currencyCode,
       accountingBasis: original.journal.accountingBasis,
+      ...(original.documentType === "refund" ? { accountingPolicy: "mirror_cash_and_accrual" as const } : {}),
       adjustment: true,
       lines: original.journal.lines
     };
@@ -3662,13 +3842,25 @@ async function runIssuedAdjustmentLifecycle(
       client,
       `journal-entry:${context.tenantId}:${context.sourceId}:${reversalJournal.idempotencyKey}`
     );
-    const reversal = await executePostJournalEntryInTransaction(
+    const primaryReversal = await executePostJournalEntryInTransaction(
       client,
       context,
       reversalInput,
       reversalJournal,
       reversalIdentities
     );
+    const mirroredReversal = await executeJournalBasisMirror(client, context, reversalInput, reversalJournal);
+    const reversal = mirroredReversal === undefined ? primaryReversal : combineJournalResults(primaryReversal, mirroredReversal);
+    if (original.documentType === "refund" && original.relatedInvoiceId !== undefined) {
+      await persistCashBasisApplicationProjection(client, context, {
+        action: "recognize",
+        applicationId: `refund:${original.documentId}`,
+        applicationType: "customer_refund_against_invoice",
+        appliedAmount: original.originalAmount,
+        effectiveDate: input.date,
+        targetTransactionId: await loadSubledgerDocumentTransactionId(client, context, original.relatedInvoiceId)
+      });
+    }
     const reversalLink = await appendJournalEntryLink(client, context, {
       originalTransactionId: original.transactionId,
       relatedTransactionId: reversal.transactionId,
@@ -3811,6 +4003,13 @@ for update`,
   if (!new Set(["open", "partially_applied", "settled", "voided"]).has(status)) {
     throw new Error(`Issued adjustment ${documentId} has invalid status ${status}`);
   }
+  const metadata = storedJson(row.metadata);
+  const refundProvenance = metadata !== null && typeof metadata === "object" && !Array.isArray(metadata)
+    ? (metadata as Readonly<Record<string, JsonValue>>).refundProvenance
+    : undefined;
+  const relatedInvoiceId = refundProvenance !== null && typeof refundProvenance === "object" && !Array.isArray(refundProvenance)
+    ? (refundProvenance as Readonly<Record<string, JsonValue>>).relatedInvoiceId
+    : undefined;
   return {
     documentId,
     documentType,
@@ -3821,6 +4020,7 @@ for update`,
     openAmount: storedMoney(row.open_amount, "open_amount"),
     status: status as LoadedIssuedAdjustment["status"],
     version: storedInteger(row.version, "version"),
+    ...(typeof relatedInvoiceId === "string" ? { relatedInvoiceId } : {}),
     journal
   };
 }
@@ -3944,6 +4144,7 @@ async function runJournalLifecycleWorkflow(
       memo: input.memo ?? `${outcome} ${original.transactionId}`,
       currencyCode: original.currencyCode,
       accountingBasis: original.accountingBasis,
+      accountingPolicy: original.accountingPolicy,
       adjustment: true,
       lines: original.lines
     };
@@ -3960,13 +4161,15 @@ async function runJournalLifecycleWorkflow(
       client,
       `journal-entry:${context.tenantId}:${context.sourceId}:${reversalJournal.idempotencyKey}`
     );
-    const reversal = await executePostJournalEntryInTransaction(
+    const primaryReversal = await executePostJournalEntryInTransaction(
       client,
       context,
       reversalInput,
       reversalJournal,
       reversalIdentities
     );
+    const mirroredReversal = await executeJournalBasisMirror(client, context, reversalInput, reversalJournal);
+    const reversal = mirroredReversal === undefined ? primaryReversal : combineJournalResults(primaryReversal, mirroredReversal);
     const reversalLink = await appendJournalEntryLink(client, context, {
       originalTransactionId: original.transactionId,
       relatedTransactionId: reversal.transactionId,
@@ -4006,13 +4209,17 @@ async function runJournalLifecycleWorkflow(
       client,
       `journal-entry:${context.tenantId}:${context.sourceId}:${replacementJournal.idempotencyKey}`
     );
-    const replacement = await executePostJournalEntryInTransaction(
+    const primaryReplacement = await executePostJournalEntryInTransaction(
       client,
       context,
       replacementInput,
       replacementJournal,
       replacementIdentities
     );
+    const mirroredReplacement = await executeJournalBasisMirror(client, context, replacementInput, replacementJournal);
+    const replacement = mirroredReplacement === undefined
+      ? primaryReplacement
+      : combineJournalResults(primaryReplacement, mirroredReplacement);
     const replacementLink = await appendJournalEntryLink(client, context, {
       originalTransactionId: original.transactionId,
       relatedTransactionId: replacement.transactionId,
@@ -4081,7 +4288,7 @@ async function loadPostedJournalForLifecycle(
   allowedSourceTypes: readonly string[] = ["JournalEntry", "JournalEntryAdjustment"]
 ): Promise<LoadedPostedJournal> {
   const result = await client.query(
-    `select transactions."transaction_id", transactions."source_transaction_type", transactions."status", transactions."memo",
+    `select transactions."transaction_id", transactions."source_transaction_type", transactions."status", transactions."memo", transactions."source_payload_ref",
   postings."posting_id", postings."account_id", postings."party_id", postings."item_id",
   postings."debit_amount", postings."credit_amount", postings."currency_code", postings."accounting_basis", postings."dimension_refs"
 from "erp_financials"."transactions" transactions
@@ -4144,6 +4351,7 @@ for update of transactions, postings`,
     ...(memo === undefined ? {} : { memo }),
     currencyCode,
     accountingBasis,
+    accountingPolicy: storedJournalAccountingPolicy(first.source_payload_ref),
     lines,
     ...(postedLifecycleEventId === undefined ? {} : { postedLifecycleEventId })
   };
@@ -4262,6 +4470,17 @@ function storedDimensionRefs(value: unknown): readonly DimensionRef[] {
     throw new Error("Stored journal field dimension_refs must contain valid dimension references");
   }
   return parsed;
+}
+
+function storedJournalAccountingPolicy(value: unknown): ManualJournalAccountingPolicy {
+  if (value === undefined || value === null) return "configured_basis_only";
+  const payload = typeof value === "string" ? parseJson(value) : value;
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return "configured_basis_only";
+  const preview = (payload as Record<string, unknown>).preview;
+  if (preview === null || typeof preview !== "object" || Array.isArray(preview)) return "configured_basis_only";
+  return (preview as Record<string, unknown>).accountingPolicy === "mirror_cash_and_accrual"
+    ? "mirror_cash_and_accrual"
+    : "configured_basis_only";
 }
 
 function isStoredDimensionRef(value: unknown): value is DimensionRef {
@@ -4398,6 +4617,9 @@ function assertAccountIdentitiesAreStable(existingAccounts: readonly Account[], 
 function normalizeJournalEntry(context: ServiceContext, input: InternalPostJournalEntryInput): NormalizedJournalEntry {
   assertNonEmpty(input.idempotencyKey, "idempotencyKey");
   assertIsoDate(input.date, "date");
+  if (input.accountingPolicy !== undefined && !["configured_basis_only", "mirror_cash_and_accrual"].includes(input.accountingPolicy)) {
+    throw new ErpFinancialsValidationError("accountingPolicy must be configured_basis_only or mirror_cash_and_accrual");
+  }
   if (input.lines.length < 2) {
     throw new ErpFinancialsValidationError("A journal entry requires at least two lines");
   }
@@ -4465,6 +4687,9 @@ function normalizeJournalEntry(context: ServiceContext, input: InternalPostJourn
     .update(
       stableJson({
         accountingBasis,
+        ...(input.accountingPolicy === "mirror_cash_and_accrual"
+          ? { accountingPolicy: input.accountingPolicy }
+          : {}),
         adjustment: input.adjustment === true,
         currencyCode,
         date: input.date,
@@ -4497,6 +4722,7 @@ function normalizeJournalEntry(context: ServiceContext, input: InternalPostJourn
     ...(input.postedAt === undefined ? {} : { postedAt: input.postedAt }),
     currencyCode,
     accountingBasis,
+    accountingPolicy: input.accountingPolicy ?? "configured_basis_only",
     lines,
     checksum,
     staleReason: input.staleReason ?? JOURNAL_ENTRY_POSTED_STALE_REASON,
@@ -4505,6 +4731,48 @@ function normalizeJournalEntry(context: ServiceContext, input: InternalPostJourn
     lifecycleAggregateType,
     lifecycleEventType,
     ...(input.nativePartyId === undefined ? {} : { partyId: input.nativePartyId })
+  };
+}
+
+function oppositeAccountingMethod(basis: "cash" | "accrual"): "cash" | "accrual" {
+  return basis === "cash" ? "accrual" : "cash";
+}
+
+async function executeJournalBasisMirror(
+  client: PostgresQueryClient,
+  context: ServiceContext,
+  input: PostJournalEntryInput,
+  journal: NormalizedJournalEntry
+): Promise<PostJournalEntryResult | undefined> {
+  if (journal.accountingPolicy !== "mirror_cash_and_accrual") return undefined;
+  if (journal.accountingBasis === "modified_cash") {
+    throw new ErpFinancialsValidationError("Manual journal mirroring requires cash or accrual accountingBasis");
+  }
+  const mirrorInput: PostJournalEntryInput = {
+    ...input,
+    idempotencyKey: `${input.idempotencyKey}:accounting-basis:${oppositeAccountingMethod(journal.accountingBasis)}`,
+    accountingBasis: oppositeAccountingMethod(journal.accountingBasis),
+    accountingPolicy: "configured_basis_only"
+  };
+  const mirror = normalizeJournalEntry(context, mirrorInput);
+  return executePostJournalEntryInTransaction(client, context, mirrorInput, mirror, journalIdentities(context, mirror));
+}
+
+function isDualBasisCashMovement(documentType: SubledgerDocumentType): boolean {
+  return ["customer_payment", "bill_payment", "refund", "deposit", "transfer", "sales_receipt", "purchase"].includes(documentType);
+}
+
+function combineJournalResults(primary: PostJournalEntryResult, mirror: PostJournalEntryResult): PostJournalEntryResult {
+  return {
+    ...primary,
+    status: primary.status === "already_posted" && mirror.status === "already_posted" ? "already_posted" : "posted",
+    snapshotsMarkedStale: primary.snapshotsMarkedStale + mirror.snapshotsMarkedStale,
+    writeCounts: {
+      importBatches: primary.writeCounts.importBatches + mirror.writeCounts.importBatches,
+      transactions: primary.writeCounts.transactions + mirror.writeCounts.transactions,
+      transactionLines: primary.writeCounts.transactionLines + mirror.writeCounts.transactionLines,
+      postings: primary.writeCounts.postings + mirror.writeCounts.postings
+    }
   };
 }
 
@@ -4558,8 +4826,9 @@ function journalFacts(
     sourceObjectId: journal.idempotencyKey,
     sourceUpdatedAt: postedAt,
     checksum: journal.checksum,
-    preview: {
-      accountingBasis: journal.accountingBasis,
+      preview: {
+        accountingBasis: journal.accountingBasis,
+        accountingPolicy: journal.accountingPolicy,
       currencyCode: journal.currencyCode,
       lineCount: journal.lines.length,
       transactionDate: journal.date

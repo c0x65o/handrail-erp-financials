@@ -36,6 +36,7 @@ export {
   renderPostgresSchemaSql
 } from "./schema-manifest.js";
 export {
+  createPostgresQuickBooksDualBasisBackfillPersistence,
   createPostgresStorageAdapter,
   installPostgresSchema,
   validatePostgresSchema
@@ -367,6 +368,7 @@ export type {
   GeneralLedgerFilters,
   GeneralLedgerLine,
   GeneralLedgerPolarity,
+  ReportAccountingMethod,
   GeneralLedgerSourceProvenance,
   GeneralLedgerSummary,
   InvoiceDetail,
@@ -590,6 +592,7 @@ export type {
   MarkReportSnapshotsStaleForPostingChangesInput,
   PostgresQueryClient,
   PostgresQueryResult,
+  PostgresTransactionRunner,
   PostgresSchemaValidationIssue,
   PostgresSchemaValidationIssueKind,
   PostgresSchemaValidationResult,
@@ -1121,3 +1124,5 @@ export type {
   NormalizedQuickBooksProviderReportReconciliationEvidenceInput,
   HandrailQuickBooksSyncClientTransport
 } from "./quickbooks-sync-service.js";
+export * from "./accounting-basis-projection.js";
+export * from "./quickbooks-dual-basis-backfill.js";

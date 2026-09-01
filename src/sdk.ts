@@ -1,4 +1,26 @@
 import { createBankReconciliationService } from "./bank-reconciliation.js";
+export { projectCashBasisApplication } from "./accounting-basis-projection.js";
+export { createHandrailQuickBooksBackfillProvider, createQuickBooksDualBasisBackfillWorker, materializeQuickBooksBasisBackfill } from "./quickbooks-dual-basis-backfill.js";
+export { createPostgresQuickBooksDualBasisBackfillPersistence } from "./postgres-storage.js";
+export type {
+  HandrailQuickBooksProviderReportsClient,
+  QuickBooksBackfillLedgerRow,
+  QuickBooksBackfillReportRequest,
+  QuickBooksBackfillReportResponse,
+  QuickBooksBasisBackfillProjection,
+  QuickBooksDualBasisBackfillInput,
+  QuickBooksDualBasisBackfillPersistence,
+  QuickBooksDualBasisBackfillProvider,
+  QuickBooksDualBasisBackfillResult
+} from "./quickbooks-dual-basis-backfill.js";
+export type {
+  CashBasisApplicationProjectionInput,
+  CashBasisApplicationType,
+  CashBasisProjectionAction,
+  ManualJournalAccountingPolicy,
+  StandardAccountingMethod
+} from "./accounting-basis-projection.js";
+export type { PostgresTransactionRunner } from "./postgres-storage.js";
 import { createErpFinancials } from "./erp-financials-service.js";
 import { createFinancialOutboxService } from "./financial-outbox.js";
 import { createFinancialRuntime } from "./financial-runtime.js";
@@ -216,6 +238,7 @@ export type {
   GeneralLedgerFilters,
   GeneralLedgerLine,
   GeneralLedgerPolarity,
+  ReportAccountingMethod,
   GeneralLedgerSourceProvenance,
   GeneralLedgerSummary,
   InvoiceDetail,

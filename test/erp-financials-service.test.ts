@@ -465,6 +465,35 @@ describe("reusable ERP Financials service", () => {
     expect(database.transactionCalls).toBe(0);
   });
 
+  it("mirrors a manual journal only when the caller explicitly selects the dual-basis policy", async () => {
+    const database = new ServiceTestDatabase([
+      accountRow("acct_service_revenue", true),
+      accountRow("acct_receivable", true)
+    ]);
+    const financials = service(database);
+    const posted = await financials.journalEntries.post({
+      operation: operation("request-dual-basis-journal"),
+      idempotencyKey: "dual-basis-journal",
+      date: "2026-08-12",
+      accountingBasis: "accrual",
+      accountingPolicy: "mirror_cash_and_accrual",
+      lines: [
+        { accountId: "acct_receivable", debit: "10.00" },
+        { accountId: "acct_service_revenue", credit: "10.00" }
+      ]
+    });
+    expect(database.client.storedPostings.map((posting) => posting.accounting_basis).sort()).toEqual([
+      "accrual", "accrual", "cash", "cash"
+    ]);
+    await financials.journalEntries.reverse({
+      operation: approvedOperation("request-dual-basis-journal-reverse"),
+      originalTransactionId: posted.transactionId,
+      idempotencyKey: "dual-basis-journal-reverse",
+      date: "2026-08-13"
+    });
+    expect(database.client.storedPostings.filter((posting) => posting.accounting_basis === "cash")).toHaveLength(4);
+  });
+
   it("atomically creates invoices and payments, applies once, and restores both balances on unapply", async () => {
     const database = subledgerDatabase();
     const financials = service(database);
@@ -533,6 +562,9 @@ describe("reusable ERP Financials service", () => {
     });
 
     expect(applied).toMatchObject({ status: "applied", appliedAmount: "60.00", version: 1 });
+    expect(database.client.storedPostings.filter((posting) =>
+      String(posting.source_posting_id).startsWith(`cash-application:${applied.applicationId}:recognize:`)
+    )).toHaveLength(3);
     expect(retry).toEqual({ ...applied, status: "already_applied" });
     await expect(
       financials.paymentApplications.apply({
@@ -564,6 +596,9 @@ describe("reusable ERP Financials service", () => {
       effectiveDate: "2026-08-06",
       expectedVersion: 1
     });
+    expect(database.client.storedPostings.filter((posting) =>
+      String(posting.source_posting_id).startsWith(`cash-application:${applied.applicationId}:reverse:`)
+    )).toHaveLength(3);
     const unapplyRetry = await financials.paymentApplications.unapply({
       operation: approvedOperation("request-unapply-retry"),
       applicationId: applied.applicationId,
@@ -742,6 +777,9 @@ describe("reusable ERP Financials service", () => {
       "subledger_document.write_off.posted",
       "subledger_application.applied"
     ]));
+    expect(database.client.storedPostings.some((posting) =>
+      String(posting.source_posting_id).startsWith(`cash-application:${settled.application.applicationId}:`)
+    )).toBe(false);
   });
 
   it("rolls back a write-off settlement when invoice scope, balance, or version validation fails", async () => {
@@ -1219,6 +1257,14 @@ describe("reusable ERP Financials service", () => {
         version: 2
       })
     ]);
+    const cashApplicationPostings = database.client.storedPostings.filter((posting) =>
+      String(posting.source_posting_id).startsWith("cash-application:") &&
+      String(posting.source_posting_id).includes(":recognize:")
+    );
+    expect(cashApplicationPostings).toHaveLength(4);
+    expect(cashApplicationPostings.filter((posting) => posting.account_id === "acct_expense").map(
+      (posting) => posting.debit_amount
+    ).sort()).toEqual(["12.00", "8.00"]);
     await expect(financials.billPayments.recordAndApply(command)).resolves.toMatchObject({
       status: "already_cleared",
       billPaymentId: result.billPaymentId
@@ -1456,6 +1502,32 @@ describe("reusable ERP Financials service", () => {
     expect(database.client.journalLinks.map((link) => link.link_type)).toEqual(["reversal", "replacement"]);
   });
 
+  it("reverses recognized cash revenue for an invoice-linked refund and restores it on void", async () => {
+    const database = subledgerDatabase();
+    const financials = service(database);
+    const invoice = await financials.invoices.create({
+      operation: operation("request-refund-invoice"), idempotencyKey: "refund-invoice", date: "2026-08-01", dueDate: "2026-08-31",
+      customerId: "customer_acme", receivableAccount: { accountId: "acct_receivable" },
+      revenueLines: [{ accountId: "acct_service_revenue", amount: "100.00" }]
+    });
+    const refund = await financials.refunds.issue({
+      operation: operation("request-related-refund"), idempotencyKey: "related-refund", date: "2026-08-10",
+      customerId: "customer_acme", amount: "20.00", receivableAccount: { accountId: "acct_receivable" },
+      cashAccount: { accountId: "acct_cash" }, relatedInvoiceId: invoice.documentId
+    });
+    expect(database.client.storedPostings.filter((posting) =>
+      String(posting.source_posting_id).startsWith(`cash-application:refund:${refund.documentId}:reverse:`)
+    )).toHaveLength(2);
+
+    await financials.refunds.voidIssued({
+      operation: approvedOperation("request-related-refund-void"), adjustmentDocumentId: refund.documentId,
+      expectedVersion: 1, idempotencyKey: "related-refund-void", date: "2026-08-11"
+    });
+    expect(database.client.storedPostings.filter((posting) =>
+      String(posting.source_posting_id).startsWith(`cash-application:refund:${refund.documentId}:recognize:`)
+    )).toHaveLength(2);
+  });
+
   it("voids a posted write-off through an approved compensating lifecycle", async () => {
     const database = subledgerDatabase();
     const financials = service(database);
@@ -1513,7 +1585,7 @@ describe("reusable ERP Financials service", () => {
       revenueAccount: { accountId: "acct_service_revenue" },
       receivableAccount: { accountId: "acct_receivable" }
     });
-    await financials.paymentApplications.apply({
+    const application = await financials.paymentApplications.apply({
       operation: operation("request-apply-credit-before-void"),
       idempotencyKey: "apply-credit-before-void",
       applicationType: "credit_to_invoice",
@@ -1524,6 +1596,9 @@ describe("reusable ERP Financials service", () => {
       expectedSourceVersion: 1,
       expectedTargetVersion: 1
     });
+    expect(database.client.storedPostings.some((posting) =>
+      String(posting.source_posting_id).startsWith(`cash-application:${application.applicationId}:`)
+    )).toBe(false);
 
     await expect(financials.credits.voidIssued({
       operation: approvedOperation("request-void-applied-credit"),
@@ -2029,7 +2104,14 @@ class ServiceTestClient implements PostgresQueryClient {
           ? []
           : this.storedPostings
               .filter((posting) => posting.transaction_id === transaction.transaction_id)
-              .map((posting) => ({ ...transaction, ...posting }));
+              .map((posting) => ({ ...transaction, ...posting, source_payload_ref: transaction.source_payload_ref }));
+      return Promise.resolve({ rows: rows as unknown as readonly Row[] });
+    }
+
+    if (sql.includes('from "erp_financials"."ledger_postings"')) {
+      const rows = this.storedPostings.filter(
+        (posting) => posting.transaction_id === params[2] && posting.accounting_basis === "accrual"
+      );
       return Promise.resolve({ rows: rows as unknown as readonly Row[] });
     }
 
