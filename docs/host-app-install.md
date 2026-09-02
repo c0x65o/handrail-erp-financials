@@ -90,14 +90,14 @@ local file link to this checkout and build the package declarations before
 running the host app typecheck:
 
 ```sh
-# from /opt/handrail/repos/handrail/erp-financials/handrail-erp-financials
+# from /opt/handrail/repos/handrail/erp-financials/handrail-sdk-erp-financials-js
 npm install
 npm run build
 npm run typecheck:future-erp-imports
 
 # from /opt/handrail/repos/hitcents/hitcents-future-erp/hitcents-erp-future
-npm install @handrail/erp-financials@file:/opt/handrail/repos/handrail/erp-financials/handrail-erp-financials
-npm install @handrail/quickbooks-node-sdk@file:/opt/handrail/repos/handrail/handrail-quickbooks-integrations/handrail-integration-quickbooks-node-sdk
+npm install @handrail/erp-financials@file:/opt/handrail/repos/handrail/erp-financials/handrail-sdk-erp-financials-js
+npm install @handrail/quickbooks-node-sdk@file:/opt/handrail/repos/handrail/handrail-quickbooks-integrations/handrail-sdk-quickbooks-node
 npm run typecheck
 ```
 
@@ -107,8 +107,8 @@ preserve that convention and wire the same two dependencies in package metadata:
 ```json
 {
   "dependencies": {
-    "@handrail/erp-financials": "file:/opt/handrail/repos/handrail/erp-financials/handrail-erp-financials",
-    "@handrail/quickbooks-node-sdk": "file:/opt/handrail/repos/handrail/handrail-quickbooks-integrations/handrail-integration-quickbooks-node-sdk"
+    "@handrail/erp-financials": "file:/opt/handrail/repos/handrail/erp-financials/handrail-sdk-erp-financials-js",
+    "@handrail/quickbooks-node-sdk": "file:/opt/handrail/repos/handrail/handrail-quickbooks-integrations/handrail-sdk-quickbooks-node"
   }
 }
 ```

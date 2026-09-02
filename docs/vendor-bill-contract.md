@@ -39,7 +39,7 @@ This repository publishes durable package releases as Git tags. Install the
 tagged release directly from the canonical repository:
 
 ```bash
-npm install --save 'git+https://github.com/c0x65o/handrail-erp-financials.git#v0.3.1'
+npm install --save 'git+https://github.com/c0x65o/handrail-sdk-erp-financials-js.git#v0.3.1'
 npm ls @handrail/erp-financials
 npx tsc --noEmit
 ```
@@ -47,7 +47,7 @@ npx tsc --noEmit
 For a local pre-release recheck against this workspace:
 
 ```bash
-npm install --save-exact /opt/handrail/repos/handrail/erp-financials/handrail-erp-financials
+npm install --save-exact /opt/handrail/repos/handrail/erp-financials/handrail-sdk-erp-financials-js
 npm ls @handrail/erp-financials
 npx tsc --noEmit
 ```

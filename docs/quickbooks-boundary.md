@@ -9,7 +9,7 @@ The current QuickBooks work is split across:
 
 - `handrail-quickbooks-integrations`: integration service and QuickBooks Node SDK.
 - `hitcents-future-erp`: first ERP consumer and proving ground.
-- `handrail-erp-financials`: reusable financial reporting kernel.
+- `handrail-sdk-erp-financials-js`: reusable financial reporting kernel.
 
 ## QuickBooks Integration Owns
 

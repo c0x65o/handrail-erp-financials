@@ -1,4 +1,4 @@
-# handrail-erp-financials
+# handrail-sdk-erp-financials-js
 
 Provider-neutral TypeScript foundation for reusable ERP accounting and financial reporting.
 This package is intended to give host ERP apps a shared kernel for canonical

@@ -56,7 +56,7 @@ export type QuickBooksDualBasisBackfillProvider = {
   generalLedgerReport(request: QuickBooksBackfillReportRequest): Promise<QuickBooksBackfillReportResponse>;
 };
 
-/** Structural subset of handrail-integration-quickbooks-node-sdk; no runtime dependency is required. */
+/** Structural subset of handrail-sdk-quickbooks-node; no runtime dependency is required. */
 export type HandrailQuickBooksProviderReportsClient = {
   readonly providerReports: {
     generalLedger(request: {

@@ -96,7 +96,7 @@ unbalanced canonical journal evidence remains a blocking projection failure.
 
 The provider implementation must supply detailed `ledgerRows` from the
 `general_ledger` report response already exposed by
-`handrail-integration-quickbooks`; the host only adapts that response to
+`handrail-service-quickbooks`; the host only adapts that response to
 `QuickBooksBackfillReportResponse`. It must not pass OAuth credentials or raw
 report bodies into this package.
 

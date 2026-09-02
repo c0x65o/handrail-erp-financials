@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`handrail-erp-financials` should provide the reusable financial core for ERP
+`handrail-sdk-erp-financials-js` should provide the reusable financial core for ERP
 apps that either import data from an accounting provider or start fresh with
 native ERP data.
 

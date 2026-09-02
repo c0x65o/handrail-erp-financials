@@ -4,7 +4,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const APPROVED_COMMIT = "be77c72d01331e8e0371a532d4569996286d1306";
-const INSTALL_SPEC = "git+https://github.com/c0x65o/handrail-erp-financials.git#v0.3.32";
+const LEGACY_RELEASE_INSTALL_SPEC = "git+https://github.com/c0x65o/handrail-erp-financials.git#v0.3.32";
+const CURRENT_INSTALL_SPEC = "git+https://github.com/c0x65o/handrail-sdk-erp-financials-js.git#v0.3.32";
 
 describe("approved v0.3.32 release publication", () => {
   it("binds the immutable tag and BLU install spec to the approved commit", () => {
@@ -18,7 +19,7 @@ describe("approved v0.3.32 release publication", () => {
       version: "0.3.32",
       tag: "v0.3.32",
       commit: APPROVED_COMMIT,
-      installSpec: INSTALL_SPEC,
+      installSpec: LEGACY_RELEASE_INSTALL_SPEC,
       publicExports: [".", "./sdk"]
     });
     expect(tagCommit).toBe(APPROVED_COMMIT);
@@ -49,7 +50,7 @@ describe("approved v0.3.32 release publication", () => {
       "utf8"
     );
 
-    expect(releaseGuide).toContain(INSTALL_SPEC);
+    expect(releaseGuide).toContain(CURRENT_INSTALL_SPEC);
     expect(releaseGuide).toContain(APPROVED_COMMIT);
     expect(releaseGuide).toContain("never force-pushes or replaces a tag");
     expect(releaseGuide).toContain("Do not replace this dependency with a copied package");

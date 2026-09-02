@@ -16,7 +16,7 @@ ledger write orchestration, use
 Expected local repo paths:
 
 ```text
-/opt/handrail/repos/handrail/erp-financials/handrail-erp-financials
+/opt/handrail/repos/handrail/erp-financials/handrail-sdk-erp-financials-js
 /opt/handrail/repos/handrail/handrail-quickbooks-integrations
 /opt/handrail/repos/hitcents/hitcents-future-erp/hitcents-erp-future
 ```
@@ -33,7 +33,7 @@ tag-based ERP Financials release:
 ```json
 {
   "dependencies": {
-    "@handrail/erp-financials": "git+https://github.com/c0x65o/handrail-erp-financials.git#v0.1.11"
+    "@handrail/erp-financials": "git+https://github.com/c0x65o/handrail-sdk-erp-financials-js.git#v0.1.11"
   }
 }
 ```
@@ -55,7 +55,7 @@ Build ERP Financials first so the local file dependency exposes `dist` and type
 declarations:
 
 ```sh
-cd /opt/handrail/repos/handrail/erp-financials/handrail-erp-financials
+cd /opt/handrail/repos/handrail/erp-financials/handrail-sdk-erp-financials-js
 npm install
 npm run build
 npm run typecheck:future-erp-imports
@@ -66,7 +66,7 @@ known local npm setup is:
 
 ```sh
 cd /opt/handrail/repos/hitcents/hitcents-future-erp/hitcents-erp-future
-npm install @handrail/erp-financials@file:/opt/handrail/repos/handrail/erp-financials/handrail-erp-financials
+npm install @handrail/erp-financials@file:/opt/handrail/repos/handrail/erp-financials/handrail-sdk-erp-financials-js
 npm install @handrail/quickbooks-node-sdk
 npm install @handrail/sdk-node
 ```
@@ -81,7 +81,7 @@ cd /opt/handrail/repos/handrail/handrail-quickbooks-integrations
 rg '"name": "@handrail/quickbooks-node-sdk"' -n -g package.json
 
 cd /opt/handrail/repos/hitcents/hitcents-future-erp/hitcents-erp-future
-npm install @handrail/quickbooks-node-sdk@file:/opt/handrail/repos/handrail/handrail-quickbooks-integrations/handrail-integration-quickbooks-node-sdk
+npm install @handrail/quickbooks-node-sdk@file:/opt/handrail/repos/handrail/handrail-quickbooks-integrations/handrail-sdk-quickbooks-node
 ```
 
 For a workspace-based Future ERP install, keep the same dependencies in package
@@ -90,7 +90,7 @@ metadata but use the workspace's preferred spec:
 ```json
 {
   "dependencies": {
-    "@handrail/erp-financials": "file:/opt/handrail/repos/handrail/erp-financials/handrail-erp-financials",
+    "@handrail/erp-financials": "file:/opt/handrail/repos/handrail/erp-financials/handrail-sdk-erp-financials-js",
     "@handrail/quickbooks-node-sdk": "<existing registry, workspace, or file-link spec>",
     "@handrail/sdk-node": "<existing registry, workspace, or file-link spec>"
   }
@@ -106,7 +106,7 @@ the equivalent package exported by `handrail-quickbooks-integrations`.
 Run package-side deterministic checks before switching Future ERP imports:
 
 ```sh
-cd /opt/handrail/repos/handrail/erp-financials/handrail-erp-financials
+cd /opt/handrail/repos/handrail/erp-financials/handrail-sdk-erp-financials-js
 npm run typecheck:future-erp-imports
 npm run contract:smoke
 npx vitest run test/future-erp-canonical-import-smoke.test.ts

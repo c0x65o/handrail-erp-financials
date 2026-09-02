@@ -49,7 +49,7 @@ single operational question.
 
 ## Phase Validation Evidence: 2026-06-20
 
-Validation run from the `handrail-erp-financials` repository root in the
+Validation run from the `handrail-sdk-erp-financials-js` repository root in the
 queued Codex worker. No production deploy, Handrail platform capability
 creation, scheduler registration, runtime configuration change, environment
 variable change, secret change, or CI/CD run was performed.
@@ -64,7 +64,7 @@ variable change, secret change, or CI/CD run was performed.
 | `npm run typecheck:future-erp-imports` | Passed | TypeScript consumer import contract completed with `tsc --noEmit -p tsconfig.future-erp-consumer.json`. |
 
 Linked-repo validation was skipped because the queued worker mounted only the
-primary `handrail-erp-financials` checkout under `/opt/handrail/repos`; the
+primary `handrail-sdk-erp-financials-js` checkout under `/opt/handrail/repos`; the
 `handrail-quickbooks-integrations` and `hitcents-future-erp` repositories were
 not available as local runtime/package workspaces. The package-owned QuickBooks
 contract smoke and Future ERP scheduler/health fixtures above were run instead.

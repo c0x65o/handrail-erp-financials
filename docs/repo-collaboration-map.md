@@ -26,8 +26,8 @@ Path:
 Primary packages:
 
 ```text
-handrail-integration-quickbooks
-handrail-integration-quickbooks-node-sdk
+handrail-service-quickbooks
+handrail-sdk-quickbooks-node
 ```
 
 Owns:
@@ -82,12 +82,12 @@ Current sandbox support:
   Invoice, Bill, Payment, Deposit, and JournalEntry fixture data through the
   same raw import, checkpoint, and normalized resource stores used by live sync.
 
-### handrail-erp-financials
+### handrail-sdk-erp-financials-js
 
 Path:
 
 ```text
-/opt/handrail/repos/handrail/erp-financials/handrail-erp-financials
+/opt/handrail/repos/handrail/erp-financials/handrail-sdk-erp-financials-js
 ```
 
 Package:

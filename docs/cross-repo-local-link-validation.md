@@ -15,7 +15,7 @@ Use this with [repo-collaboration-map.md](repo-collaboration-map.md),
 Expected local checkouts:
 
 ```sh
-ERP=/opt/handrail/repos/handrail/erp-financials/handrail-erp-financials
+ERP=/opt/handrail/repos/handrail/erp-financials/handrail-sdk-erp-financials-js
 QBO=/opt/handrail/repos/handrail/handrail-quickbooks-integrations
 FUTURE=/opt/handrail/repos/hitcents/hitcents-future-erp/hitcents-erp-future
 ```
@@ -45,7 +45,7 @@ provider credentials, hidden platform state, production data, or CI/CD.
 
 | Repo | Expected path | Evidence command | 2026-06-20 result |
 | --- | --- | --- | --- |
-| ERP Financials | `/opt/handrail/repos/handrail/erp-financials/handrail-erp-financials` | `test -d "$ERP"` | Mounted. This is the only repo validated directly in this worker filesystem. |
+| ERP Financials | `/opt/handrail/repos/handrail/erp-financials/handrail-sdk-erp-financials-js` | `test -d "$ERP"` | Mounted. This is the only repo validated directly in this worker filesystem. |
 | Handrail QuickBooks Integrations | `/opt/handrail/repos/handrail/handrail-quickbooks-integrations` | `test -d "$QBO"` and `find /opt/handrail/repos -maxdepth 5 -type d -iname '*quickbooks*'` | Missing. SDK/service repo install, build, and tests were not executed. |
 | Hitcents Future ERP | `/opt/handrail/repos/hitcents/hitcents-future-erp/hitcents-erp-future` | `test -d "$FUTURE"` and `find /opt/handrail/repos -maxdepth 5 -type d -iname '*future*'` | Missing. Host-app `npm run typecheck` / `npm run test:quickbooks` were not executed. |
 
@@ -152,7 +152,7 @@ npm run test
 The expected local QuickBooks SDK package path is:
 
 ```sh
-$QBO/handrail-integration-quickbooks-node-sdk
+$QBO/handrail-sdk-quickbooks-node
 ```
 
 Confirm the SDK package name before linking:
@@ -167,14 +167,14 @@ Future ERP's existing package manager. The current known npm path is:
 
 ```sh
 cd "$FUTURE"
-npm install @handrail/erp-financials@file:/opt/handrail/repos/handrail/erp-financials/handrail-erp-financials
+npm install @handrail/erp-financials@file:/opt/handrail/repos/handrail/erp-financials/handrail-sdk-erp-financials-js
 ```
 
 When the QuickBooks integration repo is mounted, link the local SDK package:
 
 ```sh
 cd "$FUTURE"
-npm install @handrail/quickbooks-node-sdk@file:/opt/handrail/repos/handrail/handrail-quickbooks-integrations/handrail-integration-quickbooks-node-sdk
+npm install @handrail/quickbooks-node-sdk@file:/opt/handrail/repos/handrail/handrail-quickbooks-integrations/handrail-sdk-quickbooks-node
 ```
 
 When the QuickBooks integration repo is not mounted but registry access is
@@ -200,8 +200,8 @@ package metadata while using the host repo's existing workspace/file spec:
 ```json
 {
   "dependencies": {
-    "@handrail/erp-financials": "file:/opt/handrail/repos/handrail/erp-financials/handrail-erp-financials",
-    "@handrail/quickbooks-node-sdk": "file:/opt/handrail/repos/handrail/handrail-quickbooks-integrations/handrail-integration-quickbooks-node-sdk",
+    "@handrail/erp-financials": "file:/opt/handrail/repos/handrail/erp-financials/handrail-sdk-erp-financials-js",
+    "@handrail/quickbooks-node-sdk": "file:/opt/handrail/repos/handrail/handrail-quickbooks-integrations/handrail-sdk-quickbooks-node",
     "@handrail/sdk-node": "<existing registry, workspace, or file-link spec>"
   }
 }

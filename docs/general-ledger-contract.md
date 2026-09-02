@@ -82,7 +82,7 @@ the post-agent release flow. Once that flow publishes a tag newer than the
 currently released package, update Spartan Cyber ERP v2 from its repository:
 
 ```sh
-npm install --save 'git+https://github.com/c0x65o/handrail-erp-financials.git#<published-release-tag>'
+npm install --save 'git+https://github.com/c0x65o/handrail-sdk-erp-financials-js.git#<published-release-tag>'
 npm ls @handrail/erp-financials
 ```
 

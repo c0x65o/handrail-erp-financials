@@ -24,7 +24,7 @@ import type {
  * report and canonical ledger postings.
  *
  * The provider side comes from the QuickBooks Reports API (TrialBalance),
- * exposed by handrail-integration-quickbooks as signed per-account net
+ * exposed by handrail-service-quickbooks as signed per-account net
  * amounts (debits positive, credits negative). The canonical side is derived
  * from `ledger_postings` with QuickBooks trial-balance semantics:
  * balance-sheet accounts accumulate through `periodEnd`, income-statement
@@ -148,7 +148,7 @@ export function buildQuickBooksTrialBalanceAccountParity(
   }
   if (input.providerReport.accountTotals === undefined) {
     throw new Error(
-      "QuickBooks trial balance account parity requires provider accountTotals; upgrade handrail-integration-quickbooks to a version that emits account-level trial balance rows"
+      "QuickBooks trial balance account parity requires provider accountTotals; upgrade handrail-service-quickbooks to a version that emits account-level trial balance rows"
     );
   }
 

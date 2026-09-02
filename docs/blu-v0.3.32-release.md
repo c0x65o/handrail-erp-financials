@@ -5,7 +5,7 @@ BLU must pin the approved ERP Financials Git release exactly:
 ```json
 {
   "dependencies": {
-    "@handrail/erp-financials": "git+https://github.com/c0x65o/handrail-erp-financials.git#v0.3.32"
+    "@handrail/erp-financials": "git+https://github.com/c0x65o/handrail-sdk-erp-financials-js.git#v0.3.32"
   }
 }
 ```
