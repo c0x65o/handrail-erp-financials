@@ -316,9 +316,7 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3
     const rejectionReasons = quickBooksDocumentProjectionRejectionReasons(
       documentType,
       normalized,
-      originalAmount,
-      accountIdBySourceId,
-      itemBySourceId
+      originalAmount
     );
     if (rejectionReasons.length > 0) {
       recordProjectionDiagnostic({
@@ -503,12 +501,17 @@ where "tenant_id" = $1 and "company_id" = $2 and "source_id" = $3 and "subledger
       const accountId = line.accountRef === undefined
         ? documentLineItemAccount(documentType, item)
         : accountIdBySourceId.get(line.accountRef.sourceObjectId);
-      if (amount === undefined || accountId === undefined) {
-        if (amount !== undefined) {
-          throw new Error(
-            `QuickBooks ${normalized.sourceTransactionType} ${normalized.sourceTransactionId} line ${line.sourceLineId ?? String(line.lineNumber)} has an amount but no canonical account`
-          );
-        }
+      if (amount === undefined) {
+        continue;
+      }
+      if (accountId === undefined) {
+        // The canonical transaction above is already backed by QuickBooks'
+        // balanced General Ledger. Some valid provider documents omit the
+        // commercial line AccountRef (and have no item account fallback).
+        // Preserve the authoritative journal and document header without
+        // inventing a line account; the bounded skipped-line count keeps this
+        // loss of subledger detail visible to hosts.
+        skippedDocumentLines += 1;
         continue;
       }
       const commercialAmounts = commercialLineAmounts(amount, line.sourceQuantity, line.sourceUnitAmount);
@@ -1306,23 +1309,9 @@ function zeroAmount(value: string | undefined): boolean {
 function quickBooksDocumentProjectionRejectionReasons(
   documentType: ImportedDocumentType,
   normalized: NormalizedQuickBooksLedgerTransaction,
-  originalAmount: string,
-  accountIdBySourceId: ReadonlyMap<string, string>,
-  itemBySourceId: ReadonlyMap<string, CanonicalAccountingFactSet["items"][number]>
+  originalAmount: string
 ): string[] {
   const rejectionReasons = new Set<string>();
-  if (importsCommercialDocumentLines(documentType)) {
-    for (const line of normalized.lines) {
-      if (isQuickBooksProviderOnlyNonPostingLine(line.detailType)) continue;
-      const amount = positiveAmount(line.sourceAmount);
-      if (amount === undefined) continue;
-      const item = line.itemRef === undefined ? undefined : itemBySourceId.get(line.itemRef.sourceObjectId);
-      const accountId = line.accountRef === undefined
-        ? documentLineItemAccount(documentType, item)
-        : accountIdBySourceId.get(line.accountRef.sourceObjectId);
-      if (accountId === undefined) rejectionReasons.add("missing_canonical_line_account");
-    }
-  }
   if (
     importedApplicationType(normalized.sourceTransactionType) !== undefined &&
     normalized.lines.some((line) => (line.linkedTransactions?.length ?? 0) > 1)

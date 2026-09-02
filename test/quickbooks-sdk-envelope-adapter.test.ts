@@ -1575,7 +1575,7 @@ describe("QuickBooks SDK envelope adapter", () => {
     expect(calls.some((sql) => sql.includes('delete from "erp_financials"."subledger_document_lines"'))).toBe(true);
   });
 
-  it("still fails closed when a posting bill line has no canonical account", async () => {
+  it("retains a balanced QuickBooks journal and header when a commercial line omits its account", async () => {
     const envelope = fullSyncEnvelope();
     const resources = envelope.normalizedResources;
     const adapted = adaptHandrailQuickBooksSdkFullSyncEnvelope({
@@ -1609,20 +1609,27 @@ describe("QuickBooks SDK envelope adapter", () => {
       currencyCode: "USD"
     });
 
-    await expect(persistQuickBooksSubledgerResources({
-      client: { query: () => Promise.resolve({ rows: [], rowCount: 1 }) },
+    const lineInserts: readonly unknown[][] = [];
+    const result = await persistQuickBooksSubledgerResources({
+      client: {
+        query(sql, params = []) {
+          if (sql.includes('insert into "erp_financials"."subledger_document_lines"')) {
+            (lineInserts as unknown[][]).push([...params]);
+          }
+          return Promise.resolve({ rows: [], rowCount: 1 });
+        }
+      },
       companyId: "company_spartan",
       importedAt: "2026-08-13T12:46:00.000Z",
       facts: mapped.facts,
       resources: adapted.resources
-    })).rejects.toMatchObject({
-      code: "quickbooks_subledger_projection_invalid",
-      diagnostic: {
-        sourceTransactionType: "Bill",
-        sourceTransactionId: "payment_700",
-        rejectionReasons: ["missing_canonical_line_account"]
-      }
     });
+
+    expect(mapped.facts.postings).toHaveLength(2);
+    expect(result.documents).toBe(1);
+    expect(result.documentLines).toBe(0);
+    expect(result.skippedDocumentLines).toBe(1);
+    expect(lineInserts).toHaveLength(0);
   });
 
   it("fails closed when SDK resource identity differs from the envelope", () => {

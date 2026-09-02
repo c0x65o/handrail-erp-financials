@@ -87,6 +87,13 @@ canonical ledger truth. An unavailable account mapping, out-of-range row,
 currency mismatch, unbalanced transaction, oversized response, or failure of
 either basis aborts the complete replacement.
 
+For the normalized operational-document import, a balanced provider General
+Ledger remains authoritative when QuickBooks omits a commercial line
+`AccountRef` and no item-account fallback exists. The SDK retains that journal
+and the document header, omits only the unaccounted commercial line, and reports
+it through `skippedDocumentLines`; it never invents an account. Missing or
+unbalanced canonical journal evidence remains a blocking projection failure.
+
 The provider implementation must supply detailed `ledgerRows` from the
 `general_ledger` report response already exposed by
 `handrail-integration-quickbooks`; the host only adapts that response to
